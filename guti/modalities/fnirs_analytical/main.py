@@ -7,7 +7,7 @@ try:
 except:
     pass
 
-from guti.core import get_grid_positions, get_sensor_positions_spiral
+from guti.core import get_grid_positions, get_sensor_positions
 
 import numpy as np
 import torch
@@ -21,7 +21,7 @@ grid_spacing_mm = 5.0
 noptodes = 800
 
 grid_points_mm = get_grid_positions(grid_spacing_mm)
-sensor_positions_mm = get_sensor_positions_spiral(noptodes)
+sensor_positions_mm = get_sensor_positions(noptodes)
 mu_a = 0.02  # cm^-1
 mu_s_prime = 6.7  # cm^-1
 mu_eff = np.sqrt(3 * mu_a * (mu_s_prime + mu_a))

@@ -1,10 +1,9 @@
 import numpy as np
 import os
-import hashlib
-import json
-from dataclasses import dataclass, asdict
-from typing import Optional, Union, Tuple, Dict, List
+from dataclasses import asdict
+from typing import Optional, Tuple, Dict
 from numpy.typing import NDArray
+from guti.parameters import Parameters
 
 # Get the absolute path to the results directory at the root level
 RESULTS_DIR = os.path.join(
@@ -14,59 +13,6 @@ VARIANTS_DIR = os.path.join(RESULTS_DIR, "variants")
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(VARIANTS_DIR, exist_ok=True)
 
-
-@dataclass
-class Parameters:
-    """
-    Parameters structure for SVD analysis.
-
-    Attributes
-    ----------
-    num_sensors : int, optional
-        Number of sensors used in the measurement
-    grid_resolution : float, optional
-        Resolution of the computational grid
-    num_brain_grid_points : int, optional
-        Number of grid points in the brain model
-    time_resolution : float, optional
-        Temporal resolution of the measurement
-    comment : str, optional
-        Additional comment or description
-    """
-
-    num_sensors: Optional[int] = None
-    grid_resolution_mm: Optional[float] = None
-    num_brain_grid_points: Optional[int] = None
-    time_resolution: Optional[float] = None
-    comment: Optional[str] = None
-
-    @classmethod
-    def from_dict(cls, data: Dict) -> "Parameters":
-        """Create Parameters object from dictionary."""
-        return cls(
-            num_sensors=data.get("num_sensors"),
-            grid_resolution_mm=data.get("grid_resolution_mm")
-            or data.get("grid_resolution"),
-            num_brain_grid_points=data.get("num_brain_grid_points"),
-            time_resolution=data.get("time_resolution"),
-            comment=data.get("comment"),
-        )
-
-    def __str__(self) -> str:
-        fields = []
-        for field in self.__dataclass_fields__:
-            value = getattr(self, field)
-            if value is not None:
-                fields.append(f"{field}={value!r}")
-        return f"Parameters({', '.join(fields)})" if fields else "Parameters()"
-
-
-def _generate_params_hash(params: Parameters) -> str:
-    """Generate a short hash for parameter configuration."""
-    params_dict = asdict(params)
-    # Sort keys for consistent hashing
-    params_str = json.dumps(params_dict, sort_keys=True)
-    return hashlib.md5(params_str.encode()).hexdigest()[:8]
 
 
 def save_svd(
@@ -91,7 +37,8 @@ def save_svd(
             grid_resolution: float,
             num_brain_grid_points: int,
             time_resolution: float,
-            comment: str
+            comment: str,
+            noise_full_brain: float
         )
     subdir : str, optional
         Subdirectory within variants/[modality_name]/ to organize parameter sweeps.
@@ -111,7 +58,7 @@ def save_svd(
         if params is None:
             # If no params provided but default=False, create empty params for hashing
             params = Parameters()
-        params_hash = _generate_params_hash(params)
+        params_hash = params.get_hash()
 
         # Determine the target directory: variants/[modality_name]/[subdir]/
         target_dir = os.path.join(VARIANTS_DIR, modality_name, subdir)

@@ -2,6 +2,7 @@ import os
 import numpy as np
 from pathlib import Path
 import warnings
+from typing import Literal
 
 np.random.seed(239)
 
@@ -17,63 +18,15 @@ SKULL_CONDUCTIVITY = 0.03
 N_SOURCES_DEFAULT = 100
 N_SENSORS_DEFAULT = 100
 
-
-def get_source_positions(n_sources: int = N_SOURCES_DEFAULT) -> np.ndarray:
-    warnings.warn("get_source_positions is deprecated. Use get_grid_positions instead.")
-    
-    # sample random positions inside a hemisphere
-    positions = np.zeros((n_sources, 3))
-    count = 0
-
-    while count < n_sources:
-        # Sample random point in a cube with side length 2*BRAIN_RADIUS
-        x = np.random.uniform(0, BRAIN_RADIUS * 2)
-        y = np.random.uniform(0, BRAIN_RADIUS * 2)
-        z = np.random.uniform(0, BRAIN_RADIUS * 2)  # Only positive z for hemisphere
-
-        # Check if point is inside the hemisphere
-        distance = np.sqrt((x - BRAIN_RADIUS) ** 2 + (y - BRAIN_RADIUS) ** 2 + z**2)
-
-        if distance <= BRAIN_RADIUS:
-            positions[count] = [x, y, z]
-
-            # # Vector from center of brain to the point
-            # center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0])
-            # direction = np.array([x, y, z]) - center
-
-            # # Normalize the direction vector and scale to brain radius
-            # normalized_direction = direction / distance
-
-            # # Place the point on the brain surface
-            # positions[count] = center + normalized_direction * BRAIN_RADIUS
-            count += 1
-    return positions
-
-
 def get_sensor_positions(
     n_sensors: int = N_SENSORS_DEFAULT,
     offset: float = 0,
     start_n: int = 0,
     end_n: int | None = None,
 ) -> np.ndarray:
-    warnings.warn("get_sensor_positions is deprecated. Use get_sensor_positions_spiral instead.")
-    
-    # sample random positions on a hemisphere
-    positions = np.random.randn(n_sensors, 3)
-    positions[:, 2] = np.abs(positions[:, 2])
-    positions = positions / np.linalg.norm(positions, axis=1, keepdims=True)
-    positions = positions * (SCALP_RADIUS + offset) + np.array(
-        [SCALP_RADIUS, SCALP_RADIUS, 0]
-    )
-    return positions[start_n:end_n]
-
-
-def get_sensor_positions_spiral(
-    n_sensors: int = N_SENSORS_DEFAULT,
-    offset: float = 0,
-    start_n: int = 0,
-    end_n: int | None = None,
-) -> np.ndarray:
+    """
+    Get sensor positions uniformly on the surface of a hemisphere.
+    """
     # Deterministic uniform sampling on a hemisphere using a spherical Fibonacci spiral
     golden_angle = np.pi * (3 - np.sqrt(5))
     indices = np.arange(n_sensors)
@@ -95,10 +48,54 @@ def get_sensor_positions_spiral(
     return positions[start_n:end_n]
 
 
+
+def get_grid_positions(grid_spacing_mm: float = 5.0, radius: float = BRAIN_RADIUS) -> np.ndarray:
+    """Generate positions using a uniform 3D grid within the hemisphere.
+
+    Parameters
+    ----------
+    grid_spacing_mm : float
+        Spacing between grid points in mm
+
+    Returns
+    -------
+    positions : ndarray of shape (n_points, 3)
+        Grid positions inside the hemisphere in mm
+    """
+    # Create grid coordinates
+    # Grid extends from 0 to 2*radius in x and y, and 0 to radius in z
+    # to account for brain, skull, and scalp layers
+    x_coords = np.arange(0, 2 * radius + grid_spacing_mm, grid_spacing_mm)
+    y_coords = np.arange(0, 2 * radius + grid_spacing_mm, grid_spacing_mm)
+    z_coords = np.arange(0, radius + grid_spacing_mm, grid_spacing_mm)
+
+    # Create meshgrid
+    X, Y, Z = np.meshgrid(x_coords, y_coords, z_coords, indexing="ij")
+
+    # Flatten to get all grid points
+    grid_points = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+
+    # Filter points that are inside the hemisphere
+    # Center of hemisphere is at (radius, radius, 0)
+    center = np.array([radius, radius, 0])
+    distances = np.linalg.norm(grid_points - center, axis=1)
+
+    # Keep points inside the hemisphere (distance <= radius and z >= 0)
+    inside_hemisphere = (distances <= radius) & (grid_points[:, 2] >= 0)
+    hemisphere_points = grid_points[inside_hemisphere]
+
+    print(f"Using {len(hemisphere_points)} grid points")
+
+    return hemisphere_points
+
+
+
 def get_voxel_mask(resolution: float = 1, offset: float = 0) -> np.ndarray:
-    # create a voxel mask for the brain
-    # the mask is a 3D array of size (nx, ny, nz)
-    # the mask is 1 for the brain, 2 for the skull, 3 for the scalp and 0 for the rest
+    """
+    Create a voxel mask for the brain.
+    The mask is a 3D array of size (nx, ny, nz)
+    The mask is 1 for the brain, 2 for the skull, 3 for the scalp and 0 for the rest
+    """
     radius = SCALP_RADIUS + offset
     nx = int(2 * radius / resolution)
     ny = int(2 * radius / resolution)
@@ -121,85 +118,22 @@ def get_voxel_mask(resolution: float = 1, offset: float = 0) -> np.ndarray:
 
     return mask
 
+# ---- FEM mesh functions ----
 
-def get_source_positions_halton(n_sources: int = N_SOURCES_DEFAULT) -> np.ndarray:
-    warnings.warn("get_source_positions_halton is deprecated. Use get_grid_positions instead.")
-    
-    # Deterministic uniform sampling inside a hemisphere via a low-discrepancy sequence
-    def van_der_corput(num: int, base: int = 2) -> float:
-        vdc, denom = 0.0, 1
-        while num > 0:
-            num, rem = divmod(num, base)
-            denom *= base
-            vdc += rem / denom
-        return vdc
-
-    positions = np.zeros((n_sources, 3))
-    for i in range(n_sources):
-        # radial coordinate via uniform volume sampling
-        u = (i + 0.5) / n_sources
-        r = BRAIN_RADIUS * u ** (1 / 3)
-        # direction via Hammersley sequence (bases 2 and 3)
-        theta = np.arccos(van_der_corput(i, 3))
-        phi = 2 * np.pi * van_der_corput(i, 2)
-        x = r * np.sin(theta) * np.cos(phi) + BRAIN_RADIUS
-        y = r * np.sin(theta) * np.sin(phi) + BRAIN_RADIUS
-        z = r * np.cos(theta)
-        positions[i] = [x, y, z]
-    return positions
-
-
-def get_grid_positions(grid_spacing_mm: float = 5.0) -> np.ndarray:
-    """Generate positions using a uniform 3D grid within the hemisphere.
-
-    Parameters
-    ----------
-    grid_spacing_mm : float
-        Spacing between grid points in mm
-
-    Returns
-    -------
-    positions : ndarray of shape (n_points, 3)
-        Grid positions inside the hemisphere in mm
-    """
-    # Create grid coordinates
-    # Grid extends from 0 to 2*SCALP_RADIUS in x and y, and 0 to SCALP_RADIUS in z
-    # to account for brain, skull, and scalp layers
-    x_coords = np.arange(0, 2 * SCALP_RADIUS + grid_spacing_mm, grid_spacing_mm)
-    y_coords = np.arange(0, 2 * SCALP_RADIUS + grid_spacing_mm, grid_spacing_mm)
-    z_coords = np.arange(0, SCALP_RADIUS + grid_spacing_mm, grid_spacing_mm)
-
-    # Create meshgrid
-    X, Y, Z = np.meshgrid(x_coords, y_coords, z_coords, indexing="ij")
-
-    # Flatten to get all grid points
-    grid_points = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
-
-    # Filter points that are inside the hemisphere
-    # Center of hemisphere is at (SCALP_RADIUS, SCALP_RADIUS, 0)
-    center = np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
-    distances = np.linalg.norm(grid_points - center, axis=1)
-
-    # Keep points inside the hemisphere (distance <= SCALP_RADIUS and z >= 0)
-    inside_hemisphere = (distances <= SCALP_RADIUS) & (grid_points[:, 2] >= 0)
-    hemisphere_points = grid_points[inside_hemisphere]
-
-    print(f"Using {len(hemisphere_points)} grid points")
-
-    return hemisphere_points
-
-
-def create_hemisphere(radius, n_phi=8, n_theta=8):
-    """Create a hemisphere mesh.
+def create_sphere(radius, n_phi=8, n_theta=8, resolution=None):
+    """Create a sphere mesh.
 
     Parameters
     ----------
     radius : float
-        Radius of the hemisphere
-    n_phi : int
-        Number of points in the azimuthal direction
-    n_theta : int
-        Number of points in the polar direction (hemisphere: 0 to π/2)
+        Radius of the sphere in meters
+    n_phi : int, optional
+        Number of points in the azimuthal direction (ignored if resolution is provided)
+    n_theta : int, optional
+        Number of points in the polar direction (ignored if resolution is provided)
+    resolution : float, optional
+        Desired grid spacing in meters. If provided, n_phi and n_theta are calculated
+        automatically to achieve approximately uniform grid spacing.
 
     Returns
     -------
@@ -208,24 +142,43 @@ def create_hemisphere(radius, n_phi=8, n_theta=8):
     triangles : ndarray
         Triangle indices (0-based)
     """
+    if resolution is not None:
+        # Calculate n_phi and n_theta based on desired resolution
+        # For uniform spacing, we want approximately equal arc lengths
+        # Arc length = radius * angle, so angle = resolution / radius
+        
+        # Calculate n_phi based on circumference at equator
+        n_phi = max(8, int(2 * np.pi * radius / resolution))
+        
+        # Calculate n_theta based on meridian length
+        # For uniform spacing, we want similar arc lengths in both directions
+        n_theta = max(8, int(np.pi * radius / resolution))
+        
+        # Ensure n_phi is even for better triangulation
+        if n_phi % 2 != 0:
+            n_phi += 1
+    
     # Generate grid of points in spherical coordinates
-    # For a hemisphere, theta goes from 0 to π/2
-    theta = np.linspace(0, np.pi / 2, n_theta)
+    # For a full sphere, theta goes from 0 to π
+    theta = np.linspace(0, np.pi, n_theta)
     phi = np.linspace(0, 2 * np.pi, n_phi)
 
     # Create vertices
     vertices = []
 
-    # Add the pole point at the top of the hemisphere
+    # Add the north pole point at the top of the sphere
     vertices.append([0, 0, radius])
 
-    # Add vertices for the rest of the hemisphere
-    for t in theta[1:]:  # Skip the first theta (pole point already added)
+    # Add vertices for the middle of the sphere
+    for t in theta[1:-1]:  # Skip the first and last theta (poles)
         for p in phi[:-1]:  # Skip the last phi (duplicate of phi=0)
             x = radius * np.sin(t) * np.cos(p)
             y = radius * np.sin(t) * np.sin(p)
             z = radius * np.cos(t)
             vertices.append([x, y, z])
+    
+    # Add the south pole point at the bottom of the sphere
+    vertices.append([0, 0, -radius])
 
     vertices = np.array(vertices)
 
@@ -242,8 +195,8 @@ def create_hemisphere(radius, n_phi=8, n_theta=8):
         v3 = (i + 1) % n_phi_actual + 1
         triangles.append([v1, v2, v3])
 
-    # Create triangles for the rest of the hemisphere
-    for i in range(n_theta - 2):  # -2 because we've handled the top row separately
+    # Create triangles for the middle of the sphere
+    for i in range(n_theta - 3):  # -3 because we have two poles and handle them separately
         row_start = 1 + i * n_phi_actual
         next_row_start = 1 + (i + 1) * n_phi_actual
 
@@ -256,8 +209,18 @@ def create_hemisphere(radius, n_phi=8, n_theta=8):
             # Add two triangles for each quad
             triangles.append([v1, v2, v3])
             triangles.append([v2, v4, v3])
+    
+    # Create triangles connecting the last row to the south pole
+    south_pole_index = len(vertices) - 1
+    last_row_start = 1 + (n_theta - 3) * n_phi_actual
+    for i in range(n_phi_actual):
+        v1 = last_row_start + i
+        v2 = last_row_start + (i + 1) % n_phi_actual
+        v3 = south_pole_index
+        triangles.append([v1, v3, v2])  # Note reversed order for proper orientation
 
     triangles = np.array(triangles)
+    print(f"Created sphere with {len(vertices)} vertices and {len(triangles)} triangles")
 
     return vertices, triangles
 
@@ -315,27 +278,68 @@ def get_random_orientations(n_sources: int) -> np.ndarray:
     return orientations
 
 
+def get_cortical_positions(n_sources=N_SOURCES_DEFAULT, radius=BRAIN_RADIUS):
+    """Generate positions uniformly distributed on the cortical surface (brain hemisphere).
+    
+    For EIT modeling, sources should be positioned on the cortical surface rather
+    than in the brain volume interior.
+    
+    Parameters
+    ----------
+    n_sources : int
+        Number of source positions to generate
+    radius : float
+        Radius of the brain surface (cortex)
+        
+    Returns
+    -------
+    positions : ndarray
+        Array of (x, y, z) positions on the hemisphere surface
+    """
+    positions = []
+    
+    # Generate uniform points on hemisphere using rejection sampling
+    # This ensures uniform distribution on the curved surface
+    while len(positions) < n_sources:
+        # Generate random points in a cube
+        x = np.random.uniform(-radius, radius)
+        y = np.random.uniform(-radius, radius) 
+        z = np.random.uniform(0, radius)  # Only upper hemisphere (z >= 0)
+        
+        # Check if point is on or near the sphere surface
+        distance = np.sqrt(x**2 + y**2 + z**2)
+        if distance <= radius:  # Inside or on the sphere
+            # Project onto sphere surface
+            if distance > 0:  # Avoid division by zero
+                scale = radius / distance
+                pos = [x * scale, y * scale, z * scale]
+                positions.append(pos)
+    
+    return np.array(positions[:n_sources])
+
+
 def create_bem_model():
-    """Create a 3-layer hemispherical model."""
+    """Create a 3-layer spherical model with cortical sources for EIT."""
     # Ensure model directory exists
     os.makedirs("bem_model/", exist_ok=True)
 
-    # Create the three hemispherical meshes
+    # Create the three spherical meshes  
     for name, radius in [
         ("brain", BRAIN_RADIUS),
         ("skull", SKULL_RADIUS),
         ("scalp", SCALP_RADIUS),
     ]:
-        vertices, triangles = create_hemisphere(radius, n_phi=16, n_theta=8)
-        write_tri(f"bem_model/{name}_hemi.tri", vertices, triangles)
+        # vertices, triangles = create_sphere(radius, n_phi=16, n_theta=10)
+        vertices, triangles = create_sphere(radius, resolution=10)
+        write_tri(f"bem_model/{name}_sphere.tri", vertices, triangles)
 
-    # Create the geometry file
-    with open("bem_model/hemi_head.geom", "w") as f:
-        f.write("# Domain Description 1.0\n\n")
+    # Create the geometry file (format 1.1)
+    with open("bem_model/sphere_head.geom", "w") as f:
+        f.write("# Domain Description 1.1\n\n")
         f.write("Interfaces 3\n\n")
-        f.write('Interface Brain: "brain_hemi.tri"\n')
-        f.write('Interface Skull: "skull_hemi.tri"\n')
-        f.write('Interface Scalp: "scalp_hemi.tri"\n\n')
+        f.write('Interface Brain: "brain_sphere.tri"\n')
+        f.write('Interface Skull: "skull_sphere.tri"\n')
+        f.write('Interface Scalp: "scalp_sphere.tri"\n\n')
         f.write("Domains 4\n\n")
         f.write("Domain Brain: -Brain\n")
         f.write("Domain Skull: -Skull +Brain\n")
@@ -343,20 +347,86 @@ def create_bem_model():
         f.write("Domain Air: +Scalp\n")
 
     # Create the conductivity file
-    with open("bem_model/hemi_head.cond", "w") as f:
+    with open("bem_model/sphere_head.cond", "w") as f:
         f.write("# Properties Description 1.0 (Conductivities)\n\n")
         f.write(f"Air         {AIR_CONDUCTIVITY}\n")
         f.write(f"Scalp       {SCALP_CONDUCTIVITY}\n")
         f.write(f"Brain       {BRAIN_CONDUCTIVITY}\n")
         f.write(f"Skull       {SKULL_CONDUCTIVITY}\n")
 
-    # Generate dipole positions and orientations
-    positions = get_source_positions_halton(N_SOURCES_DEFAULT)
-    orientations = get_random_orientations(N_SOURCES_DEFAULT)
+    # Generate brain volume dipole positions for EEG/MEG/ECoG (interior sources)
+    brain_positions = get_grid_positions(grid_spacing_mm=5.0)
+    n_brain_sources = len(brain_positions)
+    brain_orientations = get_random_orientations(n_brain_sources)
 
-    # Write dipoles to file
-    with open("bem_model/cortex_dipoles.txt", "w") as f:
-        for pos, ori in zip(positions, orientations):
+    # Write brain volume dipoles to file (for EEG, MEG, ECoG)
+    with open("bem_model/dipole_locations.txt", "w") as f:
+        for pos, ori in zip(brain_positions, brain_orientations):
             f.write(
                 f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
             )
+    
+    # Generate cortical dipole positions for EIT (surface sources)
+    cortical_positions = get_cortical_positions(n_sources=N_SOURCES_DEFAULT)
+    n_cortical_sources = len(cortical_positions)
+    cortical_orientations = get_random_orientations(n_cortical_sources)
+
+    # Write cortical dipoles to separate file (for EIT)
+    with open("bem_model/eit_dipole_locations.txt", "w") as f:
+        for pos, ori in zip(cortical_positions, cortical_orientations):
+            f.write(
+                f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
+            )
+    
+    # Generate EEG sensor positions (scalp surface, positions only)
+    eeg_sensor_positions = get_sensor_positions(N_SENSORS_DEFAULT)
+    with open("bem_model/sensor_locations.txt", "w") as f:
+        for pos in eeg_sensor_positions:
+            f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\n")
+    
+    # Generate MEG sensor positions (further out, with orientations)
+    # MEG sensors need to be positioned outside the head with radial orientations
+    meg_sensor_positions = get_sensor_positions(N_SENSORS_DEFAULT, offset=20)  # 20mm further out
+    
+    # Calculate radial orientations (pointing inward toward center of head)
+    head_center = np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
+    
+    with open("bem_model/meg_sensor_locations.txt", "w") as f:
+        for pos in meg_sensor_positions:
+            # Calculate inward-pointing radial orientation
+            direction = head_center - pos
+            orientation = direction / np.linalg.norm(direction)
+            f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{orientation[0]:.6f}\t{orientation[1]:.6f}\t{orientation[2]:.6f}\n")
+    
+    # Generate ECoG sensor positions (on brain surface)
+    # ECoG sensors are placed directly on the cortical surface
+    brain_center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0])
+    ecog_sensor_positions = get_sensor_positions(N_SENSORS_DEFAULT)
+    
+    # Scale positions to brain surface instead of scalp
+    with open("bem_model/ecog_sensor_locations.txt", "w") as f:
+        for pos in eeg_sensor_positions:  # Start with EEG positions
+            # Project onto brain surface
+            direction = pos - head_center
+            distance = np.linalg.norm(direction)
+            if distance > 0:
+                # Scale to brain radius and translate to brain center
+                brain_pos = brain_center + (direction / distance) * BRAIN_RADIUS
+                f.write(f"{brain_pos[0]:.6f}\t{brain_pos[1]:.6f}\t{brain_pos[2]:.6f}\n")
+
+
+# ---- Bitrate calculations ----
+
+def get_bitrate(svd_spectrum: np.ndarray, noise_full_brain: float, time_resolution: float = 1., n_detectors: int | None = None) -> float:
+    return (1 / time_resolution) * np.sum(np.log2(1 + svd_spectrum / (noise_full_brain / np.sqrt(n_detectors or len(svd_spectrum)))))
+
+
+def noise_floor_heuristic(svd_spectrum: np.ndarray, n_detectors: int | None = None, heuristic: Literal["power", "first"] = "power", factor: float = 10.) -> float:
+    n_detectors = n_detectors or len(svd_spectrum)
+    if heuristic == "power":
+        total_power = np.sum(np.abs(svd_spectrum) ** 2)
+        return np.sqrt(total_power / n_detectors) / factor
+    elif heuristic == "first":
+        return svd_spectrum[0] / factor
+
+# %%

@@ -2,8 +2,7 @@ import numpy as np
 from medium import Medium
 from sensor_geometry import SensorGeometry
 
-from guti.core import SCALP_RADIUS, N_SENSORS_DEFAULT
-from guti.core import get_sensor_positions_spiral, get_voxel_mask
+from guti.core import SCALP_RADIUS
 
 HEAD_RADIUS_MM = SCALP_RADIUS
 VOXEL_SIZE_MM = 1.0  # Target voxel size in millimeters

@@ -4,13 +4,8 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.colors import ListedColormap
 from guti.core import (
     BRAIN_RADIUS,
-    SKULL_RADIUS,
     SCALP_RADIUS,
-    get_source_positions,
-    get_sensor_positions,
-    get_sensor_positions_spiral,
     get_voxel_mask,
-    get_source_positions_halton,
 )
 
 import plotly.graph_objects as go

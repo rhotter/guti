@@ -1,8 +1,9 @@
-from guti.core import get_voxel_mask, get_sensor_positions_spiral, get_source_positions, get_sensor_positions
+from guti.core import get_voxel_mask, get_sensor_positions, get_grid_positions, get_sensor_positions
 from jwave import FourierSeries, FiniteDifferences
 from jwave.geometry import Domain, Medium, TimeAxis
 from jwave.geometry import Sources, Sensors
 import jax.numpy as jnp
+import numpy as np
 import matplotlib.pyplot as plt
 import torch
 import jax
@@ -62,11 +63,16 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
     """
     N = domain.N
     dx = domain.dx
+
+    from guti.core import BRAIN_RADIUS
+
+    grid_spacing_mm = ((2/3) * np.pi * BRAIN_RADIUS**3 / n_sources)**(1/3)
+
     # Get spiral sensor positions in world coordinates
     if not inside:
-        sensor_positions = get_sensor_positions_spiral(n_sensors=n_sources, offset=8)
+        sensor_positions = get_sensor_positions(n_sensors=n_sources, offset=8)
     else:
-        sensor_positions = get_source_positions(n_sources=n_sources)
+        sensor_positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
     # Convert to voxel indices
     sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
     x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
@@ -104,9 +110,10 @@ def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, st
     dx = domain.dx
     # Get spiral sensor positions in world coordinates
     if spiral:
-        sensor_positions = get_sensor_positions_spiral(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
+        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
     else:
         sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
+    print("Got sensor positions")
     # Convert to voxel indices
     sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
     x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]

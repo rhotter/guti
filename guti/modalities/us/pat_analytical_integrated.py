@@ -1,3 +1,5 @@
+# TODO: Get rid of get_source_positions
+
 import torch
 import numpy as np
 import jax.numpy as jnp
@@ -8,7 +10,7 @@ import matplotlib.pyplot as plt
 from scipy.sparse.linalg import LinearOperator, svds
 
 from guti.modalities.us.utils import create_medium
-from guti.core import get_source_positions, get_sensor_positions_spiral
+from guti.core import get_sensor_positions
 from guti.data_utils import save_svd
 from guti.core import BRAIN_RADIUS, SKULL_RADIUS, SCALP_RADIUS
 
@@ -171,7 +173,7 @@ def create_analytical_jacobian():
     # Get detector positions (on scalp surface)  
     print("Creating detectors...")
     n_detectors = 4000
-    detector_positions_mm = get_sensor_positions_spiral(n_sensors=n_detectors, offset=10) - np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
+    detector_positions_mm = get_sensor_positions(n_sensors=n_detectors, offset=10) - np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
   
     # Compute analytical signals
     signals = analytical_solver(source_positions_mm, detector_positions_mm, np.array([0, 0, 0]))

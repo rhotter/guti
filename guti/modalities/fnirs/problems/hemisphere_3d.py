@@ -1,7 +1,7 @@
 import numpy as np
 
 from guti.core import SCALP_RADIUS, N_SENSORS_DEFAULT
-from guti.core import get_sensor_positions_spiral, get_voxel_mask
+from guti.core import get_sensor_positions, get_voxel_mask
 from guti.modalities.fnirs.medium import Medium
 from guti.modalities.fnirs.sensor_geometry import SensorGeometry
 
@@ -14,7 +14,7 @@ def hemisphere_3d(
 ):
     if noptodes % 2 != 0:
         raise ValueError("noptodes must be a multiple of 2")
-    sensor_pos = get_sensor_positions_spiral(noptodes)
+    sensor_pos = get_sensor_positions(noptodes)
     sensor_pos /= voxel_size_mm
     mask = get_voxel_mask(voxel_size_mm)
     brain_mask = mask == 1

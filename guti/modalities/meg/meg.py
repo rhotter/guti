@@ -8,7 +8,7 @@ squid_distance = 25
 
 # %%
 import numpy as np
-from guti.core import get_sensor_positions_spiral, get_source_positions
+from guti.core import get_sensor_positions, get_grid_positions
 
 def sarvas_formula(r, r0):
     """
@@ -47,7 +47,7 @@ def sarvas_formula(r, r0):
 
     return M
 
-def compute_forward_matrix(n_sensors=4000, n_sources=4000, offset=opm_distance):
+def compute_forward_matrix(n_sensors=4000, grid_spacing_mm=5.0, offset=opm_distance):
     """
     Compute the MEG forward matrix using Sarvas's formula.
     
@@ -55,8 +55,10 @@ def compute_forward_matrix(n_sensors=4000, n_sources=4000, offset=opm_distance):
     ----------
     n_sensors : int
         Number of sensors to use
-    n_sources : int
-        Number of source dipoles to use
+    grid_spacing_mm : float
+        Spacing between grid points in mm
+    offset : float
+        Offset from the origin in mm
         
     Returns
     -------
@@ -64,8 +66,9 @@ def compute_forward_matrix(n_sensors=4000, n_sources=4000, offset=opm_distance):
         Forward matrix that maps dipole moments to sensor measurements
     """
     # Get sensor and source positions using core.py functions
-    sensors = get_sensor_positions_spiral(n_sensors, offset=offset)
-    sources = get_source_positions(n_sources)
+    sensors = get_sensor_positions(n_sensors, offset=offset)
+    sources = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
+    n_sources = len(sources)
     
     # Initialize forward matrix
     A = np.zeros((3*n_sensors, 3*n_sources))
