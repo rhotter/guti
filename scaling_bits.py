@@ -1,11 +1,6 @@
 # %%
-try:
-    import IPython
-
-    IPython.get_ipython().run_line_magic("load_ext", "autoreload")
-    IPython.get_ipython().run_line_magic("autoreload", "2")
-except:
-    pass
+from guti.notebook_utils import enable_autoreload
+enable_autoreload()
 
 # %%
 from guti.data_utils import list_svd_variants

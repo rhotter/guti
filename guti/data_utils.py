@@ -19,7 +19,6 @@ def save_svd(
     s: NDArray,
     modality_name: str,
     params: Optional[Parameters] = None,
-    subdir: Optional[str] = None,
 ) -> None:
     """
     Save the singular value spectrum and optional parameters to a file.
@@ -40,35 +39,23 @@ def save_svd(
             comment: str,
             noise_full_brain: float
         )
-    subdir : str, optional
-        Subdirectory within variants/[modality_name]/ to organize parameter sweeps.
-
     """
-    if subdir is None:
+    if params is None:
         # Save as default configuration in main results directory
         filepath = os.path.join(RESULTS_DIR, f"{modality_name}_svd_spectrum.npz")
-        if params is None:
-            np.savez(filepath, singular_values=s)
-        else:
-            structured_params = asdict(params)
-            np.savez(filepath, singular_values=s, parameters=structured_params)  # type: ignore
+        np.savez(filepath, singular_values=s)
         print(f"Saved default SVD spectrum to {filepath}")
     else:
         # Save as variant in variants directory with hash
-        if params is None:
-            # If no params provided but default=False, create empty params for hashing
-            params = Parameters()
         params_hash = params.get_hash()
-
-        # Determine the target directory: variants/[modality_name]/[subdir]/
-        target_dir = os.path.join(VARIANTS_DIR, modality_name, subdir)
+        # Directory: variants/[modality_name]/
+        target_dir = os.path.join(VARIANTS_DIR, modality_name)
         os.makedirs(target_dir, exist_ok=True)
 
         filepath = os.path.join(target_dir, f"{params_hash}.npz")
         structured_params = asdict(params)
         np.savez(filepath, singular_values=s, parameters=structured_params)  # type: ignore
         print(f"Saved variant SVD spectrum to {filepath}")
-        print(f"Parameter hash: {params_hash}")
         print(f"Parameters: {structured_params}")
 
 
@@ -146,7 +133,8 @@ def load_svd_variant(
 
 
 def list_svd_variants(
-    modality_name: str, subdir: Optional[str] = None
+    modality_name: str,
+    constant_params: Optional[Parameters] = None,
 ) -> Dict[str, Parameters]:
     """
     List all available parameter variants for a modality.
@@ -155,8 +143,11 @@ def list_svd_variants(
     ----------
     modality_name : str
         Name of modality, e.g. 'fnirs_cw' or 'eeg'
-    subdir : str, optional
-        Subdirectory within variants/[modality_name]/ to search in
+    constant_params : Parameters, optional
+        Parameters object specifying which parameters to hold constant.
+        Only variants matching the non-None fields will be returned.
+        Example: Parameters(num_sensors=8000) will only return variants
+        with num_sensors=8000, ignoring other parameters.
 
     Returns
     -------
@@ -165,13 +156,7 @@ def list_svd_variants(
     """
     variants = {}
 
-    # Determine the directory to search in
-    if subdir is not None:
-        search_dir = os.path.join(VARIANTS_DIR, modality_name, subdir)
-        if not os.path.exists(search_dir):
-            return variants
-    else:
-        search_dir = os.path.join(VARIANTS_DIR, modality_name)
+    search_dir = os.path.join(VARIANTS_DIR, modality_name)
 
     if not os.path.exists(search_dir):
         return variants
@@ -182,10 +167,22 @@ def list_svd_variants(
             hash_part = filename[:-4]  # Remove .npz suffix
             if len(hash_part) == 8:  # Our hashes are 8 characters
                 try:
-                    s, params = load_svd_variant(modality_name, hash_part, subdir)
+                    s, params = load_svd_variant(modality_name, hash_part)
                     if params is not None:
                         variants[hash_part] = dict(s=s, params=params)
                 except FileNotFoundError:
                     continue
+
+    # Filter by constant parameters if specified
+    if constant_params is not None:
+        constant_dict = constant_params.to_dict()
+        if constant_dict:
+            filtered_variants = {}
+            for k, v in variants.items():
+                params = v["params"]
+                # Check if all specified constant params match
+                if all(getattr(params, key, None) == value for key, value in constant_dict.items()):
+                    filtered_variants[k] = v
+            variants = filtered_variants
 
     return variants

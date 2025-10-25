@@ -56,3 +56,7 @@ class Parameters:
         # Sort keys for consistent hashing
         params_str = json.dumps(params_dict, sort_keys=True)
         return hashlib.md5(params_str.encode()).hexdigest()[:8]
+
+    def to_dict(self) -> Dict:
+        """Return dictionary of only non-None fields."""
+        return {k: v for k, v in asdict(self).items() if v is not None}
