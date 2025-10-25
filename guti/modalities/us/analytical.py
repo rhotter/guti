@@ -95,6 +95,14 @@ s = s.cpu().numpy()
 
 plt.semilogy(s)
 
-save_svd(s, 'us_analytical')
+from guti.data_utils import Parameters
+
+save_svd(s, 'us_analytical', params=Parameters(
+    num_sensors=len(sensor_positions),
+    grid_resolution_mm=None,
+    num_brain_grid_points=len(source_positions),
+    time_resolution=time_step,
+    comment=None
+))
 
 # %%
