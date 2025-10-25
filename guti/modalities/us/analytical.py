@@ -29,6 +29,9 @@ center_frequency = 1.5e6
 sources, source_mask = create_sources(domain, time_axis, freq_Hz=1e6, n_sources=n_sources, pad=0, inside=True)
 sensors, sensors_all, receivers_mask = create_receivers(domain, time_axis, freq_Hz=center_frequency, n_sensors=n_sensors, pad=0)
 
+print(f"Number of sources: {len(sources.positions)}")
+print(f"Number of sensors: {len(sensors.positions)}")
+
 # %%
 
 source_positions = np.stack([np.array(x) for x in sources.positions]).T
