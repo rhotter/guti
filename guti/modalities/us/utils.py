@@ -1,7 +1,4 @@
 from guti.core import get_voxel_mask, get_sensor_positions, get_grid_positions, get_sensor_positions
-from jwave import FourierSeries, FiniteDifferences
-from jwave.geometry import Domain, Medium, TimeAxis
-from jwave.geometry import Sources, Sensors
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,6 +7,7 @@ import jax
 
 
 def create_medium():
+    import jwave
     # Simulation parameters
     dx_mm = 0.25
     # dx_mm = 0.5
@@ -21,7 +19,7 @@ def create_medium():
     tissues_map = tissues_map[30:-30,30:-30,30:]
     N = tuple(tissues_map.shape)
     print(f"Domain size: {N}")
-    domain = Domain(N, dx)
+    domain = jwave.geometry.Domain(N, dx)
 
     # Set sound speed values based on tissue type
     # 0: outside (1500 m/s)
@@ -32,23 +30,23 @@ def create_medium():
     speed = jnp.where(tissues_map == 1, 1525., speed)
     speed = jnp.where(tissues_map == 2, 2400., speed)
     speed = jnp.where(tissues_map == 3, 1530., speed)
-    sound_speed = FourierSeries(speed, domain)
+    sound_speed = jwave.FourierSeries(speed, domain)
     # Create density map with same shell mask
     # Use typical densities: ~1000 kg/m³ for water, ~2000 kg/m³ for the skull
     density = jnp.where(tissues_map == 0, 1000., 1000.)
     density = jnp.where(tissues_map == 1, 1000., 1000.)
     density = jnp.where(tissues_map == 2, 2000., 1000.)
     density = jnp.where(tissues_map == 3, 1000., 1000.)
-    density_field = FourierSeries(density, domain)
+    density_field = jwave.FourierSeries(density, domain)
 
     # pml_size = 20
     pml_size = 7
     # Pad the domain by the PML size to ensure proper absorption at boundaries
-    domain = Domain(N, dx)
+    domain = jwave.geometry.Domain(N, dx)
 
     # Update the tissue masks to match the padded domain
-    medium = Medium(domain=domain, sound_speed=sound_speed, density=density_field, pml_size=pml_size)
-    time_axis = TimeAxis.from_medium(medium, cfl=0.15, t_end=50e-06)
+    medium = jwave.geometry.Medium(domain=domain, sound_speed=sound_speed, density=density_field, pml_size=pml_size)
+    time_axis = jwave.geometry.TimeAxis.from_medium(medium, cfl=0.15, t_end=50e-06)
     # time_axis = TimeAxis.from_medium(medium, cfl=0.3, t_end=5e-06)
 
     brain_mask = tissues_map == 1
@@ -61,6 +59,7 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
     """
     Create sources and source mask.
     """
+    import jwave
     N = domain.N
     dx = domain.dx
 
@@ -96,7 +95,7 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
     signals = jnp.stack([signal] * N_sources)
 
     # Instantiate sources
-    sources = Sources(positions=(x, y, z), signals=signals, dt=time_axis.dt, domain=domain)
+    sources = jwave.geometry.Sources(positions=(x, y, z), signals=signals, dt=time_axis.dt, domain=domain)
 
     # Create source mask
     source_mask = jnp.full((1,) + N, False)
@@ -106,6 +105,7 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
 
 
 def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 30):
+    import jwave
     N = domain.N
     dx = domain.dx
     # Get spiral sensor positions in world coordinates
@@ -134,8 +134,8 @@ def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, st
     receiver_positions = jnp.argwhere(receivers_mask)
 
     # Instantiate sensors
-    sensors = Sensors(positions=tuple(receiver_positions.T.tolist()))
-    sensors_all = Sensors(positions=tuple(jnp.argwhere(jnp.ones(N)).T.tolist()))
+    sensors = jwave.geometry.Sensors(positions=tuple(receiver_positions.T.tolist()))
+    sensors_all = jwave.geometry.Sensors(positions=tuple(jnp.argwhere(jnp.ones(N)).T.tolist()))
 
     return sensors, sensors_all, receivers_mask
 

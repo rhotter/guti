@@ -1,6 +1,8 @@
-# TODO: Get rid of get_source_positions
+# %%
+%load_ext autoreload
+%autoreload 2
 
-import torch
+# %%
 import numpy as np
 import jax.numpy as jnp
 import jax
@@ -10,7 +12,7 @@ import matplotlib.pyplot as plt
 from scipy.sparse.linalg import LinearOperator, svds
 
 from guti.modalities.us.utils import create_medium
-from guti.core import get_sensor_positions
+from guti.core import get_sensor_positions, get_grid_positions
 from guti.data_utils import save_svd
 from guti.core import BRAIN_RADIUS, SKULL_RADIUS, SCALP_RADIUS
 
@@ -160,19 +162,14 @@ def analytical_solver(source_positions, detector_positions, center_mm):
     return signals
 
 # ── Integration with existing framework ───────────────────────────────────────
-def create_analytical_jacobian():
+def create_analytical_jacobian(grid_spacing_mm=5.0, n_detectors=4000):
     """Create Jacobian matrix using analytical expressions"""
-    
-    print("Setting up geometry and medium...")
-    domain, medium, time_axis, brain_mask, skull_mask, scalp_mask = create_medium()
-    
     # Get source positions (inside brain)
     print("Creating sources...")
-    source_positions_mm = get_source_positions(4000) - np.array([R_brain, R_brain, 0])
+    source_positions_mm = get_grid_positions(grid_spacing_mm=grid_spacing_mm, radius=BRAIN_RADIUS) - np.array([R_brain, R_brain, 0])
     
     # Get detector positions (on scalp surface)  
     print("Creating detectors...")
-    n_detectors = 4000
     detector_positions_mm = get_sensor_positions(n_sensors=n_detectors, offset=10) - np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
   
     # Compute analytical signals
@@ -337,36 +334,39 @@ def plot_coupling_matrix(jacobian, source_pos, detector_pos):
     print(f"Number of finite values: {np.sum(np.isfinite(jacobian))}")
     print(f"Condition number: {np.linalg.cond(jacobian):.2e}")
 
+# %%
+print("Computing analytical ultrasound Jacobian...")
 
-if __name__ == "__main__":
-    print("Computing analytical ultrasound Jacobian...")
-    
-    jacobian, source_pos, detector_pos = create_analytical_jacobian()
-    
-    # Plot sensor and detector positions
-    print("\nPlotting sensor and detector positions...")
-    plot_sensor_detector_positions(source_pos, detector_pos, np.array([0, 0, 0]))
-    
-    # Plot coupling matrix
-    print("\nPlotting coupling matrix...")
-    plot_coupling_matrix(jacobian, source_pos, detector_pos)
-    
-    # Compute SVD
-    print("Computing SVD...")
-    u, s, vh = np.linalg.svd(jacobian, full_matrices=False)
-    
-    # Plot singular value spectrum
-    plt.figure(figsize=(10, 6))
-    plt.semilogy(s)
-    plt.grid(True)
-    plt.xlabel('Index')
-    plt.ylabel('Singular Value')
-    plt.title('Singular Value Spectrum - Analytical Ultrasound Model')
-    plt.show()
-    
-    # Save results
-    save_svd(s, 'pat_analytical')
-    print(f"Saved {len(s)} singular values")
-    
-    
-    print("Done!") 
+jacobian, source_pos, detector_pos = create_analytical_jacobian()
+
+# Plot sensor and detector positions
+print("\nPlotting sensor and detector positions...")
+plot_sensor_detector_positions(source_pos, detector_pos, np.array([0, 0, 0]))
+
+# Plot coupling matrix
+print("\nPlotting coupling matrix...")
+plot_coupling_matrix(jacobian, source_pos, detector_pos)
+# %%
+# replace nan with 0
+jacobian = np.nan_to_num(jacobian)
+
+# Compute SVD
+print("Computing SVD...")
+u, s, vh = np.linalg.svd(jacobian, full_matrices=False)
+
+# Plot singular value spectrum
+plt.figure(figsize=(10, 6))
+plt.semilogy(s)
+plt.grid(True)
+plt.xlabel('Index')
+plt.ylabel('Singular Value')
+plt.title('Singular Value Spectrum - Analytical Ultrasound Model')
+plt.show()
+
+# Save results
+save_svd(s, 'pat_analytical')
+print(f"Saved {len(s)} singular values")
+
+
+print("Done!") 
+# %%
