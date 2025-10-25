@@ -8,5 +8,5 @@
 uv venv
 source .venv/bin/activate
 uv pip install -e .
-uv pip install torch numpy matplotlib ipykernel
+uv pip install torch numpy matplotlib ipykernel tqdm jupyter
 ```
