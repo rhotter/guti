@@ -1,11 +1,6 @@
 # %%
-try:
-    import IPython
-
-    IPython.get_ipython().run_line_magic("load_ext", "autoreload")
-    IPython.get_ipython().run_line_magic("autoreload", "2")
-except:
-    pass
+from guti.notebook_utils import enable_autoreload
+enable_autoreload()
 
 from guti.core import get_grid_positions, get_sensor_positions
 
