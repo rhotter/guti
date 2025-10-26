@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from typing import Optional
 
+def normalize_singular_values(s: np.ndarray, params: Parameters) -> np.ndarray:
+    num_brain_grid_points = getattr(params, "num_brain_grid_points")
+    return s / np.sqrt(num_brain_grid_points)
+
 
 def plot_parameter_sweep_spectra(
     modality_name: str,
@@ -30,24 +34,24 @@ def plot_parameter_sweep_spectra(
         variants.items(), key=lambda x: getattr(x[1]["params"], param_key)
     )
 
-    # Find the global maximum singular value across all variants
-    max_sv = 0.0
-    for k, v in sorted_variants:
-        cur_max = np.max(v["s"])
-        if cur_max > max_sv:
-            max_sv = cur_max
-    if max_sv == 0.0:
-        max_sv = 1.0  # Avoid division by zero
+    # Normalize all singular values first
+    normalized_svs = []
+    for _, v in sorted_variants:
+        s_normalized = normalize_singular_values(v["s"], v["params"])
+        normalized_svs.append((v, s_normalized))
 
-    param_values = [getattr(v["params"], param_key) for k, v in sorted_variants]
+    # Find the global maximum (first) singular value across all normalized variants
+    max_sv = max(s_normalized[0] for _, s_normalized in normalized_svs)
+
+    param_values = [getattr(v["params"], param_key) for v, s in normalized_svs]
     min_val, max_val = min(param_values), max(param_values)
     colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
 
     plt.figure(figsize=figsize)
-    for (k, v), color in zip(sorted_variants, colors):
+    for (v, s_normalized), color in zip(normalized_svs, colors):
         params = v["params"]
-        s = v["s"] / max_sv  # Normalize by largest singular value across all params
         param_value = getattr(params, param_key)
+        s = s_normalized / max_sv  # Normalize by largest singular value across all params
 
         plt.plot(
             np.arange(1, len(s) + 1),
