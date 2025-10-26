@@ -130,6 +130,5 @@ class FNIRSAnalytical(ImagingModality):
 
 if __name__ == "__main__":
     # Example: Run single configuration
-    params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
-    modality = FNIRSAnalytical(params)
+    modality = FNIRSAnalytical()
     singular_values = modality.run()

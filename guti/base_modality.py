@@ -167,11 +167,7 @@ class ImagingModality(ABC):
         """
         from guti.svd import compute_svd_gpu, compute_svd_cpu
 
-        try:
-            return compute_svd_gpu(self.jacobian)
-        except Exception as e:
-            print(f"GPU SVD failed ({e}), falling back to CPU...")
-            return compute_svd_cpu(self.jacobian)
+        return compute_svd_gpu(self.jacobian)
 
     def save_results(self, singular_values: np.ndarray) -> None:
         """
