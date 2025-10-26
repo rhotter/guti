@@ -17,7 +17,8 @@ constant_params = Parameters(num_sensors=400)
 plot_parameter_sweep_spectra(
     modality_name=modality_name,
     param_key=param_key,
-    constant_params=constant_params
+    constant_params=constant_params,
+    ylim=(1e-5, 10)
 )
 
 # %%

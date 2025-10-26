@@ -907,7 +907,7 @@ def get_bitrate(
     return (1 / time_resolution) * np.sum(
         np.log2(
             1
-            + svd_spectrum
+            + svd_spectrum**2
             / (noise_full_brain / np.sqrt(n_detectors or len(svd_spectrum)))
         )
     )
