@@ -180,12 +180,15 @@ def compute_dipole_field(
     # cos(theta) between (dipole_position - center_position) and (position - center_position) for each position
     v = dipole_position - center_position
     w = positions - center_position
-    cos_thetas = jnp.sum(v * w, axis=1) / (rz * position_rs)
+    eps = 1e-12
+    cos_thetas = jnp.sum(v * w, axis=1) / (jnp.maximum(rz, eps) * jnp.maximum(position_rs, eps))
     cos_thetas = jnp.clip(cos_thetas, -1.0, 1.0)
     
     def compute_alpha(l):
         gamma, zetta, A, B = compute_gamma_zetta_A_B(conductivities, radii, l)
-        alpha = (1 / (gamma[0] + 1e-12)) * (radii[0] / (rz + 1e-12)) ** (l + 1)
+        # Use a decaying factor for interior sources: (rz / r_brain)^(l+1)
+        # This avoids overflow for large l and small rz.
+        alpha = (1 / (gamma[0] + 1e-12)) * (rz / (radii[0] + 1e-12)) ** (l + 1)
         return alpha
     
     def legendre_polynomial(l, x):
@@ -206,8 +209,8 @@ def compute_dipole_field(
     values = jnp.zeros(len(positions))
     for l in range(l_max):
         alpha = compute_alpha(l)
-        contribution = dipole_moment / (4 * jnp.pi * conductivities[0] * rz**2) * (
-            alpha * (position_rs / radii[0]) ** l + (rz / position_rs) ** (l+1)
+        contribution = dipole_moment / (4 * jnp.pi * conductivities[0] * (jnp.maximum(rz, eps) ** 2)) * (
+            alpha * (position_rs / radii[0]) ** l + (jnp.maximum(rz, eps) / jnp.maximum(position_rs, eps)) ** (l+1)
         ) * l * legendre_polynomial(l, cos_thetas)
         values = values + contribution
 
@@ -311,13 +314,13 @@ def reconstruct_on(theta, phi, coeffs, l_max):
     return jnp.real(A @ coeffs)  # if you expect a real field
 
 
-def compute_outer_harmonics_for_dipoles(dipole_positions: jnp.ndarray, dipole_moments: jnp.ndarray, center_position: jnp.ndarray, radii: list[float], conductivities: list[float], l_max: int = 100):
+def compute_outer_harmonics_for_dipoles(dipole_positions: jnp.ndarray, dipole_moments: jnp.ndarray, center_position: jnp.ndarray, radii: list[float], conductivities: list[float], l_max: int = 100, n_samples_for_decomposition: int | None = None):
     def field_function(positions: jnp.ndarray):
         results = jnp.zeros(len(positions))
         for dipole_position, dipole_moment in zip(dipole_positions, dipole_moments):
             results = results + compute_dipole_field(dipole_position, dipole_moment, positions, center_position, radii, conductivities, l_max)
         return results
-    inner_harmonics, meta = spherical_harmonic_decomposition(field_function, l_max, BRAIN_RADIUS)
+    inner_harmonics, meta = spherical_harmonic_decomposition(field_function, l_max, BRAIN_RADIUS, n_samples=n_samples_for_decomposition)
     transfer_function = compute_eeg_transfer_function(conductivities, radii, l_max)  # shape (l_max+1,)
     # Expand transfer function across m for each l
     lms = meta["lms"]
@@ -354,12 +357,12 @@ def harmonics_to_phi_theta_grid(harmonics: jnp.ndarray, num_phi: int = 100, num_
 
 # %%
 if __name__ == "__main__":
-    dipole_positions = jnp.array([[0.5, 0.5, 0]])
+    dipole_positions = jnp.array([[0.5, 0, 0]])
     dipole_moments = jnp.array([1])
     center_position = jnp.array([0, 0, 0])
     radii = [BRAIN_RADIUS, SKULL_RADIUS, SCALP_RADIUS]
     conductivities = [1, 5, 1 / 15, 1]
-    harmonics = compute_outer_harmonics_for_dipoles(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=10)
+    harmonics = compute_outer_harmonics_for_dipoles(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=40, n_samples_for_decomposition=1000)
     print(harmonics)
     results = harmonics_to_phi_theta_grid(harmonics)
     from matplotlib import pyplot as plt
