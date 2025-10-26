@@ -1,16 +1,23 @@
-import numpy as np
 from guti.parameters import Parameters
-from guti.modalities.blur_1d.modality import Blur1D
+from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
+from guti.scaling_utils import show_sweep_results
 from copy import deepcopy
 
-param_name = "input_dim"
-param_values = [8, 16, 32, 64, 128, 256, 512, 1024]
+param_name = "grid_resolution_mm"
+param_values = [5, 6, 8, 10]
 
-default_params = Parameters(output_dim=128)
+default_params = Parameters(num_sensors=400)
 
 for i, value in enumerate(param_values):
     print(f"-------------------------------- Running {param_name} = {value} ({i+1}/{len(param_values)}) --------------------------------")
-    params = deepcopy(default_params)   
+    params = deepcopy(default_params)
     setattr(params, param_name, value)
-    modality = Blur1D(params=params)
+    modality = fNIRSAnalytical(params=params)
     modality.run(save_results=True)
+
+# After running the sweep, visualize the results:
+# show_sweep_results(
+    modality_name=modality.name,
+#     param_key=param_name,
+#     constant_params=default_params
+# )
