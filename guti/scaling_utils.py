@@ -11,7 +11,8 @@ from typing import Optional
 
 def normalize_singular_values(s: np.ndarray, params: Parameters) -> np.ndarray:
     num_brain_grid_points = getattr(params, "num_brain_grid_points")
-    return s / np.sqrt(num_brain_grid_points)
+    print(num_brain_grid_points)
+    return s / num_brain_grid_points**(1/4)
 
 
 def get_normalized_variants(modality_name: str, param_key: str, constant_params: Optional[Parameters] = None):
