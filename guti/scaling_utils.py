@@ -14,6 +14,34 @@ def normalize_singular_values(s: np.ndarray, params: Parameters) -> np.ndarray:
     return s / np.sqrt(num_brain_grid_points)
 
 
+def get_normalized_variants(modality_name: str, param_key: str, constant_params: Optional[Parameters] = None):
+    """
+    Get sorted variants with normalized singular values.
+
+    Returns:
+        list of tuples: (variant_dict, normalized_singular_values)
+    """
+    if constant_params is None:
+        constant_params = Parameters()
+
+    variants = list_svd_variants(modality_name, constant_params=constant_params)
+
+    if not variants:
+        return []
+
+    sorted_variants = sorted(
+        variants.items(), key=lambda x: getattr(x[1]["params"], param_key)
+    )
+
+    # Normalize all singular values
+    normalized_svs = []
+    for _, v in sorted_variants:
+        s_normalized = normalize_singular_values(v["s"], v["params"])
+        normalized_svs.append((v, s_normalized))
+
+    return normalized_svs
+
+
 def plot_parameter_sweep_spectra(
     modality_name: str,
     param_key: str,
@@ -21,29 +49,16 @@ def plot_parameter_sweep_spectra(
     figsize: tuple = (10, 6),
     ylim: tuple = (1e-5, 1e1)
 ):
-    if constant_params is None:
-        constant_params = Parameters()
+    normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
 
-    variants = list_svd_variants(modality_name, constant_params=constant_params)
-
-    if not variants:
+    if not normalized_svs:
         print(f"No variants found for {modality_name} with given constant parameters")
         return
-
-    sorted_variants = sorted(
-        variants.items(), key=lambda x: getattr(x[1]["params"], param_key)
-    )
-
-    # Normalize all singular values first
-    normalized_svs = []
-    for _, v in sorted_variants:
-        s_normalized = normalize_singular_values(v["s"], v["params"])
-        normalized_svs.append((v, s_normalized))
 
     # Find the global maximum (first) singular value across all normalized variants
     max_sv = max(s_normalized[0] for _, s_normalized in normalized_svs)
 
-    param_values = [getattr(v["params"], param_key) for v, s in normalized_svs]
+    param_values = [getattr(v["params"], param_key) for v, _ in normalized_svs]
     min_val, max_val = min(param_values), max(param_values)
     colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
 
@@ -78,25 +93,17 @@ def plot_first_singular_value_vs_parameter(
     constant_params: Optional[Parameters] = None,
     figsize: tuple = (10, 6)
 ):
-    if constant_params is None:
-        constant_params = Parameters()
+    normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
 
-    variants = list_svd_variants(modality_name, constant_params=constant_params)
-
-    if not variants:
+    if not normalized_svs:
         print(f"No variants found for {modality_name} with given constant parameters")
         return
 
-    sorted_variants = sorted(
-        variants.items(), key=lambda x: getattr(x[1]["params"], param_key)
-    )
-
     first_singular_values = []
-    for k, v in sorted_variants:
+    for v, s_normalized in normalized_svs:
         params = v["params"]
-        s = v["s"]
         param_value = getattr(params, param_key)
-        first_singular_values.append((param_value, s[0]))
+        first_singular_values.append((param_value, s_normalized[0]))
 
     param_values, s1_values = zip(*first_singular_values)
 
@@ -117,30 +124,22 @@ def plot_bitrate_vs_parameter(
     figsize: tuple = (10, 6),
     time_resolution: float = 1.0
 ):
-    if constant_params is None:
-        constant_params = Parameters()
+    normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
 
-    variants = list_svd_variants(modality_name, constant_params=constant_params)
-
-    if not variants:
+    if not normalized_svs:
         print(f"No variants found for {modality_name} with given constant parameters")
         return
-
-    sorted_variants = sorted(
-        variants.items(), key=lambda x: getattr(x[1]["params"], param_key)
-    )
 
     param_values = []
     bitrates = []
 
-    for k, v in sorted_variants:
+    for v, s_normalized in normalized_svs:
         params = v["params"]
-        s = v["s"]
         param_value = getattr(params, param_key)
         n_sensors = params.num_sensors
-        noise_level = noise_floor_heuristic(s, heuristic="power", n_detectors=n_sensors)
+        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", n_detectors=n_sensors)
 
-        bitrate = get_bitrate(s, noise_level, time_resolution=time_resolution, n_detectors=n_sensors)
+        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution, n_detectors=n_sensors)
 
         param_values.append(param_value)
         bitrates.append(bitrate)
