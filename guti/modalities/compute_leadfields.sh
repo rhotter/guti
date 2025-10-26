@@ -55,9 +55,9 @@ om_gain -MEG ${HMINV} ${DSM} ${H2MM} ${DS2MEG} ${MEG_LEADFIELD}
 # om_gain -MEGadjoint ${GEOMETRY} ${CONDUCTIVITIES} ${DIPOLES} ${HM} ${H2MM} ${DS2MEG} ${MEG_LEADFIELD_ADJOINT}
 
 # # Compute EIT gain matrix (using cortical dipole sources)
-om_assemble -DSM ${GEOMETRY} ${CONDUCTIVITIES} ${EIT_DIPOLES} ${EIT_DSM}
+# om_assemble -DSM ${GEOMETRY} ${CONDUCTIVITIES} ${EIT_DIPOLES} ${EIT_DSM}
 om_assemble -EITSM ${GEOMETRY} ${CONDUCTIVITIES} ${ELECTRODES} ${EITSM}
-om_gain -EEG ${HMINV} ${EIT_DSM} ${H2EM} ${EIT_LEADFIELD}
+om_gain -EEG ${HMINV} ${EITSM} ${H2EM} ${EIT_LEADFIELD}
 
 # # Compute Internal Potential ....
 # om_assemble -H2IPM ${GEOMETRY} ${CONDUCTIVITIES} ${ELECTRODES} ${IPHM}
