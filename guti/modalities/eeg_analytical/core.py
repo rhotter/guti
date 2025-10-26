@@ -362,7 +362,10 @@ if __name__ == "__main__":
     center_position = jnp.array([0, 0, 0])
     radii = [BRAIN_RADIUS, SKULL_RADIUS, SCALP_RADIUS]
     conductivities = [1, 5, 1 / 15, 1]
+    import time
+    start_time = time.time()
     harmonics = compute_outer_harmonics_for_dipoles(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=40, n_samples_for_decomposition=1000)
+    print(f"Time taken: {time.time() - start_time} seconds")
     print(harmonics)
     results = harmonics_to_phi_theta_grid(harmonics)
     from matplotlib import pyplot as plt
