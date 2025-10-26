@@ -7,6 +7,7 @@ from typing import Literal
 np.random.seed(239)
 
 BRAIN_RADIUS = 80  # mm
+CSF_RADIUS = 81
 SKULL_RADIUS = 86
 SCALP_RADIUS = 92
 
