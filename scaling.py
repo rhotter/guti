@@ -1,27 +1,26 @@
 # %%
-try:
-    import IPython
+from guti.notebook_utils import enable_autoreload
+enable_autoreload()
 
-    IPython.get_ipython().run_line_magic("load_ext", "autoreload")
-    IPython.get_ipython().run_line_magic("autoreload", "2")
-except:
-    pass
-
-# %%
 from guti.data_utils import list_svd_variants
+from guti.parameters import Parameters
 import matplotlib.pyplot as plt
 import numpy as np
 
-# modality_name = "fnirs_analytical_cw"
-modality_name = "us_analytical"
+modality_name = "fnirs_analytical_cw"
+# modality_name = "us_analytical"
 
 # %%
-# subdir = "grid_sweep"
-# param_key = "grid_resolution_mm"
-subdir = "us_free_field_analytical_n_sources_sweep_300khz_new"
-param_key = "num_brain_grid_points"
+# Specify which parameter to vary along the x-axis
+param_key = "grid_resolution_mm"
 
-variants = list_svd_variants(modality_name, subdir=subdir)
+# Specify parameters to hold constant (None = don't filter on that parameter)
+# Example: constant_params = Parameters(num_sensors=8000, time_resolution=1.0)
+constant_params = Parameters(
+    num_sensors=200,
+)  # No filtering by default
+
+variants = list_svd_variants(modality_name, constant_params=constant_params)
 for k, v in variants.items():
     print(f"  {k}: {v['params']}")
 
@@ -56,8 +55,7 @@ plt.xlabel("Singular Value Index")
 plt.ylabel("Singular Value")
 plt.title(f"{param_key} Scaling - {modality_name}")
 plt.ylim(1e-5, 1)
-# plt.show()
-plt.savefig(f"scaling_singular_values_{modality_name}_{param_key}.png")
+plt.show()
 
 # %%
 
@@ -92,7 +90,6 @@ plt.xlabel(param_key)
 plt.ylabel('Bitrate (bits/s)')
 plt.title(f'Bitrate vs {param_key} - {modality_name}')
 plt.grid(True)
-# plt.show()
-plt.savefig(f"scaling_bitrate_{modality_name}_{param_key}.png")
+plt.show()
 
 # %%

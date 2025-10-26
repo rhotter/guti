@@ -13,8 +13,8 @@ import h5py
 import matplotlib.pyplot as plt
 
 # Add autoreload for interactive development
-%load_ext autoreload
-%autoreload 2
+from guti.utils import enable_autoreload
+enable_autoreload()
 
 print(__doc__)
 

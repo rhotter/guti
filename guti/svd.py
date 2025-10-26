@@ -1,11 +1,12 @@
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.sparse.linalg import svds
-from scipy import sparse
 
 
 def compute_svd_cpu(Jac_cpu: np.ndarray) -> np.ndarray:
+    from scipy.sparse.linalg import svds
+    from scipy import sparse
+
     # Convert to sparse matrix if it isn't already
     if not sparse.issparse(Jac_cpu):
         Jac_cpu = sparse.csr_matrix(Jac_cpu)
@@ -18,6 +19,7 @@ def compute_svd_cpu(Jac_cpu: np.ndarray) -> np.ndarray:
 
 
 def compute_svd_gpu(Jac_gpu: torch.Tensor) -> np.ndarray:
+    print(f"Computing SVD...")
     # Move data to GPU and compute SVD
     # Jac_gpu = torch.tensor(Jac_cpu, device="cuda")
     
