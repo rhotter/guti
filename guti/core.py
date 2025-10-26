@@ -44,7 +44,7 @@ def get_sensor_positions(
     positions = np.stack([x, y, z], axis=1)
     # scale to SCALP_RADIUS and translate to center at (BRAIN_RADIUS, BRAIN_RADIUS, 0)
     positions = positions * (SCALP_RADIUS + offset) + np.array(
-        [SCALP_RADIUS, SCALP_RADIUS, 0]
+        [BRAIN_RADIUS, BRAIN_RADIUS, 0]
     )
     return positions[start_n:end_n]
 
