@@ -13,18 +13,26 @@ class Parameters:
     ----------
     num_sensors : int, optional
         Number of sensors used in the measurement
-    grid_resolution : float, optional
-        Resolution of the computational grid
+    grid_resolution_mm : float, optional
+        Resolution of the computational grid (mesh resolution)
+    source_spacing_mm : float, optional
+        Spacing between dipole sources (for EEG/MEG)
+    sensor_offset_mm : float, optional
+        Distance of sensors from scalp surface (for MEG: 5mm=OPMs, 20mm=SQUIDs)
     num_brain_grid_points : int, optional
         Number of grid points in the brain model
     time_resolution : float, optional
         Temporal resolution of the measurement
     comment : str, optional
         Additional comment or description
+    noise_full_brain : float, optional
+        Noise level for the full brain
     """
 
     num_sensors: Optional[int] = None
     grid_resolution_mm: Optional[float] = None
+    source_spacing_mm: Optional[float] = None
+    sensor_offset_mm: Optional[float] = None
     num_brain_grid_points: Optional[int] = None
     time_resolution: Optional[float] = None
     comment: Optional[str] = None
@@ -37,6 +45,8 @@ class Parameters:
             num_sensors=data.get("num_sensors"),
             grid_resolution_mm=data.get("grid_resolution_mm")
             or data.get("grid_resolution"),
+            source_spacing_mm=data.get("source_spacing_mm"),
+            sensor_offset_mm=data.get("sensor_offset_mm"),
             num_brain_grid_points=data.get("num_brain_grid_points"),
             time_resolution=data.get("time_resolution"),
             comment=data.get("comment"),

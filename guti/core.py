@@ -319,7 +319,7 @@ def get_cortical_positions(n_sources=N_SOURCES_DEFAULT, radius=BRAIN_RADIUS):
 
 
 def create_bem_model():
-    """Create a 3-layer spherical model with cortical sources for EIT."""
+    """Create a 3-layer spherical model with cortical sources."""
     # Ensure model directory exists
     os.makedirs("bem_model/", exist_ok=True)
 
@@ -330,7 +330,7 @@ def create_bem_model():
         ("scalp", SCALP_RADIUS),
     ]:
         # vertices, triangles = create_sphere(radius, n_phi=16, n_theta=10)
-        vertices, triangles = create_sphere(radius, resolution=10)
+        vertices, triangles = create_sphere(radius, resolution=5)
         write_tri(f"bem_model/{name}_sphere.tri", vertices, triangles)
 
     # Create the geometry file (format 1.1)
@@ -354,8 +354,8 @@ def create_bem_model():
         f.write(f"Brain       {BRAIN_CONDUCTIVITY}\n")
         f.write(f"Skull       {SKULL_CONDUCTIVITY}\n")
 
-    # Generate brain volume dipole positions for EEG/MEG/ECoG (interior sources)
-    brain_positions = get_grid_positions(grid_spacing_mm=5.0)
+    # Generate brain volume dipole positions for EEG/MEG (interior sources)
+    brain_positions = get_grid_positions(grid_spacing_mm=10.0)
     n_brain_sources = len(brain_positions)
     brain_orientations = get_random_orientations(n_brain_sources)
 
@@ -397,22 +397,194 @@ def create_bem_model():
             direction = head_center - pos
             orientation = direction / np.linalg.norm(direction)
             f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{orientation[0]:.6f}\t{orientation[1]:.6f}\t{orientation[2]:.6f}\n")
-    
-    # Generate ECoG sensor positions (on brain surface)
-    # ECoG sensors are placed directly on the cortical surface
-    brain_center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0])
-    ecog_sensor_positions = get_sensor_positions(N_SENSORS_DEFAULT)
-    
-    # Scale positions to brain surface instead of scalp
-    with open("bem_model/ecog_sensor_locations.txt", "w") as f:
-        for pos in eeg_sensor_positions:  # Start with EEG positions
-            # Project onto brain surface
-            direction = pos - head_center
-            distance = np.linalg.norm(direction)
-            if distance > 0:
-                # Scale to brain radius and translate to brain center
-                brain_pos = brain_center + (direction / distance) * BRAIN_RADIUS
-                f.write(f"{brain_pos[0]:.6f}\t{brain_pos[1]:.6f}\t{brain_pos[2]:.6f}\n")
+
+    print(f"EEG/MEG: Using {n_brain_sources} brain volume dipoles and {N_SENSORS_DEFAULT} sensors")
+    print(f"EIT: Using {n_cortical_sources} cortical dipoles and {N_SENSORS_DEFAULT} sensors")
+
+
+def _create_sphere_meshes(output_dir, grid_resolution):
+    """Create 3-layer spherical meshes (brain, skull, scalp).
+
+    Parameters
+    ----------
+    output_dir : str
+        Directory to write mesh files
+    grid_resolution : float
+        Grid resolution in mm (mesh resolution)
+    """
+    for name, radius in [
+        ("brain", BRAIN_RADIUS),
+        ("skull", SKULL_RADIUS),
+        ("scalp", SCALP_RADIUS),
+    ]:
+        vertices, triangles = create_sphere(radius, resolution=grid_resolution)
+        write_tri(f"{output_dir}/{name}_sphere.tri", vertices, triangles)
+
+
+def _write_geometry_file(output_dir):
+    """Write OpenMEEG geometry file.
+
+    Parameters
+    ----------
+    output_dir : str
+        Directory to write geometry file
+    """
+    with open(f"{output_dir}/sphere_head.geom", "w") as f:
+        f.write("# Domain Description 1.1\n\n")
+        f.write("Interfaces 3\n\n")
+        f.write('Interface Brain: "brain_sphere.tri"\n')
+        f.write('Interface Skull: "skull_sphere.tri"\n')
+        f.write('Interface Scalp: "scalp_sphere.tri"\n\n')
+        f.write("Domains 4\n\n")
+        f.write("Domain Brain: -Brain\n")
+        f.write("Domain Skull: -Skull +Brain\n")
+        f.write("Domain Scalp: -Scalp +Skull\n")
+        f.write("Domain Air: +Scalp\n")
+
+
+def _write_conductivity_file(output_dir):
+    """Write OpenMEEG conductivity file.
+
+    Parameters
+    ----------
+    output_dir : str
+        Directory to write conductivity file
+    """
+    with open(f"{output_dir}/sphere_head.cond", "w") as f:
+        f.write("# Properties Description 1.0 (Conductivities)\n\n")
+        f.write(f"Air         {AIR_CONDUCTIVITY}\n")
+        f.write(f"Scalp       {SCALP_CONDUCTIVITY}\n")
+        f.write(f"Brain       {BRAIN_CONDUCTIVITY}\n")
+        f.write(f"Skull       {SKULL_CONDUCTIVITY}\n")
+
+
+def create_eeg_bem_model(source_spacing_mm=10.0, n_sensors=N_SENSORS_DEFAULT, grid_resolution=20):
+    """Create BEM model specifically for EEG with configurable parameters.
+
+    Parameters
+    ----------
+    source_spacing_mm : float
+        Spacing between dipole sources in mm (smaller = more sources)
+    n_sensors : int
+        Number of scalp EEG sensors
+    grid_resolution : float
+        Grid resolution in mm for spherical meshes (mesh resolution)
+    """
+    output_dir = "bem_model/eeg"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create meshes, geometry, and conductivity files
+    _create_sphere_meshes(output_dir, grid_resolution)
+    _write_geometry_file(output_dir)
+    _write_conductivity_file(output_dir)
+
+    # Generate brain volume dipole positions
+    brain_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
+    brain_orientations = get_random_orientations(len(brain_positions))
+
+    # Write brain volume dipoles to file
+    with open(f"{output_dir}/dipole_locations.txt", "w") as f:
+        for pos, ori in zip(brain_positions, brain_orientations):
+            f.write(
+                f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
+            )
+
+    # Generate EEG sensor positions (scalp surface)
+    eeg_sensor_positions = get_sensor_positions(n_sensors)
+    with open(f"{output_dir}/sensor_locations.txt", "w") as f:
+        for pos in eeg_sensor_positions:
+            f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\n")
+
+    print(f"EEG BEM model: {len(brain_positions)} sources ({source_spacing_mm}mm spacing), {n_sensors} sensors, {grid_resolution}mm resolution")
+
+
+def create_meg_bem_model(source_spacing_mm=10.0, n_sensors=N_SENSORS_DEFAULT, grid_resolution=20, sensor_offset=20):
+    """Create BEM model specifically for MEG with configurable parameters.
+
+    Parameters
+    ----------
+    source_spacing_mm : float
+        Spacing between dipole sources in mm (smaller = more sources)
+    n_sensors : int
+        Number of MEG sensors
+    grid_resolution : float
+        Grid resolution in mm for spherical meshes (mesh resolution)
+    sensor_offset : float
+        Distance in mm that MEG sensors are placed outside the scalp
+        (5mm for OPMs, 20mm for SQUIDs)
+    """
+    output_dir = "bem_model/meg"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create meshes, geometry, and conductivity files
+    _create_sphere_meshes(output_dir, grid_resolution)
+    _write_geometry_file(output_dir)
+    _write_conductivity_file(output_dir)
+
+    # Generate brain volume dipole positions
+    brain_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
+    brain_orientations = get_random_orientations(len(brain_positions))
+
+    # Write brain volume dipoles to file
+    with open(f"{output_dir}/dipole_locations.txt", "w") as f:
+        for pos, ori in zip(brain_positions, brain_orientations):
+            f.write(
+                f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
+            )
+
+    # Generate MEG sensor positions (outside head with radial orientations)
+    meg_sensor_positions = get_sensor_positions(n_sensors, offset=sensor_offset)
+    head_center = np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
+
+    with open(f"{output_dir}/meg_sensor_locations.txt", "w") as f:
+        for pos in meg_sensor_positions:
+            # Calculate inward-pointing radial orientation
+            direction = head_center - pos
+            orientation = direction / np.linalg.norm(direction)
+            f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{orientation[0]:.6f}\t{orientation[1]:.6f}\t{orientation[2]:.6f}\n")
+
+    sensor_type = "OPMs" if sensor_offset == 5 else "SQUIDs" if sensor_offset == 20 else f"{sensor_offset}mm offset"
+    print(f"MEG BEM model: {len(brain_positions)} sources ({source_spacing_mm}mm spacing), {n_sensors} sensors ({sensor_type}), {grid_resolution}mm resolution")
+
+
+def create_eit_bem_model(n_sources=N_SOURCES_DEFAULT, n_sensors=N_SENSORS_DEFAULT, grid_resolution=20):
+    """Create BEM model specifically for EIT with configurable parameters.
+
+    Parameters
+    ----------
+    n_sources : int
+        Number of cortical surface dipole sources
+    n_sensors : int
+        Number of scalp EIT electrodes
+    grid_resolution : float
+        Grid resolution in mm for spherical meshes (mesh resolution)
+    """
+    output_dir = "bem_model/eit"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Create meshes, geometry, and conductivity files
+    _create_sphere_meshes(output_dir, grid_resolution)
+    _write_geometry_file(output_dir)
+    _write_conductivity_file(output_dir)
+
+    # Generate cortical dipole positions (on brain surface)
+    cortical_positions = get_cortical_positions(n_sources=n_sources)
+    cortical_orientations = get_random_orientations(len(cortical_positions))
+
+    # Write cortical dipoles to file
+    with open(f"{output_dir}/eit_dipole_locations.txt", "w") as f:
+        for pos, ori in zip(cortical_positions, cortical_orientations):
+            f.write(
+                f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
+            )
+
+    # Generate EIT sensor positions (scalp surface, same as EEG)
+    eit_sensor_positions = get_sensor_positions(n_sensors)
+    with open(f"{output_dir}/sensor_locations.txt", "w") as f:
+        for pos in eit_sensor_positions:
+            f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\n")
+
+    print(f"EIT BEM model: {len(cortical_positions)} cortical sources, {n_sensors} sensors, {grid_resolution}mm resolution")
 
 
 # ---- Bitrate calculations ----
