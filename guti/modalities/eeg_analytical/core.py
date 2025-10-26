@@ -12,9 +12,25 @@ Example usage:
     H = compute_eeg_transfer_function(conductivities, radii, l_max)
 """
 # %%
+import os
+import time
+
+# Configure JAX backend (e.g., Apple Metal) before importing jax
+# Opt-in via environment: export GUTI_JAX_BACKEND=metal | cpu
+from jax import config as jax_config
+# Prefer 64-bit for stability where supported
+jax_config.update("jax_enable_x64", True)
+_guti_backend = os.environ.get("GUTI_JAX_BACKEND")
+if _guti_backend in ("metal", "cpu"):
+    jax_config.update("jax_platform_name", "metal" if _guti_backend == "metal" else "cpu")
+del _guti_backend
+
+import jax
 import jax.numpy as jnp
 from jax.scipy.special import sph_harm
-from guti.core import BRAIN_RADIUS, SKULL_RADIUS, SCALP_RADIUS
+from guti.core import BRAIN_RADIUS, CSF_RADIUS, SKULL_RADIUS, SCALP_RADIUS, get_grid_positions
+from guti.data_utils import save_svd
+from guti.parameters import Parameters
 
 
 def compute_eeg_transfer_function(conductivities: list[float], radii: list[float] = [BRAIN_RADIUS, SKULL_RADIUS, SCALP_RADIUS], l_max: int = 100):
@@ -214,7 +230,7 @@ def compute_dipole_field(
         ) * l * legendre_polynomial(l, cos_thetas)
         values = values + contribution
 
-    return values
+    return jnp.nan_to_num(values)
 
 
 def _fibonacci_sphere(n):
@@ -316,12 +332,36 @@ def reconstruct_on(theta, phi, coeffs, l_max):
 
 def compute_outer_harmonics_for_dipoles(dipole_positions: jnp.ndarray, dipole_moments: jnp.ndarray, center_position: jnp.ndarray, radii: list[float], conductivities: list[float], l_max: int = 100, n_samples_for_decomposition: int | None = None):
     def field_function(positions: jnp.ndarray):
-        results = jnp.zeros(len(positions))
+        # Shift sampling positions to absolute coordinates centered at the head center
+        positions_abs = positions + center_position
+        results = jnp.zeros(len(positions_abs))
         for dipole_position, dipole_moment in zip(dipole_positions, dipole_moments):
-            results = results + compute_dipole_field(dipole_position, dipole_moment, positions, center_position, radii, conductivities, l_max)
+            results = results + jnp.nan_to_num(
+                compute_dipole_field(
+                    dipole_position,
+                    dipole_moment,
+                    positions_abs,
+                    center_position,
+                    radii,
+                    conductivities,
+                    l_max,
+                )
+            )
         return results
-    inner_harmonics, meta = spherical_harmonic_decomposition(field_function, l_max, BRAIN_RADIUS, n_samples=n_samples_for_decomposition)
+    # Prefer stable quadrature over LS to avoid ill-conditioned solves during autodiff
+    L = (l_max + 1) ** 2
+    n_samples = n_samples_for_decomposition if n_samples_for_decomposition is not None else int(6 * L)
+    n_samples = int(jnp.maximum(n_samples, 4 * L))
+    inner_harmonics, meta = spherical_harmonic_decomposition(
+        field_function,
+        l_max,
+        BRAIN_RADIUS,
+        n_samples=n_samples,
+        method="quadrature",
+    )
+    inner_harmonics = jnp.nan_to_num(inner_harmonics)
     transfer_function = compute_eeg_transfer_function(conductivities, radii, l_max)  # shape (l_max+1,)
+    transfer_function = jnp.nan_to_num(transfer_function)
     # Expand transfer function across m for each l
     lms = meta["lms"]
     weights = jnp.array([transfer_function[l] for (l, m) in lms])
@@ -336,9 +376,11 @@ def harmonics_to_phi_theta_grid(harmonics: jnp.ndarray, num_phi: int = 100, num_
     # Infer l_max from coefficient vector length
     L = harmonics.shape[0]
     l_max = int(jnp.sqrt(L).astype(int)) - 1
-    # Create grid
-    phi = jnp.linspace(0, 2 * jnp.pi, num_phi)
-    theta = jnp.linspace(0, jnp.pi, num_theta)
+    # Create grid (avoid exact poles and 2π to keep sph_harm stable)
+    phi_step = (2.0 * jnp.pi) / num_phi
+    theta_step = jnp.pi / num_theta
+    phi = jnp.arange(num_phi) * phi_step + 0.5 * phi_step
+    theta = jnp.arange(num_theta) * theta_step + 0.5 * theta_step
     phi_grid, theta_grid = jnp.meshgrid(phi, theta)  # shapes (num_theta, num_phi)
     # Flatten for evaluation
     phi_flat = phi_grid.reshape(-1)
@@ -352,24 +394,92 @@ def harmonics_to_phi_theta_grid(harmonics: jnp.ndarray, num_phi: int = 100, num_
         Y_lm = sph_harm(m_arr, l_arr, phi_flat, theta_flat)
         result_flat = result_flat + harmonics[idx] * Y_lm
     result = result_flat.reshape(theta_grid.shape)
-    return jnp.real(result)
+    return jnp.real(jnp.nan_to_num(result))
 
+
+# Jacobians w.r.t. dipole moments
+def jacobian_outer_harmonics_wrt_dipole_moments(
+    dipole_positions: jnp.ndarray,
+    dipole_moments: jnp.ndarray,
+    center_position: jnp.ndarray,
+    radii: list[float],
+    conductivities: list[float],
+    l_max: int = 100,
+    n_samples_for_decomposition: int | None = None,
+):
+    """Jacobian d Re[outer_harmonics] / d dipole_moments.
+
+    Returns array of shape ((l_max+1)^2, num_dipoles).
+    """
+    def f(dmom: jnp.ndarray) -> jnp.ndarray:
+        outer = compute_outer_harmonics_for_dipoles(
+            dipole_positions,
+            dmom,
+            center_position,
+            radii,
+            conductivities,
+            l_max=l_max,
+            n_samples_for_decomposition=n_samples_for_decomposition,
+        )
+        return jnp.real(outer)
+
+    return jax.jacrev(f)(dipole_moments)
+
+
+def jacobian_grid_wrt_dipole_moments(
+    dipole_positions: jnp.ndarray,
+    dipole_moments: jnp.ndarray,
+    center_position: jnp.ndarray,
+    radii: list[float],
+    conductivities: list[float],
+    l_max: int = 100,
+    n_samples_for_decomposition: int | None = None,
+    num_phi: int = 100,
+    num_theta: int = 100,
+):
+    """Jacobian d scalp_grid / d dipole_moments.
+
+    Returns array of shape (num_theta*num_phi, num_dipoles), grid flattened row-major.
+    """
+    def g(dmom: jnp.ndarray) -> jnp.ndarray:
+        outer = compute_outer_harmonics_for_dipoles(
+            dipole_positions,
+            dmom,
+            center_position,
+            radii,
+            conductivities,
+            l_max=l_max,
+            n_samples_for_decomposition=n_samples_for_decomposition,
+        )
+        grid = harmonics_to_phi_theta_grid(outer, num_phi=num_phi, num_theta=num_theta)
+        vec = grid.reshape(-1)
+        return jnp.nan_to_num(vec)
+
+    return jax.jacrev(g)(dipole_moments)
+
+def compute_svd(dipole_grid_spacing: float = 20., l_max: int = 40, n_samples_for_decomposition: int | None = None, num_phi: int = 50, num_theta: int = 50):
+    if n_samples_for_decomposition is None:
+        n_samples_for_decomposition = num_phi * num_theta
+    dipole_positions = get_grid_positions(dipole_grid_spacing)
+    dipole_moments = jnp.array([1.])
+    center_position = jnp.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.])
+    radii = jnp.array([BRAIN_RADIUS, CSF_RADIUS, SKULL_RADIUS, SCALP_RADIUS])
+    conductivities = [1, 5, 1 / 15, 1]
+    start_time = time.time()
+    # harmonics = compute_outer_harmonics_for_dipoles(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=40, n_samples_for_decomposition=1000)
+    jac = jacobian_grid_wrt_dipole_moments(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=l_max, n_samples_for_decomposition=n_samples_for_decomposition, num_phi=num_phi, num_theta=num_theta)
+    u, s, vh = jnp.linalg.svd(jac, full_matrices=False)
+    save_svd(s, 'eeg_analytical', Parameters(
+        num_brain_grid_points=len(dipole_positions),
+        source_spacing_mm=dipole_grid_spacing,
+        num_sensors=num_phi * num_theta,
+    ))
+    print(f"Time taken: {time.time() - start_time} seconds")
+    print(jac)
+    print(jnp.max(jnp.abs(jac)))
 
 # %%
 if __name__ == "__main__":
-    dipole_positions = jnp.array([[0.5, 0, 0]])
-    dipole_moments = jnp.array([1])
-    center_position = jnp.array([0, 0, 0])
-    radii = [BRAIN_RADIUS, SKULL_RADIUS, SCALP_RADIUS]
-    conductivities = [1, 5, 1 / 15, 1]
-    import time
-    start_time = time.time()
-    harmonics = compute_outer_harmonics_for_dipoles(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=40, n_samples_for_decomposition=1000)
-    print(f"Time taken: {time.time() - start_time} seconds")
-    print(harmonics)
-    results = harmonics_to_phi_theta_grid(harmonics)
-    from matplotlib import pyplot as plt
-    plt.imshow(results)
-    plt.show()
+    compute_svd()
 
 # %%
