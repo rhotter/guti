@@ -9,16 +9,22 @@ import torch
 import jax
 
 
-def create_medium():
+def create_medium(central_frequency: float = 0.25e6, pad: int = None):
+    min_speed_of_sound = 1500.
+    PPW = 6
     # Simulation parameters
-    dx_mm = 0.25
-    # dx_mm = 0.5
-    # dx_mm = 1.5
-    # dx_mm = 1.5
-    dx = (dx_mm * 1e-3, dx_mm * 1e-3, dx_mm * 1e-3)
+    dx_m = min_speed_of_sound / (PPW * central_frequency)
+    print(f"dx_m: {dx_m}")
+    dx = (dx_m, dx_m, dx_m)
 
-    tissues_map = get_voxel_mask(dx_mm, offset=8) #0.5mm resolution
-    tissues_map = tissues_map[30:-30,30:-30,30:]
+    tissues_map = get_voxel_mask(dx_m * 1e3, offset=8) #0.5mm resolution
+    if pad is not None:
+        if pad > 0:
+            # Positive pad: add padding around the domain
+            tissues_map = np.pad(tissues_map, ((pad, pad), (pad, pad), (pad, 0)), mode='constant', constant_values=0)
+        elif pad < 0:
+            # Negative pad: crop into the domain
+            tissues_map = tissues_map[-pad:pad, -pad:pad, -pad:]
     N = tuple(tissues_map.shape)
     print(f"Domain size: {N}")
     domain = Domain(N, dx)
@@ -41,15 +47,17 @@ def create_medium():
     density = jnp.where(tissues_map == 3, 1000., 1000.)
     density_field = FourierSeries(density, domain)
 
-    # pml_size = 20
     pml_size = 7
     # Pad the domain by the PML size to ensure proper absorption at boundaries
     domain = Domain(N, dx)
 
+    extent = N[0] * dx[0]
+    time_duration = extent / min_speed_of_sound
+    print(f"time_duration: {time_duration}")
+
     # Update the tissue masks to match the padded domain
     medium = Medium(domain=domain, sound_speed=sound_speed, density=density_field, pml_size=pml_size)
-    time_axis = TimeAxis.from_medium(medium, cfl=0.15, t_end=50e-06)
-    # time_axis = TimeAxis.from_medium(medium, cfl=0.3, t_end=5e-06)
+    time_axis = TimeAxis.from_medium(medium, cfl=0.15, t_end=time_duration)
 
     brain_mask = tissues_map == 1
     skull_mask = tissues_map == 2
@@ -57,7 +65,7 @@ def create_medium():
 
     return domain, medium, time_axis, brain_mask, skull_mask, scalp_mask
 
-def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, pad: int = 30):
+def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, pad: int = 0):
     """
     Create sources and source mask.
     """
@@ -68,23 +76,24 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
 
     grid_spacing_mm = ((2/3) * np.pi * BRAIN_RADIUS**3 / n_sources)**(1/3)
 
-    # Get spiral sensor positions in world coordinates
+    # Get spiral source positions in world coordinates
     if not inside:
-        sensor_positions = get_sensor_positions(n_sensors=n_sources, offset=8)
+        source_positions = get_sensor_positions(n_sensors=n_sources, offset=8)
     else:
-        sensor_positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
+        source_positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
+    print("Got source positions")
     # Convert to voxel indices
-    sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
-    x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
-    x, y, z = sensor_positions_voxels[:, 0], sensor_positions_voxels[:, 1], sensor_positions_voxels[:, 2]
+    source_positions_voxels = jnp.floor(source_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
+    x_real, y_real, z_real = source_positions[:, 0], source_positions[:, 1], source_positions[:, 2]
+    x, y, z = source_positions_voxels[:, 0], source_positions_voxels[:, 1], source_positions_voxels[:, 2]
     pad_x = pad_y = pad_z = pad
     # Filter positions within the padded volume
     valid_indices = (
-        (x_real >= pad_x * dx[0] * 1e3) & (x_real < N[0] * dx[0] * 1e3 + pad_x * dx[0] * 1e3) &
-        (y_real >= pad_y * dx[1] * 1e3) & (y_real < N[1] * dx[1] * 1e3 + pad_y * dx[1] * 1e3) &
-        (z_real >= pad_z * dx[2] * 1e3) & (z_real < N[2] * dx[2] * 1e3 + pad_z * dx[2] * 1e3)
+        (x_real >= -pad_x * dx[0] * 1e3) & (x_real < N[0] * dx[0] * 1e3 + pad_x * dx[0] * 1e3) &
+        (y_real >= -pad_y * dx[1] * 1e3) & (y_real < N[1] * dx[1] * 1e3 + pad_y * dx[1] * 1e3) &
+        (z_real >= -pad_z * dx[2] * 1e3) & (z_real < N[2] * dx[2] * 1e3 + pad_z * dx[2] * 1e3)
     )
-    x -= pad_x; y -= pad_y; z -= pad_z
+    x += pad_x; y += pad_y; z += pad_z
     x, y, z = x[valid_indices], y[valid_indices], z[valid_indices]
     N_sources = x.shape[0]
 
@@ -105,7 +114,7 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
     return sources, source_mask
 
 
-def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 30):
+def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
     N = domain.N
     dx = domain.dx
     # Get spiral sensor positions in world coordinates
@@ -121,11 +130,11 @@ def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, st
     pad_x = pad_y = pad_z = pad
     # Filter positions within the padded volume
     valid_indices = (
-        (x_real >= pad_x * dx[0] * 1e3) & (x_real < N[0] * dx[0] * 1e3 + pad_x * dx[0] * 1e3) &
-        (y_real >= pad_y * dx[1] * 1e3) & (y_real < N[1] * dx[1] * 1e3 + pad_y * dx[1] * 1e3) &
-        (z_real >= pad_z * dx[2] * 1e3) & (z_real < N[2] * dx[2] * 1e3 + pad_z * dx[2] * 1e3)
+        (x_real >= -pad_x * dx[0] * 1e3) & (x_real < N[0] * dx[0] * 1e3 + pad_x * dx[0] * 1e3) &
+        (y_real >= -pad_y * dx[1] * 1e3) & (y_real < N[1] * dx[1] * 1e3 + pad_y * dx[1] * 1e3) &
+        (z_real >= -pad_z * dx[2] * 1e3) & (z_real < N[2] * dx[2] * 1e3 + pad_z * dx[2] * 1e3)
     )
-    x -= pad_x; y -= pad_y; z -= pad_z
+    x += pad_x; y += pad_y; z += pad_z
     x, y, z = x[valid_indices], y[valid_indices], z[valid_indices]
 
     # Create receiver mask
