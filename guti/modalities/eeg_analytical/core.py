@@ -14,6 +14,7 @@ Example usage:
 # %%
 import os
 import time
+from functools import partial
 
 # Configure JAX backend (e.g., Apple Metal) before importing jax
 # Opt-in via environment: export GUTI_JAX_BACKEND=metal | cpu
@@ -181,8 +182,11 @@ def compute_spherical_harmonic(l: int, m: int, positions: jnp.ndarray) -> jnp.nd
     # Ensure degree/order are arrays matching the sampling points
     m_arr = jnp.full(theta.shape, m, dtype=jnp.int32)
     l_arr = jnp.full(theta.shape, l, dtype=jnp.int32)
+    # Ensure float32 inputs and complex64 output
+    theta32 = theta.astype(jnp.float32)
+    phi32 = phi.astype(jnp.float32)
     # sph_harm signature: (m, n, theta[azimuth], phi[polar])
-    Y_lm = sph_harm(m_arr, l_arr, phi, theta)
+    Y_lm = sph_harm(m_arr, l_arr, phi32, theta32).astype(jnp.complex64)
     return Y_lm
 
 
@@ -257,7 +261,9 @@ def _design_matrix(theta, phi, l_max):
     for k, (l, m) in enumerate(lms):
         m_arr = jnp.full(theta.shape, m, dtype=jnp.int32)
         l_arr = jnp.full(theta.shape, l, dtype=jnp.int32)
-        A = A.at[:, k].set(sph_harm(m_arr, l_arr, phi, theta))
+        theta32 = theta.astype(jnp.float32)
+        phi32 = phi.astype(jnp.float32)
+        A = A.at[:, k].set(sph_harm(m_arr, l_arr, phi32, theta32).astype(jnp.complex64))
     return A
 
 def spherical_harmonic_decomposition(
@@ -326,8 +332,9 @@ def spherical_harmonic_decomposition(
     return coeffs, meta
 
 def reconstruct_on(theta, phi, coeffs, l_max):
-    A = _design_matrix(theta, phi, l_max)
-    return jnp.real(A @ coeffs)  # if you expect a real field
+    # Enforce float32 angles and complex64 coeffs to avoid upcast
+    A = _design_matrix(theta.astype(jnp.float32), phi.astype(jnp.float32), l_max)
+    return jnp.real(A @ coeffs.astype(jnp.complex64))
 
 
 def compute_outer_harmonics_for_dipoles(dipole_positions: jnp.ndarray, dipole_moments: jnp.ndarray, center_position: jnp.ndarray, radii: list[float], conductivities: list[float], l_max: int = 100, n_samples_for_decomposition: int | None = None):
@@ -359,13 +366,14 @@ def compute_outer_harmonics_for_dipoles(dipole_positions: jnp.ndarray, dipole_mo
         n_samples=n_samples,
         method="quadrature",
     )
-    inner_harmonics = jnp.nan_to_num(inner_harmonics)
+    # Keep harmonics as complex64 to avoid upcasts later
+    inner_harmonics = jnp.nan_to_num(inner_harmonics).astype(jnp.complex64)
     transfer_function = compute_eeg_transfer_function(conductivities, radii, l_max)  # shape (l_max+1,)
     transfer_function = jnp.nan_to_num(transfer_function)
     # Expand transfer function across m for each l
     lms = meta["lms"]
     weights = jnp.array([transfer_function[l] for (l, m) in lms])
-    outer_harmonics = inner_harmonics * weights
+    outer_harmonics = (inner_harmonics * weights.astype(jnp.complex64)).astype(jnp.complex64)
     return outer_harmonics
 
 
@@ -383,15 +391,15 @@ def harmonics_to_phi_theta_grid(harmonics: jnp.ndarray, num_phi: int = 100, num_
     theta = jnp.arange(num_theta) * theta_step + 0.5 * theta_step
     phi_grid, theta_grid = jnp.meshgrid(phi, theta)  # shapes (num_theta, num_phi)
     # Flatten for evaluation
-    phi_flat = phi_grid.reshape(-1)
-    theta_flat = theta_grid.reshape(-1)
+    phi_flat = phi_grid.reshape(-1).astype(jnp.float32)
+    theta_flat = theta_grid.reshape(-1).astype(jnp.float32)
     # Accumulate reconstruction
     result_flat = jnp.zeros_like(phi_flat, dtype=jnp.complex64)
     lms = _lm_list(l_max)
     for idx, (l, m) in enumerate(lms):
         m_arr = jnp.full(theta_flat.shape, m, dtype=jnp.int32)
         l_arr = jnp.full(theta_flat.shape, l, dtype=jnp.int32)
-        Y_lm = sph_harm(m_arr, l_arr, phi_flat, theta_flat)
+        Y_lm = sph_harm(m_arr, l_arr, phi_flat, theta_flat).astype(jnp.complex64)
         result_flat = result_flat + harmonics[idx] * Y_lm
     result = result_flat.reshape(theta_grid.shape)
     return jnp.real(jnp.nan_to_num(result))
@@ -457,29 +465,90 @@ def jacobian_grid_wrt_dipole_moments(
 
     return jax.jacrev(g)(dipole_moments)
 
-def compute_svd(dipole_grid_spacing: float = 20., l_max: int = 40, n_samples_for_decomposition: int | None = None, num_phi: int = 50, num_theta: int = 50):
-    if n_samples_for_decomposition is None:
-        n_samples_for_decomposition = num_phi * num_theta
-    dipole_positions = get_grid_positions(dipole_grid_spacing)
+
+def compute_grids_for_radial_dipoles(
+    num_dipoles: int = 30,
+    max_radius: float = BRAIN_RADIUS,
+    num_phi: int = 40,
+    num_theta: int = 40,
+    l_max: int = 40,
+    n_samples_for_decomposition: int | None = None,
+):
+    dipole_positions = jnp.array([[r, 0., 0] for r in jnp.linspace(0., max_radius, num_dipoles)])
     dipole_moments = jnp.array([1.])
     center_position = jnp.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.])
     radii = jnp.array([BRAIN_RADIUS, CSF_RADIUS, SKULL_RADIUS, SCALP_RADIUS])
     conductivities = [1, 5, 1 / 15, 1]
+    n_samples_for_decomposition = n_samples_for_decomposition or num_phi * num_theta
+    def _single_grid(dp):
+        harmonics = compute_outer_harmonics_for_dipoles(
+            jnp.asarray([dp]),  # pass a single-dipole batch
+            dipole_moments,
+            center_position,
+            radii,
+            conductivities,
+            l_max=l_max,
+            n_samples_for_decomposition=n_samples_for_decomposition,
+        )
+        return harmonics_to_phi_theta_grid(harmonics, num_phi=num_phi, num_theta=num_theta)
+
+    grids = jax.vmap(_single_grid, in_axes=(0,), out_axes=0)(dipole_positions)
+    return grids
+
+
+@partial(jax.jit, static_argnames=("n_permutations_each_dir",))
+def permute_grids(grids: jnp.ndarray, n_permutations_each_dir: int = 10):
+    """Generate all circular shifts of each 2D grid along both axes.
+
+    Args:
+        grids: array of shape (num_grids, H, W)
+        n_permutations_each_dir: number of shifts per axis (0..n-1)
+
+    Returns:
+        Array of shape (num_grids * n^2, H, W) with all (i,j) shifts stacked.
+    """
+    n = n_permutations_each_dir
+    shifts_1d = jnp.arange(n, dtype=jnp.int32)
+    si, sj = jnp.meshgrid(shifts_1d, shifts_1d, indexing="ij")
+    shifts = jnp.stack([si.reshape(-1), sj.reshape(-1)], axis=1)  # (K, 2), K=n*n
+
+    def roll2d(grid: jnp.ndarray, shift: jnp.ndarray) -> jnp.ndarray:
+        # shift: (2,) ints
+        return jnp.roll(grid, (shift[0], shift[1]), axis=(0, 1))
+
+    vm_roll_over_shifts = jax.vmap(roll2d, in_axes=(None, 0), out_axes=0)
+    vm_over_grids = jax.vmap(lambda g: vm_roll_over_shifts(g, shifts), in_axes=0, out_axes=0)
+
+    # result shape: (num_grids, K, H, W)
+    result = vm_over_grids(grids)
+    # merge the first two axes to match the original API
+    num_perms = shifts.shape[0]
+    return result.reshape((grids.shape[0] * num_perms, grids.shape[1] * grids.shape[2]))
+
+def compute_svd(num_radial_dipoles: int = 30, num_permutations_each_dir: int = 10, l_max: int = 40, n_samples_for_decomposition: int | None = None, num_phi: int = 50, num_theta: int = 50):
+    if n_samples_for_decomposition is None:
+        n_samples_for_decomposition = num_phi * num_theta
     start_time = time.time()
     # harmonics = compute_outer_harmonics_for_dipoles(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=40, n_samples_for_decomposition=1000)
-    jac = jacobian_grid_wrt_dipole_moments(dipole_positions, dipole_moments, center_position, radii, conductivities, l_max=l_max, n_samples_for_decomposition=n_samples_for_decomposition, num_phi=num_phi, num_theta=num_theta)
-    u, s, vh = jnp.linalg.svd(jac, full_matrices=False)
+    grids = compute_grids_for_radial_dipoles(
+        num_dipoles=num_radial_dipoles, max_radius=BRAIN_RADIUS, num_phi=num_phi, num_theta=num_theta)
+    permuted_grids = permute_grids(grids, n_permutations_each_dir=num_permutations_each_dir)
+    u, s, vh = jnp.linalg.svd(permuted_grids, full_matrices=False)
     save_svd(s, 'eeg_analytical', Parameters(
-        num_brain_grid_points=len(dipole_positions),
-        source_spacing_mm=dipole_grid_spacing,
+        num_brain_grid_points=num_radial_dipoles * num_permutations_each_dir ** 2,
         num_sensors=num_phi * num_theta,
     ))
     print(f"Time taken: {time.time() - start_time} seconds")
-    print(jac)
-    print(jnp.max(jnp.abs(jac)))
 
 # %%
 if __name__ == "__main__":
-    compute_svd()
+    for source_scaling in [0.1, 0.5, 1, 10, 100]:
+        for sensor_scaling in [0.1, 0.5, 1, 5, 10]:
+            num_phi = int(35 * sensor_scaling ** 0.5)
+            num_theta = int(35 * sensor_scaling ** 0.5)
+            num_radial_dipoles = int(20 * source_scaling ** 0.33)
+            num_permutations_each_dir = int(20 * source_scaling ** 0.33)
+            print(f"Computing SVD for {num_radial_dipoles} radial dipoles, {num_permutations_each_dir} permutations each direction, {num_phi} phi, {num_theta} theta")
+            compute_svd(num_radial_dipoles=num_radial_dipoles, num_permutations_each_dir=num_permutations_each_dir, num_phi=num_phi, num_theta=num_theta)
 
 # %%
