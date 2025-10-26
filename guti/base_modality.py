@@ -1,0 +1,191 @@
+"""
+Base class for all imaging modalities in GUTI.
+
+Provides a unified interface for:
+- Geometry setup (sources, sensors, tissue)
+- Forward model computation (Jacobian/sensitivity matrix)
+- SVD analysis
+- Results storage with parameter tracking
+"""
+
+from abc import ABC, abstractmethod
+from typing import Optional, Any
+import numpy as np
+from guti.parameters import Parameters
+
+
+class ImagingModality(ABC):
+    """
+    Abstract base class for all imaging modalities.
+
+    All modalities follow the same workflow:
+    1. Setup geometry (sources, sensors, tissue)
+    2. Compute forward model (Jacobian matrix)
+    3. Perform SVD analysis
+    4. Save results with parameter tracking
+
+    Subclasses must implement:
+    - modality_name(): Return string identifier
+    - setup_geometry(): Define sources, sensors, tissue geometry
+    - compute_forward_model(): Return Jacobian matrix (n_measurements, n_sources)
+    - _get_default_modality_params(): Return default parameter dictionary
+
+    Example usage:
+        modality = FNIRSAnalytical({'num_sensors': 400, 'grid_resolution_mm': 8.0})
+        singular_values = modality.run()
+    """
+
+    def __init__(self, params: Optional[Parameters] = None):
+        """
+        Initialize imaging modality with parameters.
+
+        Parameters
+        ----------
+        params : Parameters, optional
+            Parameters object. If None, uses defaults from _get_default_modality_params().
+        """
+        # Use provided params or defaults
+        self.params = (
+            params if params is not None else self._get_default_modality_params()
+        )
+
+        # Will be populated during run()
+        self.geometry = None
+        self.sources = None
+        self.sensors = None
+        self.tissue_mask = None
+        self.jacobian = None
+
+    @abstractmethod
+    def modality_name(self) -> str:
+        """
+        Return modality identifier string.
+
+        Returns
+        -------
+        str
+            Modality name (e.g., 'eeg', 'meg', 'fnirs_analytical_cw')
+            Used for results storage and identification.
+        """
+        pass
+
+    @abstractmethod
+    def setup_geometry(self) -> None:
+        """
+        Define sources, sensors, and tissue geometry.
+
+        Should populate at minimum:
+        - self.sources: Array of source positions (n_sources, 3)
+        - self.sensors: Array of sensor positions (n_sensors, 3)
+
+        Optionally:
+        - self.tissue_mask: 3D array of tissue labels
+        - self.geometry: Modality-specific geometry object
+
+        May update self.modality_params with computed values
+        (e.g., actual num_brain_grid_points after filtering).
+        """
+        pass
+
+    @abstractmethod
+    def compute_forward_model(self) -> Any:
+        """
+        Compute the Jacobian/sensitivity matrix.
+
+        Returns
+        -------
+        Any
+            Jacobian matrix of shape (n_measurements, n_sources)
+            where each element J[i,j] represents the sensitivity of
+            measurement i to source j.
+            Can be a NumPy array, PyTorch tensor, JAX array, or any other array-like object.
+        """
+        pass
+
+    def _get_default_modality_params(self) -> Parameters:
+        """
+        Return default parameter dictionary for this modality.
+
+
+        Standard fields will be automatically extracted for save_svd().
+        Physics-specific fields are only used internally.
+
+        Returns
+        -------
+        Parameters
+            Default parameters. User-provided params will override these.
+
+        Example
+        -------
+        return Parameters(
+            # Standard Parameters fields
+            num_sensors=800,
+            grid_resolution_mm=6.0,
+        )
+        """
+        return Parameters()
+
+    def run(self, save_results: bool = True) -> np.ndarray:
+        """
+        Execute complete pipeline: geometry → forward model → SVD → save.
+
+        Parameters
+        ----------
+        save_results : bool, default=True
+            Whether to save SVD results to disk with parameter tracking.
+
+        Returns
+        -------
+        np.ndarray
+            Singular values from SVD analysis.
+        """
+        print(f"[{self.modality_name()}] Setting up geometry...")
+        self.setup_geometry()
+
+        print(f"[{self.modality_name()}] Computing forward model...")
+        self.jacobian = self.compute_forward_model()
+
+        print(f"[{self.modality_name()}] Jacobian shape: {self.jacobian.shape}")
+        print(f"[{self.modality_name()}] Performing SVD analysis...")
+        singular_values = self.compute_svd()
+
+        if save_results:
+            print(f"[{self.modality_name()}] Saving results...")
+            self.save_results(singular_values)
+
+        print(f"[{self.modality_name()}] Complete!")
+        return singular_values
+
+    def compute_svd(self) -> np.ndarray:
+        """
+        Perform SVD analysis with automatic GPU/CPU fallback.
+
+        Returns
+        -------
+        np.ndarray
+            Singular values in descending order.
+        """
+        from guti.svd import compute_svd_gpu, compute_svd_cpu
+
+        try:
+            return compute_svd_gpu(self.jacobian)
+        except Exception as e:
+            print(f"GPU SVD failed ({e}), falling back to CPU...")
+            return compute_svd_cpu(self.jacobian)
+
+    def save_results(self, singular_values: np.ndarray) -> None:
+        """
+        Save SVD results with parameter tracking.
+
+        Parameters
+        ----------
+        singular_values : np.ndarray
+            Singular values from SVD analysis.
+        """
+        from guti.data_utils import save_svd
+
+        save_svd(singular_values, self.modality_name(), self.params)
+
+    def __repr__(self) -> str:
+        """String representation showing modality name and parameters."""
+        return f"{self.__class__.__name__}({self.params})"
