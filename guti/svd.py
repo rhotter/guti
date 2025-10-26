@@ -19,10 +19,6 @@ def compute_svd_cpu(Jac_cpu: np.ndarray) -> np.ndarray:
 
 
 def compute_svd_gpu(Jac_gpu: torch.Tensor) -> np.ndarray:
-    print(f"Computing SVD...")
-    # Move data to GPU and compute SVD
-    # Jac_gpu = torch.tensor(Jac_cpu, device="cuda")
-    
     try:
         # Try with the default driver first
         s = torch.linalg.svdvals(Jac_gpu)

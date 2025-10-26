@@ -133,9 +133,3 @@ if __name__ == "__main__":
     params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
     modality = FNIRSAnalytical(params)
     singular_values = modality.run()
-
-    # Example: Run parameter sweep
-    # run_fnirs_analytical_sweep(
-    #     num_sensors_list=[400, 800],
-    #     grid_spacing_list=[6.0, 8.0]
-    # )

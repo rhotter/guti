@@ -11,6 +11,7 @@ Provides a unified interface for:
 from abc import ABC, abstractmethod
 from typing import Optional, Any
 import numpy as np
+import time
 from guti.parameters import Parameters
 
 
@@ -31,7 +32,7 @@ class ImagingModality(ABC):
     - _get_default_modality_params(): Return default parameter dictionary
 
     Example usage:
-        modality = FNIRSAnalytical({'num_sensors': 400, 'grid_resolution_mm': 8.0})
+        modality = FNIRSAnalytical(Parameters(num_sensors=400, grid_resolution_mm=8.0))
         singular_values = modality.run()
     """
 
@@ -48,13 +49,6 @@ class ImagingModality(ABC):
         self.params = (
             params if params is not None else self._get_default_modality_params()
         )
-
-        # Will be populated during run()
-        self.geometry = None
-        self.sources = None
-        self.sensors = None
-        self.tissue_mask = None
-        self.jacobian = None
 
     @abstractmethod
     def modality_name(self) -> str:
@@ -79,7 +73,6 @@ class ImagingModality(ABC):
         - self.sensors: Array of sensor positions (n_sensors, 3)
 
         Optionally:
-        - self.tissue_mask: 3D array of tissue labels
         - self.geometry: Modality-specific geometry object
 
         May update self.modality_params with computed values
@@ -139,21 +132,28 @@ class ImagingModality(ABC):
         np.ndarray
             Singular values from SVD analysis.
         """
+        t0 = time.perf_counter()
         print(f"[{self.modality_name()}] Setting up geometry...")
         self.setup_geometry()
 
         print(f"[{self.modality_name()}] Computing forward model...")
+        start_time = time.perf_counter()
         self.jacobian = self.compute_forward_model()
+        forward_time = time.perf_counter() - start_time
+        print(f"[{self.modality_name()}] Forward model computed in {forward_time:.2f} seconds")
 
         print(f"[{self.modality_name()}] Jacobian shape: {self.jacobian.shape}")
-        print(f"[{self.modality_name()}] Performing SVD analysis...")
+        print(f"[{self.modality_name()}] Computing SVD...")
+        start_time = time.perf_counter()
         singular_values = self.compute_svd()
+        svd_time = time.perf_counter() - start_time
+        print(f"[{self.modality_name()}] SVD computed in {svd_time:.2f} seconds")
 
         if save_results:
             print(f"[{self.modality_name()}] Saving results...")
             self.save_results(singular_values)
 
-        print(f"[{self.modality_name()}] Complete!")
+        print(f"[{self.modality_name()}] Completed in {time.perf_counter() - t0:.2f} seconds")
         return singular_values
 
     def compute_svd(self) -> np.ndarray:
