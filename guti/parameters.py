@@ -38,6 +38,10 @@ class Parameters:
     comment: Optional[str] = None
     noise_full_brain: Optional[float] = None
 
+    # for 1d blurring
+    input_dim: Optional[int] = None
+    output_dim: Optional[int] = None
+
     @classmethod
     def from_dict(cls, data: Dict) -> "Parameters":
         """Create Parameters object from dictionary."""
@@ -51,6 +55,8 @@ class Parameters:
             time_resolution=data.get("time_resolution"),
             comment=data.get("comment"),
             noise_full_brain=data.get("noise_full_brain"),
+            input_dim=data.get("input_dim"),
+            output_dim=data.get("output_dim"),
         )
 
     def __str__(self) -> str:
