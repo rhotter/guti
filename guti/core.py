@@ -589,15 +589,14 @@ def create_eit_bem_model(n_sources=N_SOURCES_DEFAULT, n_sensors=N_SENSORS_DEFAUL
 
 # ---- Bitrate calculations ----
 
-def get_bitrate(svd_spectrum: np.ndarray, noise_full_brain: float, time_resolution: float = 1., n_detectors: int | None = None) -> float:
-    return (1 / time_resolution) * np.sum(np.log2(1 + svd_spectrum / (noise_full_brain / np.sqrt(n_detectors or len(svd_spectrum)))))
+def get_bitrate(svd_spectrum: np.ndarray, noise_full_brain: float, time_resolution: float = 1., n_sources: int = 1, n_detectors: int = 1) -> float:
+    return (1 / time_resolution) * np.sum(np.log2(1 + (svd_spectrum / (noise_full_brain)**2 )) )
 
 
-def noise_floor_heuristic(svd_spectrum: np.ndarray, n_detectors: int | None = None, heuristic: Literal["power", "first"] = "power", factor: float = 10.) -> float:
-    n_detectors = n_detectors or len(svd_spectrum)
+def noise_floor_heuristic(svd_spectrum: np.ndarray, heuristic: Literal["power", "first"] = "power", factor: float = 10.) -> float:
     if heuristic == "power":
         total_power = np.sum(np.abs(svd_spectrum) ** 2)
-        return np.sqrt(total_power / n_detectors) / factor
+        return np.sqrt(total_power) / factor
     elif heuristic == "first":
         return svd_spectrum[0] / factor
 
