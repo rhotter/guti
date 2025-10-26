@@ -10,3 +10,4 @@ tmp/
 results/archive/
 guti/modalities/meg/combined_jacobian.npy
 .cache/
+.vscode

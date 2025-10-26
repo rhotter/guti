@@ -28,14 +28,35 @@ from guti.core import (
     create_sphere,
     BRAIN_RADIUS,
 )
-from openmeeg_viz.om_display import display_vtk
 
-# Spherical model (commented out)
-# create_bem_model()
-# vertices, triangles = create_sphere(radius=1, resolution=20, center=[0, 0, 0])
-# %%
-# Hemisphere model (active)
 create_bem_model()
+
+# %%
+# Visualize the BEM model
+import sys
+from pathlib import Path
+import pyvista as pv
+
+# Set PyVista to use interactive GUI window (not inline/notebook)
+pv.set_jupyter_backend(None)  # Disable notebook backend to avoid trame warning
+pv.set_plot_theme("document")
+pv.OFF_SCREEN = False
+
+# Add bem_model directory to path to import tri_view
+bem_model_path = Path(__file__).parent / "bem_model"
+sys.path.insert(0, str(bem_model_path))
+
+from tri_view import visualize_bem_layers
+
+# Visualize all BEM layers with dipoles and sensors
+visualize_bem_layers(
+    geom_path="bem_model/sphere_head.geom",
+    dipole_path="bem_model/dipole_locations.txt",
+    sensor_path="bem_model/sensor_locations.txt",
+    show_edges=True,
+    layer_opacity={"Brain": 1, "Skull": 0.3, "Scalp": 0.2},
+    layer_colors={"Brain": "green", "Skull": "blue", "Scalp": "peachpuff"},
+)
 
 # %%
 # Compute the leadfield matrices
