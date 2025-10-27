@@ -11,16 +11,16 @@ from guti.scaling_utils import (
 from guti.parameters import Parameters
 import numpy as np
 
-# modality_name = "us_free_field_analytical_n_sources_sweep_50khz"
-modality_name = "us_free_field_analytical_n_sources_sweep_100khz"
-param_key = "num_brain_grid_points"
-constant_params = Parameters(num_sensors=1000)
+modality_name = "us_free_field_analytical_n_sources_sweep_50khz"
+# modality_name = "us_free_field_analytical_n_sources_sweep_100khz"
+# param_key = "num_brain_grid_points"
+# constant_params = Parameters(num_sensors=1000)
 # modality_name = "eeg_analytical"
 # param_key = "num_brain_grid_points"
 # constant_params = Parameters(num_sensors=12100)
-# param_key = "num_sensors"
+param_key = "num_sensors"
 # param_key = "vincent_trick"
-# constant_params = Parameters(num_brain_grid_points=37052)
+constant_params = Parameters(num_brain_grid_points=37052)
 # constant_params = Parameters(vincent_trick=True)
 
 # %%
