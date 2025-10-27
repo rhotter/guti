@@ -30,6 +30,7 @@ from guti.core import (
 )
 
 create_bem_model()
+# create_bem_model_hemisphere()
 
 # %%
 # Visualize the BEM model
@@ -43,16 +44,16 @@ pv.set_plot_theme("document")
 pv.OFF_SCREEN = False
 
 # Add bem_model directory to path to import tri_view
-bem_model_path = Path(__file__).parent / "bem_model"
+bem_model_path = Path(__file__).parent / "guti/modalities/bem_model"
 sys.path.insert(0, str(bem_model_path))
 
-from tri_view import visualize_bem_layers
+from guti.tri_view import visualize_bem_layers
 
 # Visualize all BEM layers with dipoles and sensors
 visualize_bem_layers(
-    geom_path="bem_model/sphere_head.geom",
-    dipole_path="bem_model/dipole_locations.txt",
-    sensor_path="bem_model/sensor_locations.txt",
+    geom_path="guti/modalities/bem_model/sphere_head.geom",
+    dipole_path="guti/modalities/bem_model/dipole_locations.txt",
+    # sensor_path="guti/modalities/bem_model/sensor_locations.txt",
     show_edges=True,
     layer_opacity={"Brain": 1, "Skull": 0.3, "Scalp": 0.2},
     layer_colors={"Brain": "green", "Skull": "blue", "Scalp": "peachpuff"},
