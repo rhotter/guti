@@ -237,7 +237,7 @@ def plot_bitrate_vs_snr(
     plt.title(f'Information Capacity vs SNR \n {modality_name} ({param_key}={param_value})')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"plots/{modality_name}_{param_key}_bitrate_vs_snr.png")
+    plt.savefig(f"plots/bitrate_vs_snr.png")
     plt.show()
 
 
