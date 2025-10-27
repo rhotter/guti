@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 
 # EEG-specific leadfield computation
-GEOMETRY=bem_model/eeg/sphere_head.geom
-CONDUCTIVITIES=bem_model/eeg/sphere_head.cond
-DIPOLES=bem_model/eeg/dipole_locations.txt
-ELECTRODES=bem_model/eeg/sensor_locations.txt
+GEOMETRY=guti/modalities/bem_model/eeg/sphere_head.geom
+CONDUCTIVITIES=guti/modalities/bem_model/eeg/sphere_head.cond
+DIPOLES=guti/modalities/bem_model/eeg/dipole_locations.txt
+ELECTRODES=guti/modalities/bem_model/eeg/sensor_locations.txt
 
 # Output
-EEG_LEADFIELD=leadfields/eeg/eeg_leadfield.mat
+EEG_LEADFIELD=guti/modalities/leadfields/eeg/eeg_leadfield.mat
 
 # Temporary matrices
-HM=tmp/eeg/tmp.hm
-HMINV=tmp/eeg/tmp.hm_inv
-DSM=tmp/eeg/tmp.dsm
-H2EM=tmp/eeg/tmp.h2em
+HM=guti/modalities/tmp/eeg/tmp.hm
+HMINV=guti/modalities/tmp/eeg/tmp.hm_inv
+DSM=guti/modalities/tmp/eeg/tmp.dsm
+H2EM=guti/modalities/tmp/eeg/tmp.h2em
 
-mkdir -p tmp/eeg
-mkdir -p leadfields/eeg
+mkdir -p guti/modalities/tmp/eeg
+mkdir -p guti/modalities/leadfields/eeg
 
 # Compute EEG gain matrix
 om_assemble -HM ${GEOMETRY} ${CONDUCTIVITIES} ${HM}

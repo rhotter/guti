@@ -56,7 +56,7 @@ def main():
 
     parser.add_argument("modality_name", help="Modality name (e.g., 1d_blurring, eeg, us)")
     parser.add_argument("--no-save", action="store_true", help="Don't save results to disk")
-
+    parser.add_argument("--default-run", action="store_true", help="Run as default configuration")
     args, unknown = parser.parse_known_args()
 
     # Parse remaining args as --key value pairs
@@ -111,7 +111,7 @@ def main():
     params = Parameters(**params_dict) if params_dict else None
     modality = modality_class(params)
 
-    singular_values = modality.run(save_results=not args.no_save)
+    singular_values = modality.run(save_results=not args.no_save, default_run=args.default_run)
 
 if __name__ == "__main__":
     main()
