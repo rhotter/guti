@@ -418,25 +418,68 @@ def write_tri(filename, vertices, triangles, center=None):
             f.write(f"{t[0]} {t[1]} {t[2]}\n")
 
 
-def get_random_orientations(n_sources: int) -> np.ndarray:
-    """Generate random unit vectors for dipole orientations.
+def get_random_orientations(n_sources: int, seed: int = 42) -> np.ndarray:
+    """Generate random unit vectors for dipole orientations (reproducible).
 
     Parameters
     ----------
     n_sources : int
         Number of dipole orientations to generate
+    seed : int, default=42
+        Random seed for reproducibility
 
     Returns
     -------
     orientations : ndarray of shape (n_sources, 3)
         Random unit vectors representing dipole orientations
     """
+    # Use local RNG for reproducibility (doesn't affect global state)
+    rng = np.random.RandomState(seed)
     # Generate random vectors
-    orientations = np.random.randn(n_sources, 3)
+    orientations = rng.randn(n_sources, 3)
     # Normalize to unit vectors
     norms = np.linalg.norm(orientations, axis=1, keepdims=True)
     orientations = orientations / norms
     return orientations
+
+
+def expand_positions_with_orientations(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Expand positions to have 3 orthogonal dipoles (x, y, z) at each location.
+
+    Parameters
+    ----------
+    positions : ndarray of shape (n_positions, 3)
+        Spatial positions for dipole sources
+
+    Returns
+    -------
+    expanded_positions : ndarray of shape (3*n_positions, 3)
+        Each position repeated 3 times
+    expanded_orientations : ndarray of shape (3*n_positions, 3)
+        Orthogonal orientations [1,0,0], [0,1,0], [0,0,1] tiled for each position
+
+    Notes
+    -----
+    This creates a complete orthogonal basis at each spatial location, allowing
+    any arbitrary dipole orientation to be represented as a linear combination.
+    The output structure is: [pos1_x, pos1_y, pos1_z, pos2_x, pos2_y, pos2_z, ...]
+    """
+    n_positions = len(positions)
+
+    # Create 3 orthogonal dipoles at each position
+    orthogonal_basis = np.array([
+        [1.0, 0.0, 0.0],  # x-direction
+        [0.0, 1.0, 0.0],  # y-direction
+        [0.0, 0.0, 1.0],  # z-direction
+    ])
+
+    # Expand positions: each position appears 3 times (once per orientation)
+    expanded_positions = np.repeat(positions, 3, axis=0)
+
+    # Tile orientations: [x,y,z, x,y,z, x,y,z, ...]
+    expanded_orientations = np.tile(orthogonal_basis, (n_positions, 1))
+
+    return expanded_positions, expanded_orientations
 
 
 def get_cortical_positions(n_sources=N_SOURCES_DEFAULT, radius=BRAIN_RADIUS):
@@ -486,7 +529,7 @@ def get_cortical_positions(n_sources=N_SOURCES_DEFAULT, radius=BRAIN_RADIUS):
 def create_bem_model(vertices=None, triangles=None):
     """Create a 3-layer spherical model with cortical sources."""
     # Ensure model directory exists
-    os.makedirs("bem_model/", exist_ok=True)
+    os.makedirs("guti/modalities/bem_model/", exist_ok=True)
 
     # Define the center of the spheres to match source/sensor coordinate system
     center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
@@ -500,10 +543,10 @@ def create_bem_model(vertices=None, triangles=None):
         # if vertices is None or triangles is None:
         # vertices, triangles = create_sphere(radius, n_phi=16, n_theta=10)
         vertices, triangles = create_sphere(radius, resolution=20, center=center)
-        write_tri(f"bem_model/{name}_sphere.tri", vertices, triangles, center=center)
+        write_tri(f"guti/modalities/bem_model/{name}_sphere.tri", vertices, triangles, center=center)
 
     # Create the geometry file (format 1.1)
-    with open("bem_model/sphere_head.geom", "w") as f:
+    with open("guti/modalities/bem_model/sphere_head.geom", "w") as f:
         f.write("# Domain Description 1.1\n\n")
         f.write("Interfaces 3\n\n")
         f.write('Interface Brain: "brain_sphere.tri"\n')
@@ -516,7 +559,7 @@ def create_bem_model(vertices=None, triangles=None):
         f.write("Domain Air: +Scalp\n")
 
     # Create the conductivity file
-    with open("bem_model/sphere_head.cond", "w") as f:
+    with open("guti/modalities/bem_model/sphere_head.cond", "w") as f:
         f.write("# Properties Description 1.0 (Conductivities)\n\n")
         f.write(f"Air         {AIR_CONDUCTIVITY}\n")
         f.write(f"Scalp       {SCALP_CONDUCTIVITY}\n")
@@ -524,13 +567,12 @@ def create_bem_model(vertices=None, triangles=None):
         f.write(f"Skull       {SKULL_CONDUCTIVITY}\n")
 
     # Generate brain volume dipole positions for EEG/MEG (interior sources)
-    brain_positions = get_grid_positions(grid_spacing_mm=10.0)
-    n_brain_sources = len(brain_positions)
-    brain_orientations = get_random_orientations(n_brain_sources)
+    brain_positions = get_grid_positions(grid_spacing_mm=40.0)
+    brain_positions_expanded, brain_orientations_expanded = expand_positions_with_orientations(brain_positions)
 
     # Write brain volume dipoles to file (for EEG, MEG, ECoG)
-    with open("bem_model/dipole_locations.txt", "w") as f:
-        for pos, ori in zip(brain_positions, brain_orientations):
+    with open("guti/modalities/bem_model/dipole_locations.txt", "w") as f:
+        for pos, ori in zip(brain_positions_expanded, brain_orientations_expanded):
             f.write(
                 f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
             )
@@ -541,28 +583,28 @@ def create_bem_model(vertices=None, triangles=None):
     cortical_orientations = get_random_orientations(n_cortical_sources)
 
     # Write cortical dipoles to separate file (for EIT)
-    with open("bem_model/eit_dipole_locations.txt", "w") as f:
+    with open("guti/modalities/bem_model/eit_dipole_locations.txt", "w") as f:
         for pos, ori in zip(cortical_positions, cortical_orientations):
             f.write(
                 f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
             )
 
     # Generate EEG sensor positions (scalp surface, positions only)
-    eeg_sensor_positions = get_sensor_positions(N_SENSORS_DEFAULT)
-    with open("bem_model/sensor_locations.txt", "w") as f:
+    eeg_sensor_positions = get_sensor_positions(256)
+    with open("guti/modalities/bem_model/sensor_locations.txt", "w") as f:
         for pos in eeg_sensor_positions:
             f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\n")
 
     # Generate MEG sensor positions (further out, with orientations)
     # MEG sensors need to be positioned outside the head with radial orientations
     meg_sensor_positions = get_sensor_positions(
-        N_SENSORS_DEFAULT, offset=20
+        256, offset=20
     )  # 20mm further out
 
     # Calculate radial orientations (pointing inward toward center of head)
     head_center = np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
 
-    with open("bem_model/meg_sensor_locations.txt", "w") as f:
+    with open("guti/modalities/bem_model/meg_sensor_locations.txt", "w") as f:
         for pos in meg_sensor_positions:
             # Calculate inward-pointing radial orientation
             direction = head_center - pos
@@ -572,7 +614,7 @@ def create_bem_model(vertices=None, triangles=None):
             )
 
     print(
-        f"EEG/MEG: Using {n_brain_sources} brain volume dipoles and {N_SENSORS_DEFAULT} sensors"
+        f"EEG/MEG: Using {len(brain_positions)} positions × 3 orientations = {len(brain_positions_expanded)} dipoles and {N_SENSORS_DEFAULT} sensors"
     )
     print(
         f"EIT: Using {n_cortical_sources} cortical dipoles and {N_SENSORS_DEFAULT} sensors"
@@ -619,12 +661,11 @@ def create_bem_model_hemisphere():
 
     # Generate brain volume dipole positions for EEG/MEG (interior sources)
     brain_positions = get_grid_positions(grid_spacing_mm=10.0)
-    n_brain_sources = len(brain_positions)
-    brain_orientations = get_random_orientations(n_brain_sources)
+    brain_positions_expanded, brain_orientations_expanded = expand_positions_with_orientations(brain_positions)
 
     # Write brain volume dipoles to file (for EEG, MEG, ECoG)
     with open("bem_model/dipole_locations.txt", "w") as f:
-        for pos, ori in zip(brain_positions, brain_orientations):
+        for pos, ori in zip(brain_positions_expanded, brain_orientations_expanded):
             f.write(
                 f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
             )
@@ -666,7 +707,7 @@ def create_bem_model_hemisphere():
             )
 
     print(
-        f"Hemisphere model - EEG/MEG: Using {n_brain_sources} brain volume dipoles and {N_SENSORS_DEFAULT} sensors"
+        f"Hemisphere model - EEG/MEG: Using {len(brain_positions)} positions × 3 orientations = {len(brain_positions_expanded)} dipoles and {N_SENSORS_DEFAULT} sensors"
     )
     print(
         f"Hemisphere model - EIT: Using {n_cortical_sources} cortical dipoles and {N_SENSORS_DEFAULT} sensors"
@@ -749,8 +790,14 @@ def create_eeg_bem_model(
         Number of scalp EEG sensors
     grid_resolution : float
         Grid resolution in mm for spherical meshes (mesh resolution)
+
+    Notes
+    -----
+    Creates 3 orthogonal dipoles (x, y, z directions) at each spatial position.
+    This ensures deterministic, reproducible scaling and captures the complete
+    orientation space at each location.
     """
-    output_dir = "bem_model/eeg"
+    output_dir = "guti/modalities/bem_model/eeg"
     os.makedirs(output_dir, exist_ok=True)
 
     # Define the center of the spheres to match source/sensor coordinate system
@@ -763,11 +810,11 @@ def create_eeg_bem_model(
 
     # Generate brain volume dipole positions
     brain_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
-    brain_orientations = get_random_orientations(len(brain_positions))
+    expanded_positions, expanded_orientations = expand_positions_with_orientations(brain_positions)
 
     # Write brain volume dipoles to file
     with open(f"{output_dir}/dipole_locations.txt", "w") as f:
-        for pos, ori in zip(brain_positions, brain_orientations):
+        for pos, ori in zip(expanded_positions, expanded_orientations):
             f.write(
                 f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
             )
@@ -779,7 +826,7 @@ def create_eeg_bem_model(
             f.write(f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\n")
 
     print(
-        f"EEG BEM model: {len(brain_positions)} sources ({source_spacing_mm}mm spacing), {n_sensors} sensors, {grid_resolution}mm resolution"
+        f"EEG BEM model: {len(brain_positions)} positions × 3 orientations = {len(expanded_positions)} dipoles ({source_spacing_mm}mm spacing), {n_sensors} sensors, {grid_resolution}mm resolution"
     )
 
 
@@ -816,11 +863,11 @@ def create_meg_bem_model(
 
     # Generate brain volume dipole positions
     brain_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
-    brain_orientations = get_random_orientations(len(brain_positions))
+    expanded_positions, expanded_orientations = expand_positions_with_orientations(brain_positions)
 
     # Write brain volume dipoles to file
     with open(f"{output_dir}/dipole_locations.txt", "w") as f:
-        for pos, ori in zip(brain_positions, brain_orientations):
+        for pos, ori in zip(expanded_positions, expanded_orientations):
             f.write(
                 f"{pos[0]:.6f}\t{pos[1]:.6f}\t{pos[2]:.6f}\t{ori[0]:.6f}\t{ori[1]:.6f}\t{ori[2]:.6f}\n"
             )
@@ -844,7 +891,7 @@ def create_meg_bem_model(
         else "SQUIDs" if sensor_offset == 20 else f"{sensor_offset}mm offset"
     )
     print(
-        f"MEG BEM model: {len(brain_positions)} sources ({source_spacing_mm}mm spacing), {n_sensors} sensors ({sensor_type}), {grid_resolution}mm resolution"
+        f"MEG BEM model: {len(brain_positions)} positions × 3 orientations = {len(expanded_positions)} dipoles ({source_spacing_mm}mm spacing), {n_sensors} sensors ({sensor_type}), {grid_resolution}mm resolution"
     )
 
 
