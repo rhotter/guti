@@ -19,25 +19,7 @@ from guti.modalities.fnirs_analytical.utils import (
     get_valid_source_detector_pairs,
 )
 
-
 class fNIRSAnalytical(ImagingModality):
-    """
-    Functional near-infrared spectroscopy using analytical continuous-wave model.
-
-    This modality places optodes (sensors) on a hemisphere surface and computes
-    sensitivity to absorption changes in a volumetric grid of sources using
-    the diffusion approximation.
-
-    Parameters
-    ----------
-    num_sensors : int, default=800
-        Number of optodes on the hemisphere surface
-    grid_resolution_mm : float, default=6.0
-        Spacing between grid points in the brain volume
-    max_dist : float, default=50.0
-        Maximum source-detector distance (mm) for valid pairs
-    """
-
     @property
     def name(self) -> str:
         return "fnirs_analytical_cw"
@@ -47,9 +29,10 @@ class fNIRSAnalytical(ImagingModality):
         return Parameters(
             num_sensors=800,
             grid_resolution_mm=6.0,
+            max_dist=50.0,
         )
 
-    def __init__(self, params: Optional[Parameters] = None, max_dist: float = 50.0):
+    def __init__(self, params: Optional[Parameters] = None):
         """
         Initialize fNIRS analytical modality.
 
@@ -61,9 +44,6 @@ class fNIRSAnalytical(ImagingModality):
             Maximum source-detector distance (mm) for valid pairs
         """
         super().__init__(params)
-
-        # Store experimental parameters
-        self.max_dist = max_dist
 
         # GPU setup
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -83,7 +63,6 @@ class fNIRSAnalytical(ImagingModality):
         # Get volumetric grid points within brain
         self.grid_points = get_grid_positions(self.params.grid_resolution_mm)
 
-        # Update actual grid point count
         self.params.num_brain_grid_points = len(self.grid_points)
 
     def compute_forward_model(self) -> np.ndarray:
@@ -115,7 +94,7 @@ class fNIRSAnalytical(ImagingModality):
 
         # Get valid source-detector pairs (within max_dist)
         valid_sources, valid_detectors = get_valid_source_detector_pairs(
-            sensor_positions_torch, self.max_dist
+            sensor_positions_torch, self.params.max_dist
         )
 
         # Compute sensitivities
@@ -130,6 +109,5 @@ class fNIRSAnalytical(ImagingModality):
 
 
 if __name__ == "__main__":
-    # Example: Run single configuration
     modality = fNIRSAnalytical()
     singular_values = modality.run()
