@@ -13,9 +13,15 @@ import os
 os.makedirs("plots", exist_ok=True)
 
 def normalize_singular_values(s: np.ndarray, params: Parameters) -> np.ndarray:
-    matrix_size = getattr(params, "matrix_size")
-    Ninput = matrix_size[1]
-    Noutput = matrix_size[0]
+    matrix_size = getattr(params, "matrix_size", None)
+    if matrix_size is not None:
+        Ninput = matrix_size[1]
+        Noutput = matrix_size[0]
+    else:
+        Ninput = getattr(params, "num_brain_grid_points", None)
+        Noutput = getattr(params, "num_sensors", None)
+        if Ninput is None or Noutput is None:
+            raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or num_sensors in parameters.")
     return s / np.sqrt(Ninput * Noutput)
 
 
