@@ -11,7 +11,8 @@ from typing import Optional
 
 def normalize_singular_values(s: np.ndarray, params: Parameters) -> np.ndarray:
     num_brain_grid_points = getattr(params, "num_brain_grid_points")
-    return s / np.sqrt(num_brain_grid_points)
+    print(num_brain_grid_points)
+    return s / num_brain_grid_points**(1/4)
 
 
 def get_normalized_variants(modality_name: str, param_key: str, constant_params: Optional[Parameters] = None):
@@ -137,9 +138,8 @@ def plot_bitrate_vs_parameter(
         params = v["params"]
         param_value = getattr(params, param_key)
         n_sensors = params.num_sensors
-        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", n_detectors=n_sensors)
-
-        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution, n_detectors=n_sensors)
+        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=10, n_detectors=n_sensors)
+        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution)
 
         param_values.append(param_value)
         bitrates.append(bitrate)

@@ -9,9 +9,9 @@ from guti.scaling_utils import (
 )
 from guti.parameters import Parameters
 
-modality_name = "fnirs_analytical_cw"
-param_key = "grid_resolution_mm"
-constant_params = Parameters(num_sensors=400)
+modality_name = "eeg_analytical"
+param_key = "num_brain_grid_points"
+constant_params = Parameters(num_sensors=110*110)
 
 # %%
 plot_parameter_sweep_spectra(
