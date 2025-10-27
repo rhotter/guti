@@ -11,11 +11,14 @@ from guti.scaling_utils import (
 from guti.parameters import Parameters
 import numpy as np
 
-modality_name = "eeg_analytical_2"
+# modality_name = "us_free_field_analytical_n_sources_sweep_50khz"
+modality_name = "us_free_field_analytical_n_sources_sweep_100khz"
 param_key = "num_brain_grid_points"
-constant_params = Parameters(num_sensors=110*110)
+constant_params = Parameters(num_sensors=1000)
 # param_key = "num_sensors"
-# constant_params = Parameters(num_brain_grid_points=34*34*34)
+# param_key = "vincent_trick"
+# constant_params = Parameters(num_brain_grid_points=37052)
+# constant_params = Parameters(vincent_trick=True)
 
 # %%
 plot_parameter_sweep_spectra(
@@ -44,7 +47,7 @@ plot_bitrate_vs_parameter(
 plot_bitrate_vs_snr(
     modality_name=modality_name,
     param_key=param_key,
-    param_value=5.0,
+    param_value=4000,
     snr_values=np.logspace(-1, 6, 50),
     constant_params=constant_params
 )

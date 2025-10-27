@@ -45,6 +45,7 @@ def get_normalized_variants(modality_name: str, param_key: str, constant_params:
         variants.items(), key=lambda x: getattr(x[1]["params"], param_key)
     )
 
+
     # Normalize all singular values
     normalized_svs = []
     for _, v in sorted_variants:
@@ -72,7 +73,8 @@ def plot_parameter_sweep_spectra(
 
     param_values = [getattr(v["params"], param_key) for v, _ in normalized_svs]
     min_val, max_val = min(param_values), max(param_values)
-    colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
+    # colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
+    colors = [plt.cm.viridis(i) for i in np.linspace(0, 1, len(normalized_svs))]
 
     plt.figure(figsize=figsize)
     for (v, s_normalized), color in zip(normalized_svs, colors):
@@ -235,6 +237,7 @@ def plot_bitrate_vs_snr(
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(f"plots/{modality_name}_{param_key}_bitrate_vs_snr.png")
+    print("Plotted bitrate vs SNR")
     plt.show()
 
 
