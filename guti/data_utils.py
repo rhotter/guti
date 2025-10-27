@@ -176,6 +176,8 @@ def list_svd_variants(
                         variants[hash_part] = dict(s=s, params=params)
                 except FileNotFoundError:
                     continue
+                except EOFError:
+                    continue
 
     # Filter by constant parameters if specified
     if constant_params is not None:
