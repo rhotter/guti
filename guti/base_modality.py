@@ -11,6 +11,7 @@ Provides a unified interface for:
 from abc import ABC, abstractmethod
 from typing import Optional, Any
 import numpy as np
+import time
 from guti.parameters import Parameters
 
 
@@ -31,7 +32,7 @@ class ImagingModality(ABC):
     - _get_default_modality_params(): Return default parameter dictionary
 
     Example usage:
-        modality = FNIRSAnalytical({'num_sensors': 400, 'grid_resolution_mm': 8.0})
+        modality = FNIRSAnalytical(Parameters(num_sensors=400, grid_resolution_mm=8.0))
         singular_values = modality.run()
     """
 
@@ -49,15 +50,9 @@ class ImagingModality(ABC):
             params if params is not None else self._get_default_modality_params()
         )
 
-        # Will be populated during run()
-        self.geometry = None
-        self.sources = None
-        self.sensors = None
-        self.tissue_mask = None
-        self.jacobian = None
-
+    @property
     @abstractmethod
-    def modality_name(self) -> str:
+    def name(self) -> str:
         """
         Return modality identifier string.
 
@@ -79,7 +74,6 @@ class ImagingModality(ABC):
         - self.sensors: Array of sensor positions (n_sensors, 3)
 
         Optionally:
-        - self.tissue_mask: 3D array of tissue labels
         - self.geometry: Modality-specific geometry object
 
         May update self.modality_params with computed values
@@ -139,21 +133,36 @@ class ImagingModality(ABC):
         np.ndarray
             Singular values from SVD analysis.
         """
-        print(f"[{self.modality_name()}] Setting up geometry...")
+        t0 = time.perf_counter()
+        print(f"[{self.name}] Setting up geometry...")
         self.setup_geometry()
 
-        print(f"[{self.modality_name()}] Computing forward model...")
+        print(f"[{self.name}] Computing forward model...")
+        start_time = time.perf_counter()
         self.jacobian = self.compute_forward_model()
+        forward_time = time.perf_counter() - start_time
+        print(f"[{self.name}] Forward model computed in {forward_time:.2f} seconds")
 
-        print(f"[{self.modality_name()}] Jacobian shape: {self.jacobian.shape}")
-        print(f"[{self.modality_name()}] Performing SVD analysis...")
+        self.params.matrix_size = tuple(self.jacobian.shape)
+        print(f"[{self.name}] Jacobian shape: {self.jacobian.shape}")
+
+        # Validate that the Jacobian is non-empty
+        if self.jacobian.shape[0] == 0 or self.jacobian.shape[1] == 0:
+            raise ValueError(
+                f"Forward model produced empty Jacobian with shape {self.jacobian.shape}. "
+                f"Current parameters: {self.params}"
+            )
+        print(f"[{self.name}] Computing SVD...")
+        start_time = time.perf_counter()
         singular_values = self.compute_svd()
+        svd_time = time.perf_counter() - start_time
+        print(f"[{self.name}] SVD computed in {svd_time:.2f} seconds")
 
         if save_results:
-            print(f"[{self.modality_name()}] Saving results...")
+            print(f"[{self.name}] Saving results...")
             self.save_results(singular_values)
 
-        print(f"[{self.modality_name()}] Complete!")
+        print(f"[{self.name}] Completed in {time.perf_counter() - t0:.2f} seconds")
         return singular_values
 
     def compute_svd(self) -> np.ndarray:
@@ -167,11 +176,7 @@ class ImagingModality(ABC):
         """
         from guti.svd import compute_svd_gpu, compute_svd_cpu
 
-        try:
-            return compute_svd_gpu(self.jacobian)
-        except Exception as e:
-            print(f"GPU SVD failed ({e}), falling back to CPU...")
-            return compute_svd_cpu(self.jacobian)
+        return compute_svd_gpu(self.jacobian)
 
     def save_results(self, singular_values: np.ndarray) -> None:
         """
@@ -184,7 +189,7 @@ class ImagingModality(ABC):
         """
         from guti.data_utils import save_svd
 
-        save_svd(singular_values, self.modality_name(), self.params)
+        save_svd(singular_values, self.name, self.params)
 
     def __repr__(self) -> str:
         """String representation showing modality name and parameters."""

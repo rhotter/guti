@@ -20,7 +20,7 @@ from guti.modalities.fnirs_analytical.utils import (
 )
 
 
-class FNIRSAnalytical(ImagingModality):
+class fNIRSAnalytical(ImagingModality):
     """
     Functional near-infrared spectroscopy using analytical continuous-wave model.
 
@@ -38,7 +38,8 @@ class FNIRSAnalytical(ImagingModality):
         Maximum source-detector distance (mm) for valid pairs
     """
 
-    def modality_name(self) -> str:
+    @property
+    def name(self) -> str:
         return "fnirs_analytical_cw"
 
     def _get_default_modality_params(self) -> Parameters:
@@ -130,12 +131,5 @@ class FNIRSAnalytical(ImagingModality):
 
 if __name__ == "__main__":
     # Example: Run single configuration
-    params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
-    modality = FNIRSAnalytical(params)
+    modality = fNIRSAnalytical()
     singular_values = modality.run()
-
-    # Example: Run parameter sweep
-    # run_fnirs_analytical_sweep(
-    #     num_sensors_list=[400, 800],
-    #     grid_spacing_list=[6.0, 8.0]
-    # )

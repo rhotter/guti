@@ -1,13 +1,8 @@
 """
-Compute SVDs of EEG leadfields using OpenMEEG with parameter sweeps.
+Compute SVDs of EEG leadfields using OpenMEEG with single-parameter sweeps.
 
-This script sweeps over:
-- Source spacing (controls number of dipole sources)
-- Number of EEG sensors
-- Mesh resolution
-
-For each parameter combination, it creates a BEM model, computes the leadfield
-matrix, and analyzes the SVD spectrum.
+This script performs a parameter sweep over ONE parameter while holding others constant.
+Compatible with the centralized Parameters class and visualization in scaling.py.
 """
 
 #%%
@@ -19,23 +14,59 @@ import os.path as op
 import subprocess
 import numpy as np
 import h5py
-import matplotlib.pyplot as plt
 from pathlib import Path
 
 # Add autoreload for interactive development
 from guti.utils import enable_autoreload
+from guti.parameters import Parameters
+from guti.data_utils import save_svd, list_svd_variants
+
 enable_autoreload()
 
 print(__doc__)
 
 #%%
-# Define parameter sweep ranges (in decreasing order for finer resolution)
-SOURCE_SPACING_RANGE = [20, 10, 5]    # Spacing between dipoles in mm (smaller = more sources)
-N_SENSORS_RANGE = [32, 64, 128]       # Number of EEG sensors
-GRID_RESOLUTION_RANGE = [40, 20, 10]  # Grid resolution in mm (smaller = finer mesh)
+# ============================================================================
+# SWEEP CONFIGURATION
+# ============================================================================
+# Specify which parameter to sweep (one of: num_sensors, source_spacing_mm, grid_resolution_mm)
+
+# grid_resolution_mm
+# source_spacing_mm
+# num_sensors
+
+# SWEEP_PARAM = "num_sensors"
+# SWEEP_PARAM = "source_spacing_mm"
+SWEEP_PARAM = "grid_resolution_mm"
+
+# Define sweep range using linspace
+SWEEP_MIN = 5.0      # Minimum value
+SWEEP_MAX = 20.0      # Maximum value
+SWEEP_N_POINTS = 7    # Number of points in sweep
+
+# Constant parameters (held fixed during sweep)
+# CONSTANT_PARAMS = Parameters(
+#     num_sensors=256,
+#     grid_resolution_mm=20.0,
+# )
+
+# CONSTANT_PARAMS = Parameters(
+    # source_spacing_mm=5.0,
+    # grid_resolution_mm=20.0,
+# )
+
+CONSTANT_PARAMS = Parameters(
+    num_sensors=256,
+    source_spacing_mm=5.0,
+)
+
+# Generate sweep values
+sweep_values = np.linspace(SWEEP_MIN, SWEEP_MAX, SWEEP_N_POINTS)
+# sweep_values = [5, 25, 50, 100, 150, 200, 250]
+print(sweep_values)
 
 # Get the path to the virtual environment
-venv_path = op.join(op.dirname(__file__), '..', '..', '.venv')
+venv_path = op.join(op.dirname(__file__), '.venv')
 venv_activate = op.join(venv_path, 'bin', 'activate')
 
 # Set up environment to ensure conda tools are accessible
@@ -57,150 +88,122 @@ def load_mat73(file_path):
     return data
 
 #%%
-# Create results directory
-results_dir = Path('results/eeg_parameter_sweep')
-results_dir.mkdir(parents=True, exist_ok=True)
+# ============================================================================
+# VISUALIZATION SETUP
+# ============================================================================
+import pyvista as pv
+from guti.tri_view import visualize_bem_layers
 
-# Storage for all results
-all_results = {}
-
-#%%
-# Parameter sweep
-for source_spacing in SOURCE_SPACING_RANGE:
-    for n_sensors in N_SENSORS_RANGE:
-        for grid_res in GRID_RESOLUTION_RANGE:
-            print(f"\n{'='*80}")
-            print(f"Computing EEG leadfield: {source_spacing}mm spacing, {n_sensors} sensors, {grid_res}mm resolution")
-            print(f"{'='*80}\n")
-
-            # Create BEM model with current parameters
-            from guti.core import create_eeg_bem_model
-            create_eeg_bem_model(
-                source_spacing_mm=source_spacing,
-                n_sensors=n_sensors,
-                grid_resolution=grid_res
-            )
-
-            # Compute leadfield matrix using bash script
-            try:
-                cmd = f'source {venv_activate} && bash compute_eeg_leadfield.sh'
-                result = subprocess.run(
-                    ['bash', '-c', cmd],
-                    capture_output=True,
-                    text=True,
-                    cwd='.',
-                    env=env,
-                    check=True
-                )
-                print("Leadfield computation successful")
-                if result.stdout:
-                    print(result.stdout)
-            except subprocess.CalledProcessError as e:
-                print(f"Script failed with return code {e.returncode}")
-                print(f"Error output: {e.stderr}")
-                print(f"Standard output: {e.stdout}")
-                continue
-
-            # Load the leadfield matrix
-            try:
-                G_eeg = load_mat73('leadfields/eeg/eeg_leadfield.mat')['linop']
-            except Exception as e:
-                print(f"Failed to load leadfield: {e}")
-                continue
-
-            # Compute SVD
-            s_eeg = np.linalg.svdvals(G_eeg)
-            s_eeg_normalized = s_eeg / s_eeg[0]
-
-            # Save using the centralized infrastructure
-            from guti.data_utils import save_svd
-            from guti.parameters import Parameters
-
-            params = Parameters(
-                num_sensors=n_sensors,
-                source_spacing_mm=source_spacing,
-                grid_resolution_mm=grid_res,
-                num_brain_grid_points=G_eeg.shape[1],  # Number of sources
-            )
-            save_svd(s_eeg, modality_name='eeg_openmeeg', params=params)
-
-            # Store results for immediate plotting (optional)
-            param_key = f"spacing{source_spacing}_sen{n_sensors}_res{grid_res}"
-            all_results[param_key] = {
-                'source_spacing': source_spacing,
-                'n_sensors': n_sensors,
-                'grid_resolution': grid_res,
-                'singular_values': s_eeg,
-                'singular_values_normalized': s_eeg_normalized,
-                'leadfield_shape': G_eeg.shape
-            }
-
-            print(f"Leadfield shape: {G_eeg.shape}")
-            print(f"Condition number: {s_eeg[0] / s_eeg[-1]:.2e}")
+pv.set_jupyter_backend(None)
+pv.set_plot_theme("document")
+pv.OFF_SCREEN = False
 
 #%%
-# Plot results - varying source spacing
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+# ============================================================================
+# PARAMETER SWEEP
+# ============================================================================
+print(f"\nSweeping {SWEEP_PARAM} from {SWEEP_MIN} to {SWEEP_MAX} ({SWEEP_N_POINTS} points)")
+print(f"Constant parameters: {CONSTANT_PARAMS}\n")
 
-for ax, grid_res in zip(axes, GRID_RESOLUTION_RANGE):
-    for n_sensors in N_SENSORS_RANGE:
-        for source_spacing in SOURCE_SPACING_RANGE:
-            param_key = f"spacing{source_spacing}_sen{n_sensors}_res{grid_res}"
-            if param_key in all_results:
-                s = all_results[param_key]['singular_values_normalized']
-                ax.semilogy(s, label=f'{source_spacing}mm spacing, {n_sensors} sensors', alpha=0.7)
+for sweep_value in sweep_values:
+    print(f"\n{'='*80}")
+    print(f"Computing EEG leadfield: {SWEEP_PARAM}={sweep_value}")
+    print(f"{'='*80}\n")
 
-    ax.set_xlabel('Singular value index')
-    ax.set_ylabel('Normalized singular value')
-    ax.set_title(f'Grid resolution: {grid_res}mm')
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
+    # Build complete parameters by combining constant params + current sweep value
+    params_dict = CONSTANT_PARAMS.to_dict()
+    params_dict[SWEEP_PARAM] = sweep_value
+    params = Parameters.from_dict(params_dict)
 
-plt.suptitle('EEG SVD Spectra - Varying Source Spacing and Sensor Count')
-plt.tight_layout()
-plt.savefig(results_dir / 'eeg_svd_comparison.png', dpi=150)
-plt.show()
+    # Extract individual parameters for create_eeg_bem_model
+    # (need to provide defaults if not specified in params)
+    source_spacing = params.source_spacing_mm if params.source_spacing_mm is not None else 10.0
+    n_sensors = params.num_sensors if params.num_sensors is not None else 64
+    grid_res = params.grid_resolution_mm if params.grid_resolution_mm is not None else 20.0
+
+    print(f"Parameters: source_spacing={source_spacing}mm, n_sensors={n_sensors}, grid_resolution={grid_res}mm")
+
+    # Create BEM model with current parameters
+    from guti.core import create_eeg_bem_model
+    create_eeg_bem_model(
+        source_spacing_mm=source_spacing,
+        n_sensors=n_sensors,
+        grid_resolution=grid_res
+    )
+
+    # Visualize the BEM model
+    print(f"\nVisualizing BEM model for {SWEEP_PARAM}={sweep_value}...")
+    visualize_bem_layers(
+        geom_path="guti/modalities/bem_model/eeg/sphere_head.geom",
+        dipole_path="guti/modalities/bem_model/eeg/dipole_locations.txt",
+        sensor_path="guti/modalities/bem_model/eeg/sensor_locations.txt",
+        show_edges=True,
+        layer_opacity={"Brain": 1, "Skull": 0.3, "Scalp": 0.2},
+        layer_colors={"Brain": "green", "Skull": "blue", "Scalp": "peachpuff"},
+    )
+
+    # Compute leadfield matrix using bash script
+    try:
+        cmd = f'source {venv_activate} && bash guti/modalities/compute_eeg_leadfield.sh'
+        result = subprocess.run(
+            ['bash', '-c', cmd],
+            capture_output=True,
+            text=True,
+            cwd='.',
+            env=env,
+            check=True
+        )
+        print("Leadfield computation successful")
+    except subprocess.CalledProcessError as e:
+        print(f"Script failed with return code {e.returncode}")
+        print(f"Error output: {e.stderr}")
+        continue
+
+    # Load the leadfield matrix
+    try:
+        G_eeg = load_mat73('guti/modalities/leadfields/eeg/eeg_leadfield.mat')['linop']
+    except Exception as e:
+        print(f"Failed to load leadfield: {e}")
+        continue
+
+    print(f"G_eeg shape: {G_eeg.shape}")
+
+    # Compute SVD
+    s_eeg = np.linalg.svdvals(G_eeg)
+
+    # Update parameters with actual number of sources (convert to Python int for JSON serialization)
+    params.num_brain_grid_points = G_eeg.shape[0]
+
+    # Save using the centralized infrastructure
+    save_svd(s_eeg, modality_name='eeg_openmeeg', params=params)
+
+    print(f"Leadfield shape: {G_eeg.shape}")
+    print(f"Condition number: {s_eeg[0] / s_eeg[-1]:.2e}")
+    print(f"Saved SVD with parameters: {params}")
 
 #%%
-# Plot results - varying grid resolution
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-
-for ax, source_spacing in zip(axes, SOURCE_SPACING_RANGE):
-    for n_sensors in N_SENSORS_RANGE:
-        for grid_res in GRID_RESOLUTION_RANGE:
-            param_key = f"spacing{source_spacing}_sen{n_sensors}_res{grid_res}"
-            if param_key in all_results:
-                s = all_results[param_key]['singular_values_normalized']
-                ax.semilogy(s, label=f'{n_sensors} sensors, {grid_res}mm', alpha=0.7)
-
-    ax.set_xlabel('Singular value index')
-    ax.set_ylabel('Normalized singular value')
-    ax.set_title(f'Source spacing: {source_spacing}mm')
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-plt.suptitle('EEG SVD Spectra - Varying Sensor Count and Grid Resolution')
-plt.tight_layout()
-plt.savefig(results_dir / 'eeg_svd_grid_comparison.png', dpi=150)
-plt.show()
-
-#%%
-# Summary statistics
+# ============================================================================
+# SUMMARY
+# ============================================================================
 print("\n" + "="*80)
 print("EEG Parameter Sweep Summary")
 print("="*80)
-for param_key, result in all_results.items():
-    print(f"\n{param_key}:")
-    print(f"  Leadfield shape: {result['leadfield_shape']}")
-    print(f"  Condition number: {result['singular_values'][0] / result['singular_values'][-1]:.2e}")
-    print(f"  Effective rank (>1% of max): {np.sum(result['singular_values_normalized'] > 0.01)}")
 
-# Save all results together
-np.savez(
-    results_dir / 'eeg_all_results.npz',
-    **{key: val['singular_values'] for key, val in all_results.items()}
-)
+# Load all saved variants for this modality with current constant params
+variants = list_svd_variants('eeg_openmeeg', constant_params=CONSTANT_PARAMS)
 
-print(f"\nResults saved to {results_dir}")
+print(f"\nFound {len(variants)} saved variants:")
+for key, variant in variants.items():
+    params = variant['params']
+    s = variant['s']
+    print(f"\n{key}:")
+    print(f"  Parameters: {params}")
+    print(f"  SVD shape: {s.shape}")
+    print(f"  Condition number: {s[0] / s[-1]:.2e}")
+    print(f"  Effective rank (>1% of max): {np.sum(s / s[0] > 0.01)}")
+
+print(f"\n{'='*80}")
+print("Sweep complete! Visualize results using scaling.py")
+print(f"{'='*80}\n")
 
 # %%

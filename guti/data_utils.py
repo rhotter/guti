@@ -55,8 +55,7 @@ def save_svd(
         filepath = os.path.join(target_dir, f"{params_hash}.npz")
         structured_params = asdict(params)
         np.savez(filepath, singular_values=s, parameters=structured_params)  # type: ignore
-        print(f"Saved variant SVD spectrum to {filepath}")
-        print(f"Parameters: {structured_params}")
+    return filepath
 
 
 def load_svd(modality_name: str) -> Tuple[NDArray, Optional[Parameters]]:
