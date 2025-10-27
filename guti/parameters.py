@@ -37,6 +37,7 @@ class Parameters:
     time_resolution: Optional[float] = None
     comment: Optional[str] = None
     noise_full_brain: Optional[float] = None
+    matrix_size: Optional[tuple[int, int]] = None
 
     # for 1d blurring
     input_dim: Optional[int] = None
@@ -45,19 +46,13 @@ class Parameters:
     @classmethod
     def from_dict(cls, data: Dict) -> "Parameters":
         """Create Parameters object from dictionary."""
-        return cls(
-            num_sensors=data.get("num_sensors"),
-            grid_resolution_mm=data.get("grid_resolution_mm")
-            or data.get("grid_resolution"),
-            source_spacing_mm=data.get("source_spacing_mm"),
-            sensor_offset_mm=data.get("sensor_offset_mm"),
-            num_brain_grid_points=data.get("num_brain_grid_points"),
-            time_resolution=data.get("time_resolution"),
-            comment=data.get("comment"),
-            noise_full_brain=data.get("noise_full_brain"),
-            input_dim=data.get("input_dim"),
-            output_dim=data.get("output_dim"),
-        )
+        # Build kwargs from all valid dataclass fields present in data
+        kwargs = {}
+        for field_name in cls.__dataclass_fields__:
+            if field_name in data:
+                kwargs[field_name] = data[field_name]
+
+        return cls(**kwargs)
 
     def __str__(self) -> str:
         fields = []
