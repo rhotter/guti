@@ -188,6 +188,8 @@ class ImagingModality(ABC):
         ----------
         singular_values : np.ndarray
             Singular values from SVD analysis.
+        default_run : bool, default=False
+            Whether to save as default run configuration.
         """
         from guti.data_utils import save_svd
 

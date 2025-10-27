@@ -7,25 +7,30 @@ from guti.parameters import Parameters
 from guti.core import get_bitrate, noise_floor_heuristic
 import matplotlib.pyplot as plt
 import numpy as np
-from typing import Optional
+from typing import Optional, Literal
 import os
 
 os.makedirs("plots", exist_ok=True)
 
-def normalize_singular_values(s: np.ndarray, params: Parameters) -> np.ndarray:
-    matrix_size = getattr(params, "matrix_size", None)
-    if matrix_size is not None:
-        Ninput = matrix_size[1]
-        Noutput = matrix_size[0]
+def normalize_singular_values(s: np.ndarray, params: Parameters, method: Literal["sqrtN", "s0"] = "s0") -> np.ndarray:
+    if method == "s0":
+        return s / s[0]
+    elif method == "sqrtN":
+        matrix_size = getattr(params, "matrix_size", None)
+        if matrix_size is not None:
+            Ninput = matrix_size[1]
+            Noutput = matrix_size[0]
+        else:
+            Ninput = getattr(params, "num_brain_grid_points", None)
+            Noutput = getattr(params, "num_sensors", None)
+            if Ninput is None or Noutput is None:
+                raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or num_sensors in parameters.")
+        return s / np.sqrt(Ninput * Noutput)
     else:
-        Ninput = getattr(params, "num_brain_grid_points", None)
-        Noutput = getattr(params, "num_sensors", None)
-        if Ninput is None or Noutput is None:
-            raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or num_sensors in parameters.")
-    return s / np.sqrt(Ninput * Noutput)
+        raise ValueError(f"Invalid normalization method: {method}")
 
 
-def get_normalized_variants(modality_name: str, param_key: str, constant_params: Optional[Parameters] = None):
+def get_normalized_variants(modality_name: str, param_key: str, constant_params: Optional[Parameters] = None, normalization_method: Literal["sqrtN", "s0"] = "sqrtN"):
     """
     Get sorted variants with normalized singular values.
 
@@ -35,20 +40,17 @@ def get_normalized_variants(modality_name: str, param_key: str, constant_params:
     if constant_params is None:
         constant_params = Parameters()
 
-    variants = list_svd_variants(modality_name, constant_params=constant_params)
-    # for k, v in variants.items():
-    #     print(f"  {k}: {v['params']}")
-    if not variants:
-        return []
-
-    sorted_variants = sorted(
-        variants.items(), key=lambda x: getattr(x[1]["params"], param_key)
+    # list_svd_variants will filter and sort by param_key
+    sorted_variants = list_svd_variants(
+        modality_name,
+        constant_params=constant_params,
+        sort_by=param_key
     )
 
     # Normalize all singular values
     normalized_svs = []
     for _, v in sorted_variants:
-        s_normalized = normalize_singular_values(v["s"], v["params"])
+        s_normalized = normalize_singular_values(v["s"], v["params"], method=normalization_method)
         normalized_svs.append((v, s_normalized))
 
     return normalized_svs
@@ -59,9 +61,10 @@ def plot_parameter_sweep_spectra(
     param_key: str,
     constant_params: Optional[Parameters] = None,
     figsize: tuple = (10, 6),
-    ylim: tuple = (1e-5, 1e1)
+    ylim: tuple = (1e-5, 1e1),
+    normalization_method: Literal["sqrtN", "s0"] = "sqrtN"
 ):
-    normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
+    normalized_svs = get_normalized_variants(modality_name, param_key, constant_params, normalization_method)
 
     if not normalized_svs:
         print(f"No variants found for {modality_name} with given constant parameters")
@@ -267,7 +270,7 @@ def show_sweep_results(
     print(f"Constant parameters: {constant_params}")
     print(f"{'='*60}\n")
 
-    variants = list_svd_variants(modality_name, constant_params=constant_params)
+    variants = list_svd_variants(modality_name, constant_params=constant_params, sort_by=param_key)
     print(f"Found {len(variants)} variants:")
     for k, v in variants.items():
         print(f"  {k}: {v['params']}")
