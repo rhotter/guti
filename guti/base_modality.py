@@ -119,7 +119,7 @@ class ImagingModality(ABC):
         """
         return Parameters()
 
-    def run(self, save_results: bool = True) -> np.ndarray:
+    def run(self, save_results: bool = True, default_run: bool = False) -> np.ndarray:
         """
         Execute complete pipeline: geometry → forward model → SVD → save.
 
@@ -127,6 +127,8 @@ class ImagingModality(ABC):
         ----------
         save_results : bool, default=True
             Whether to save SVD results to disk with parameter tracking.
+        default_run : bool, default=False
+            Whether to save as default run configuration.
 
         Returns
         -------
@@ -160,7 +162,7 @@ class ImagingModality(ABC):
 
         if save_results:
             print(f"[{self.name}] Saving results...")
-            self.save_results(singular_values)
+            self.save_results(singular_values, default_run=default_run)
 
         print(f"[{self.name}] Completed in {time.perf_counter() - t0:.2f} seconds")
         return singular_values
@@ -178,7 +180,7 @@ class ImagingModality(ABC):
 
         return compute_svd_gpu(self.jacobian)
 
-    def save_results(self, singular_values: np.ndarray) -> None:
+    def save_results(self, singular_values: np.ndarray, default_run: bool = False) -> None:
         """
         Save SVD results with parameter tracking.
 
@@ -189,7 +191,7 @@ class ImagingModality(ABC):
         """
         from guti.data_utils import save_svd
 
-        save_svd(singular_values, self.name, self.params)
+        save_svd(singular_values, self.name, self.params, default_run=default_run)
 
     def __repr__(self) -> str:
         """String representation showing modality name and parameters."""

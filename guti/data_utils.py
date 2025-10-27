@@ -19,6 +19,7 @@ def save_svd(
     s: NDArray,
     modality_name: str,
     params: Optional[Parameters] = None,
+    default_run: bool = False,
 ) -> None:
     """
     Save the singular value spectrum and optional parameters to a file.
@@ -40,12 +41,14 @@ def save_svd(
             noise_full_brain: float
         )
     """
-    if params is None:
+    if default_run:
         # Save as default configuration in main results directory
         filepath = os.path.join(RESULTS_DIR, f"{modality_name}_svd_spectrum.npz")
         np.savez(filepath, singular_values=s)
         print(f"Saved default SVD spectrum to {filepath}")
     else:
+        if params is None:
+            raise ValueError("Params must be provided for non-default runs")
         # Save as variant in variants directory with hash
         params_hash = params.get_hash()
         # Directory: variants/[modality_name]/
