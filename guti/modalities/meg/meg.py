@@ -85,7 +85,7 @@ def compute_forward_matrix(n_sensors=4000, grid_spacing_mm=5.0, offset=opm_dista
             
     return A
 
-def compute_svd(n_sensors=4000, n_sources=4000, offset=opm_distance):
+def compute_svd(n_sensors=4000, grid_spacing_mm=5.0, offset=opm_distance):
     """
     Compute the singular value decomposition of the MEG forward matrix.
     
@@ -93,15 +93,15 @@ def compute_svd(n_sensors=4000, n_sources=4000, offset=opm_distance):
     ----------
     n_sensors : int
         Number of sensors to use
-    n_sources : int
-        Number of source dipoles to use
+    grid_spacing_mm : float
+        Spacing between grid points in mm
         
     Returns
     -------
     s : ndarray
         Singular values of the forward matrix
     """
-    A = compute_forward_matrix(n_sensors, n_sources, offset)
+    A = compute_forward_matrix(n_sensors, grid_spacing_mm, offset)
     _, s, _ = np.linalg.svd(A, full_matrices=False)
     return A, s
 
@@ -113,8 +113,11 @@ from matplotlib import pyplot as plt
 # A_1, s_1 = compute_svd(n_sensors=200, n_sources=1000, offset=opm_distance)
 # A_2, s_2 = compute_svd(n_sensors=200, n_sources=1000, offset=squid_distance)
 
-A_1, s_1 = compute_svd(n_sensors=1000, n_sources=1000, offset=opm_distance)
-A_2, s_2 = compute_svd(n_sensors=1000, n_sources=1000, offset=squid_distance)
+n_sensors = 1000
+grid_spacing_mm = 5.0
+
+A_1, s_1 = compute_svd(n_sensors=n_sensors, grid_spacing_mm=grid_spacing_mm, offset=opm_distance)
+A_2, s_2 = compute_svd(n_sensors=n_sensors, grid_spacing_mm=grid_spacing_mm, offset=squid_distance)
 
 # Plot the singular value spectra on a log scale
 plt.figure(figsize=(8, 4))
@@ -122,10 +125,22 @@ plt.semilogy(s_1, label='OPM')
 plt.semilogy(s_2, label='SQUID')
 plt.xlabel('Singular Value Index')
 plt.ylabel('Singular Value (log scale)')
-plt.title(f'Singular Value Spectra ({n_sensors} sensors, {n_sources} sources)')
+plt.title(f'Singular Value Spectra ({n_sensors} sensors, {grid_spacing_mm} mm grid spacing)')
 plt.grid(True)
 plt.legend()
 plt.show()
+
+# %%
+from guti.parameters import Parameters
+from guti.data_utils import save_svd
+for n_sensors in [50, 100, 200, 500, 700]:
+    for grid_spacing_mm in [5.0, 10.0, 15, 20.0, 30]:
+        A, s = compute_svd(n_sensors=n_sensors, grid_spacing_mm=grid_spacing_mm, offset=opm_distance)
+        save_svd(s, f'meg_opm', Parameters(num_sensors=n_sensors, source_spacing_mm=grid_spacing_mm, sensor_offset_mm=opm_distance))
+        print(f'Saved SVD for {n_sensors} sensors, {grid_spacing_mm} mm grid spacing')
+        A, s = compute_svd(n_sensors=n_sensors, grid_spacing_mm=grid_spacing_mm, offset=squid_distance)
+        save_svd(s, f'meg_squid', Parameters(num_sensors=n_sensors, source_spacing_mm=grid_spacing_mm, sensor_offset_mm=squid_distance))
+        print(f'Saved SVD for {n_sensors} sensors, {grid_spacing_mm} mm grid spacing')
 
 
 # %%

@@ -11,9 +11,9 @@ from guti.scaling_utils import (
 from guti.parameters import Parameters
 import numpy as np
 
-modality_name = "eeg_analytical"
-param_key = "num_brain_grid_points"
-constant_params = Parameters(num_sensors=12100)
+modality_name = "meg_opm"
+param_key = "source_spacing_mm"
+constant_params = Parameters(num_sensors=700)
 # param_key = "num_sensors"
 # constant_params = Parameters(num_brain_grid_points=34*34*34)
 
