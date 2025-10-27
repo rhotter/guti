@@ -71,7 +71,7 @@ venv_activate = os.path.join(venv_path, "bin", "activate")
 # Set up environment to ensure conda tools are accessible
 env = os.environ.copy()
 # Add conda bin to PATH to ensure OpenMEEG tools are found
-conda_bin = "/workspace/miniconda3/bin"
+conda_bin = "/Users/thomasribeiro/miniconda3/bin"
 if conda_bin not in env.get("PATH", ""):
     env["PATH"] = f"{conda_bin}:{env.get('PATH', '')}"
 
