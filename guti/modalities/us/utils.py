@@ -5,11 +5,16 @@ import matplotlib.pyplot as plt
 import torch
 import jax
 import jwave
+from jwave.geometry import Medium, TimeAxis
 
 
 def create_medium(central_frequency: float = 0.25e6, pad: int = None):
     min_speed_of_sound = 1500.
-    PPW = 6
+    # PPW = 12
+    PPW = 24
+    # PPW = 32
+    # PPW = 48
+    # PPW = 140
     # Simulation parameters
     dx_m = min_speed_of_sound / (PPW * central_frequency)
     print(f"dx_m: {dx_m}")
@@ -66,6 +71,29 @@ def create_medium(central_frequency: float = 0.25e6, pad: int = None):
 
     return domain, medium, time_axis, brain_mask, skull_mask, scalp_mask
 
+def create_sources_real(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, pad: int = 0):
+    """
+    Create sources and source mask.
+    """
+    import jwave
+    N = domain.N
+    dx = domain.dx
+
+    from guti.core import BRAIN_RADIUS
+
+    grid_spacing_mm = ((2/3) * np.pi * BRAIN_RADIUS**3 / n_sources)**(1/3)
+
+    # Get spiral source positions in world coordinates
+    if not inside:
+        source_positions = get_sensor_positions(n_sensors=n_sources, offset=8)
+    else:
+        source_positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
+    print("Got source positions")
+    # Convert to voxel indices
+    source_positions_voxels = jnp.floor(source_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
+    x_real, y_real, z_real = source_positions[:, 0], source_positions[:, 1], source_positions[:, 2]
+    return np.stack([x_real, y_real, z_real], axis=1)*1e-3
+
 def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, pad: int = 0):
     """
     Create sources and source mask.
@@ -114,6 +142,22 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
     source_mask = source_mask.at[:, x, y, z].set(True)
 
     return sources, source_mask
+    # return np.stack(sources.positions).T * dx * 1e-3
+    # return np.stack([x_real, y_real, z_real], axis=1) * 1e-3
+
+def create_receivers_real(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
+    N = domain.N
+    dx = domain.dx
+    # Get spiral sensor positions in world coordinates
+    if spiral:
+        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
+    else:
+        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
+    print("Got sensor positions")
+    # Convert to voxel indices
+    sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
+    x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
+    return np.stack([x_real, y_real, z_real], axis=1)*1e-3
 
 
 def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
@@ -128,6 +172,7 @@ def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, st
     # Convert to voxel indices
     sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
     x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
+
     x, y, z = sensor_positions_voxels[:, 0], sensor_positions_voxels[:, 1], sensor_positions_voxels[:, 2]
     pad_x = pad_y = pad_z = pad
     # Filter positions within the padded volume
@@ -147,8 +192,11 @@ def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, st
     # Instantiate sensors
     sensors = jwave.geometry.Sensors(positions=tuple(receiver_positions.T.tolist()))
     sensors_all = jwave.geometry.Sensors(positions=tuple(jnp.argwhere(jnp.ones(N)).T.tolist()))
+    # breakpoint()
 
+    # return np.stack(sensors.positions).T
     return sensors, sensors_all, receivers_mask
+    # return np.stack([x_real, y_real, z_real], axis=1) * 1e-3
 
 
 def create_sources_receivers(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, n_sensors: int = 400, pad: int = 30):
@@ -156,44 +204,70 @@ def create_sources_receivers(domain, time_axis, freq_Hz=0.25e6, inside: bool = F
     sensors, sensors_all, receivers_mask = create_receivers(domain, time_axis, freq_Hz, n_sensors, pad)
     return sources, sensors, sensors_all, source_mask, receivers_mask
 
-def plot_medium(medium, source_mask, sources, time_axis, receivers_mask):
+def plot_medium(medium, sources, sensors, time_axis):
     N = medium.domain.N
-    # Plot the speed of sound map
+    dx = medium.domain.dx
+    
+    # Plot the speed of sound map with sources and receivers overlaid
     plt.figure(figsize=(10, 8))
-    plt.imshow(medium.sound_speed.on_grid[N[0]//2, :, :,0].T, cmap='viridis')
+    plt.imshow(medium.sound_speed.on_grid[N[0]//2, :, :, 0].T, cmap='viridis', origin='lower')
     plt.colorbar(label='Speed of Sound (m/s)')
-    plt.title('Speed of Sound Distribution')
+    
+    # Convert world coordinates (mm) to voxel indices for plotting
+    if sources is not None and len(sources) > 0:
+        # sources are in mm, convert to voxel indices
+        sources_voxels = sources / (np.array(dx) * 1e3)
+        plt.scatter(sources_voxels[:, 1], sources_voxels[:, 2], c='red', s=10, alpha=0.5, label='Sources', edgecolors='black', linewidths=0.5)
+    
+    if sensors is not None and len(sensors) > 0:
+        # sensors are in mm, convert to voxel indices
+        sensors_voxels = sensors / (np.array(dx) * 1e3)
+        plt.scatter(sensors_voxels[:, 1], sensors_voxels[:, 2], c='blue', s=10, alpha=0.5, label='Receivers', edgecolors='black', linewidths=0.5)
+    
+    plt.title('Speed of Sound Distribution with Sources and Receivers')
     plt.xlabel('y (grid points)')
     plt.ylabel('z (grid points)')
-    plt.show()
+    plt.legend()
+    plt.savefig('speed_of_sound.png')
 
     # Plot the source locations
     plt.figure(figsize=(10, 8))
-    plt.imshow(jnp.max(source_mask[0, :, :, :], axis=0).T, cmap='binary', label='Sources')
+    plt.imshow(np.ones((N[1], N[2])), cmap='binary', origin='lower')
+    # Overlay source positions as scatter plot
+    if sources is not None and len(sources) > 0:
+        sources_voxels = sources / (np.array(dx) * 1e3)
+        plt.scatter(sources_voxels[:, 1], sources_voxels[:, 2], c='red', s=10, alpha=0.5, label='Sources')
     plt.title('Source Locations')
     plt.xlabel('y (grid points)')
     plt.ylabel('z (grid points)')
     plt.colorbar(label='Source Present')
-    plt.show()
+    plt.legend()
+    plt.savefig('source_mask.png')
 
     # Plot the receivers locations
     plt.figure(figsize=(10, 8))
-    plt.imshow(receivers_mask[N[0]//2, :, :].T, cmap='binary', label='Receivers')
+    plt.imshow(np.ones((N[1], N[2])), cmap='binary', origin='lower')
+    # Overlay sensor positions as scatter plot
+    if sensors is not None and len(sensors) > 0:
+        sensors_voxels = sensors / (np.array(dx) * 1e3)
+        plt.scatter(sensors_voxels[:, 1], sensors_voxels[:, 2], c='blue', s=10, alpha=0.5, label='Receivers')
     plt.title('Receivers Locations')
     plt.xlabel('y (grid points)')
     plt.ylabel('z (grid points)')
     plt.colorbar(label='Receivers Present')
-    plt.show()
+    plt.legend()
+    plt.savefig('receivers_mask.png')
 
     # Plot the signal used for sources
-    signal = sources.signals[0]
+    # Generate a sample signal based on time_axis and center frequency
+    signal = np.sin(2 * np.pi * time_axis.to_array() * 0.25e6)  # Default center frequency
     plt.figure(figsize=(10, 4))
     plt.plot(time_axis.to_array() * 1e6, signal)  # Convert time to microseconds
     plt.title('Source Signal')
     plt.xlabel('Time (μs)')
     plt.ylabel('Amplitude')
     plt.grid(True)
-    plt.show()
+    plt.savefig('source_signal.png')
 
 
 
@@ -267,8 +341,8 @@ def simulate_free_field_propagation(
     
     # Calculate distances between all source-receiver pairs
     distances = torch.cdist(
-        receiver_positions.float().unsqueeze(0) * voxel_size, 
-        source_positions.float().unsqueeze(0) * voxel_size
+        receiver_positions.float().unsqueeze(0), 
+        source_positions.float().unsqueeze(0)
     )[0]
 
     # Check for zero distances which would cause division by zero

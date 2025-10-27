@@ -8,11 +8,21 @@ from guti.core import get_bitrate, noise_floor_heuristic
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Optional
+import os
+
+os.makedirs("plots", exist_ok=True)
 
 def normalize_singular_values(s: np.ndarray, params: Parameters) -> np.ndarray:
-    num_brain_grid_points = getattr(params, "num_brain_grid_points")
-    print(num_brain_grid_points)
-    return s / num_brain_grid_points**(1/4)
+    matrix_size = getattr(params, "matrix_size", None)
+    if matrix_size is not None:
+        Ninput = matrix_size[1]
+        Noutput = matrix_size[0]
+    else:
+        Ninput = getattr(params, "num_brain_grid_points", None)
+        Noutput = getattr(params, "num_sensors", None)
+        if Ninput is None or Noutput is None:
+            raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or num_sensors in parameters.")
+    return s / np.sqrt(Ninput * Noutput)
 
 
 def get_normalized_variants(modality_name: str, param_key: str, constant_params: Optional[Parameters] = None):
@@ -26,7 +36,8 @@ def get_normalized_variants(modality_name: str, param_key: str, constant_params:
         constant_params = Parameters()
 
     variants = list_svd_variants(modality_name, constant_params=constant_params)
-
+    # for k, v in variants.items():
+    #     print(f"  {k}: {v['params']}")
     if not variants:
         return []
 
@@ -85,6 +96,7 @@ def plot_parameter_sweep_spectra(
     plt.ylim(ylim)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
+    plt.savefig(f"plots/spectra.png")
     plt.show()
 
 
@@ -115,6 +127,7 @@ def plot_first_singular_value_vs_parameter(
     plt.title(f'Maximum Gain vs {param_key}\n{modality_name}')
     plt.grid(True)
     plt.tight_layout()
+    plt.savefig(f"plots/first_sv.png")
     plt.show()
 
 
@@ -123,7 +136,8 @@ def plot_bitrate_vs_parameter(
     param_key: str,
     constant_params: Optional[Parameters] = None,
     figsize: tuple = (10, 6),
-    time_resolution: float = 1.0
+    time_resolution: float = 1.0,
+    snr: float = 10.0
 ):
     normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
 
@@ -138,9 +152,8 @@ def plot_bitrate_vs_parameter(
         params = v["params"]
         param_value = getattr(params, param_key)
         n_sensors = params.num_sensors
-        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=10, n_detectors=n_sensors)
+        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=snr, n_detectors=n_sensors)
         bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution)
-
         param_values.append(param_value)
         bitrates.append(bitrate)
 
@@ -149,8 +162,79 @@ def plot_bitrate_vs_parameter(
     plt.xlabel(param_key)
     plt.ylabel('Bitrate (bits/s)')
     plt.title(f'Information Capacity vs {param_key}\n{modality_name}')
+    plt.ylim(bottom=0)
     plt.grid(True)
     plt.tight_layout()
+    plt.savefig(f"plots/bitrate.png")
+    plt.show()
+
+
+def plot_bitrate_vs_snr(
+    modality_name: str,
+    param_key: str,
+    param_value: float,
+    snr_values: np.ndarray,
+    constant_params: Optional[Parameters] = None,
+    figsize: tuple = (10, 6),
+    time_resolution: float = 1.0
+):
+    """
+    Plot bitrate vs SNR for a specific parameter value.
+
+    Args:
+        modality_name: Name of the imaging modality
+        param_key: Parameter key being swept
+        param_value: Specific value of the parameter to analyze
+        snr_values: Array of SNR values to test
+        constant_params: Fixed parameters
+        figsize: Figure size
+        time_resolution: Time resolution in seconds
+
+    Example:
+        >>> snrs = np.logspace(-1, 2, 50)  # SNR from 0.1 to 100
+        >>> plot_bitrate_vs_snr("fnirs_analytical_cw", "grid_resolution_mm", 5.0, snrs)
+    """
+    if constant_params is None:
+        constant_params = Parameters()
+
+    # Get the variant with this parameter value
+    normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
+
+    if not normalized_svs:
+        print(f"No variants found for {modality_name} with given parameters")
+        return
+
+    # Find the variant matching our param_value
+    matching_variant = None
+    for v, s_normalized in normalized_svs:
+        if getattr(v["params"], param_key) == param_value:
+            matching_variant = (v, s_normalized)
+            break
+
+    if matching_variant is None:
+        print(f"No variant found with {param_key}={param_value}")
+        return
+
+    v, s_normalized = matching_variant
+    params = v["params"]
+    n_sensors = params.num_sensors
+
+    # Compute bitrates for each SNR
+    bitrates = []
+    for snr in snr_values:
+        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=snr, n_detectors=n_sensors)
+        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution)
+        bitrates.append(bitrate)
+
+    plt.figure(figsize=figsize)
+    plt.plot(snr_values, bitrates, 'o-', linewidth=2, markersize=6)
+    # plt.xscale('log')
+    plt.xlabel('SNR')
+    plt.ylabel('Bitrate (bits/s)')
+    plt.title(f'Information Capacity vs SNR \n {modality_name} ({param_key}={param_value})')
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"plots/{modality_name}_{param_key}_bitrate_vs_snr.png")
     plt.show()
 
 

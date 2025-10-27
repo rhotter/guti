@@ -1,4 +1,4 @@
-# Grand Unified Theory of Imaging
+# Good Unified Theory of Imaging
 
 1. Motivation for the problem
 - Why resolution is insufficient
@@ -21,11 +21,36 @@
 
 ## Motivation
 
+![]()   %% a picture with a box and different imaging methods
+
 Imagine you have a box and you want to know what's inside. How do you quantify how much information you get about its contents?
 When people think of imaging methods like MRI, they tend to think of their quality in terms of spatial resolution. However, that is not a complete description.
 For one, the resolution means nothing if the signal is too noisy. Sometimes, the resolution changes with depth. Sometimes, the information you get requires complicated assumption-heavy reconstruction to get to a volumetric picture.
 
 But there is a way to determine the maximal amount of information you get about the contents of the box without making assumptions about the reconstruction.
+It allows one to compute the maximal bitrate of the modality as a function of the signal-to-noise ratio of the detectors and the parameters of the device. The most important questions this method aims to answer are:
+- Asymptotically, what is the best modality of brain imaging? (it's ultrasound)
+- How much room for improvement is there for each imaging method? Could you add more sensors to EEG and get vastly better brain decoding results? What about increasing the SNR of magnetic sensors for MEG?
 
-~~transition from box to brain? do we need the box?~~
+%% transition from box to brain? do we need the box?
 What you really care about when doing brain imaging is how many independent dimensions of imaging you get, and what their signal-to-noise ratio is.
+**So how do you quantify effective dimensionality?**
+Each dimension is not created equal - some of them carry more information. For example, if you look at noisy EEG readings, the signal from each electrode will be independent, but it will not carry as much information as an fMRI voxel would.
+
+Here, we present a method which allows us to explicitly get the fundamental orthogonal dimensions of the data and compute their signal-to-noise ratios. It is based on the Singular Value Decomposition (SVD).
+
+We represent each imaging modality via an operator that transforms brain states into readouts:
+
+$$y = Ax + \varepsilon,$$
+
+where $A$ represents the modality, $x$ the ground truth of the brain state, $\varepsilon$ the noise, and $y$ the read-outs.
+
+We apply the SVD to the matrix $A$ and look at the spectrum.
+
+![](spectrum.png)
+
+What does the spectrum actually mean?
+
+## The method
+
+
