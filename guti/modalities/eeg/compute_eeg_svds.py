@@ -40,7 +40,7 @@ print(__doc__)
 SWEEP_PARAM = "grid_resolution_mm"
 
 # Define sweep range using linspace
-SWEEP_MIN = 5.0      # Minimum value
+SWEEP_MIN = 10.0      # Minimum value
 SWEEP_MAX = 20.0      # Maximum value
 SWEEP_N_POINTS = 7    # Number of points in sweep
 
@@ -57,7 +57,7 @@ SWEEP_N_POINTS = 7    # Number of points in sweep
 
 CONSTANT_PARAMS = Parameters(
     num_sensors=256,
-    source_spacing_mm=5.0,
+    source_spacing_mm=5.0, #5
 )
 
 # Generate sweep values
