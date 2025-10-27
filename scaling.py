@@ -11,9 +11,9 @@ from guti.scaling_utils import (
 from guti.parameters import Parameters
 import numpy as np
 
-modality_name = "fnirs_analytical_cw"
+modality_name = "us_free_field_analytical_n_sources_sweep_50khz"
 param_key = "num_sensors"
-constant_params = Parameters(grid_resolution_mm=6)
+constant_params = Parameters(n_sensors = 3028)
 
 # %%
 plot_parameter_sweep_spectra(

@@ -164,12 +164,14 @@ def list_svd_variants(
         return variants
 
     for filename in os.listdir(search_dir):
+        print(filename)
         if filename.endswith(".npz"):
             # Extract hash from filename (hash is the filename without .npz)
             hash_part = filename[:-4]  # Remove .npz suffix
             if len(hash_part) == 8:  # Our hashes are 8 characters
                 try:
                     s, params = load_svd_variant(modality_name, hash_part)
+                    print(params)
                     if params is not None:
                         variants[hash_part] = dict(s=s, params=params)
                 except FileNotFoundError:
