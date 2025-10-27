@@ -508,7 +508,7 @@ def permute_grids(grids: jnp.ndarray, n_permutations_each_dir: int = 10):
         Array of shape (num_grids * n^2, H, W) with all (i,j) shifts stacked.
     """
     n = n_permutations_each_dir
-    shifts_1d = jnp.arange(n, dtype=jnp.int32)
+    shifts_1d = jnp.arange(0, grids.shape[1], step=grids.shape[1]//n, dtype=jnp.int32)
     si, sj = jnp.meshgrid(shifts_1d, shifts_1d, indexing="ij")
     shifts = jnp.stack([si.reshape(-1), sj.reshape(-1)], axis=1)  # (K, 2), K=n*n
 
@@ -534,7 +534,7 @@ def compute_svd(num_radial_dipoles: int = 30, num_permutations_each_dir: int = 1
         num_dipoles=num_radial_dipoles, max_radius=BRAIN_RADIUS, num_phi=num_phi, num_theta=num_theta)
     permuted_grids = permute_grids(grids, n_permutations_each_dir=num_permutations_each_dir)
     u, s, vh = jnp.linalg.svd(permuted_grids, full_matrices=False)
-    save_svd(s, 'eeg_analytical', Parameters(
+    save_svd(s, 'eeg_analytical_2', Parameters(
         num_brain_grid_points=num_radial_dipoles * num_permutations_each_dir ** 2,
         num_sensors=num_phi * num_theta,
     ))
@@ -542,13 +542,13 @@ def compute_svd(num_radial_dipoles: int = 30, num_permutations_each_dir: int = 1
 
 # %%
 if __name__ == "__main__":
-    for source_scaling in [0.1, 0.5, 1, 10, 100]:
-        for sensor_scaling in [0.1, 0.5, 1, 5, 10]:
+    for source_scaling in [1, 5, 10, 20, 25, 50, 100]:
+        for sensor_scaling in [10]:
             num_phi = int(35 * sensor_scaling ** 0.5)
             num_theta = int(35 * sensor_scaling ** 0.5)
             num_radial_dipoles = int(20 * source_scaling ** 0.33)
             num_permutations_each_dir = int(20 * source_scaling ** 0.33)
             print(f"Computing SVD for {num_radial_dipoles} radial dipoles, {num_permutations_each_dir} permutations each direction, {num_phi} phi, {num_theta} theta")
-            compute_svd(num_radial_dipoles=num_radial_dipoles, num_permutations_each_dir=num_permutations_each_dir, num_phi=num_phi, num_theta=num_theta)
+            compute_svd(num_radial_dipoles=num_radial_dipoles, num_permutations_each_dir=num_permutations_each_dir, num_phi=num_phi, num_theta=num_theta, l_max=100)
 
 # %%

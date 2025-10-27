@@ -11,9 +11,11 @@ from guti.scaling_utils import (
 from guti.parameters import Parameters
 import numpy as np
 
-modality_name = "us_free_field_analytical_n_sources_sweep_50khz"
-param_key = "num_sensors"
-constant_params = Parameters(n_sensors = 3028)
+modality_name = "eeg_analytical_2"
+param_key = "num_brain_grid_points"
+constant_params = Parameters(num_sensors=110*110)
+# param_key = "num_sensors"
+# constant_params = Parameters(num_brain_grid_points=34*34*34)
 
 # %%
 plot_parameter_sweep_spectra(
