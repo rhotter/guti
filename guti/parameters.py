@@ -44,6 +44,9 @@ class Parameters:
     input_dim: Optional[int] = None
     output_dim: Optional[int] = None
 
+    # for fnirs
+    max_dist: Optional[float] = None
+
     @classmethod
     def from_dict(cls, data: Dict) -> "Parameters":
         """Create Parameters object from dictionary."""

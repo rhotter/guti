@@ -137,7 +137,8 @@ def load_svd_variant(
 def list_svd_variants(
     modality_name: str,
     constant_params: Optional[Parameters] = None,
-) -> Dict[str, Parameters]:
+    sort_by: Optional[str] = None,
+):
     """
     List all available parameter variants for a modality.
 
@@ -150,43 +151,57 @@ def list_svd_variants(
         Only variants matching the non-None fields will be returned.
         Example: Parameters(num_sensors=8000) will only return variants
         with num_sensors=8000, ignoring other parameters.
+    sort_by : str, optional
+        Parameter key to sort variants by. If specified, only variants that have
+        this parameter (non-None) will be returned, sorted by this parameter value.
+        Returns a list of tuples instead of a dict.
+        Example: "grid_resolution_mm" will return variants sorted by grid_resolution_mm.
 
     Returns
     -------
-    dict
-        Dictionary mapping parameter hashes to Parameters objects
+    dict or list
+        If sort_by is None: Dictionary mapping parameter hashes to variant dicts
+        If sort_by is specified: List of tuples (hash, variant_dict) sorted by the parameter
     """
     variants = {}
 
     search_dir = os.path.join(VARIANTS_DIR, modality_name)
 
     if not os.path.exists(search_dir):
-        return variants
+        return [] if sort_by is not None else variants
 
     for filename in os.listdir(search_dir):
-        print(filename)
         if filename.endswith(".npz"):
             # Extract hash from filename (hash is the filename without .npz)
             hash_part = filename[:-4]  # Remove .npz suffix
             if len(hash_part) == 8:  # Our hashes are 8 characters
                 try:
                     s, params = load_svd_variant(modality_name, hash_part)
-                    print(params)
                     if params is not None:
                         variants[hash_part] = dict(s=s, params=params)
                 except FileNotFoundError:
                     continue
+                except EOFError:
+                    continue
 
-    # Filter by constant parameters if specified
-    if constant_params is not None:
-        constant_dict = constant_params.to_dict()
-        if constant_dict:
-            filtered_variants = {}
-            for k, v in variants.items():
-                params = v["params"]
-                # Check if all specified constant params match
-                if all(getattr(params, key, None) == value for key, value in constant_dict.items()):
-                    filtered_variants[k] = v
-            variants = filtered_variants
+    # Filter by constant parameters and sort_by parameter if specified
+    if constant_params is not None or sort_by is not None:
+        constant_dict = constant_params.to_dict() if constant_params is not None else {}
+
+        filtered_variants = {}
+        for k, v in variants.items():
+            params = v["params"]
+            # Check if all specified constant params match
+            constant_match = all(getattr(params, key, None) == value for key, value in constant_dict.items())
+            # Check if sort_by param exists (are not None)
+            sort_match = getattr(params, sort_by, None) is not None if sort_by is not None else True
+
+            if constant_match and sort_match:
+                filtered_variants[k] = v
+        variants = filtered_variants
+
+    # Sort if requested
+    if sort_by is not None:
+        return sorted(variants.items(), key=lambda x: getattr(x[1]["params"], sort_by))
 
     return variants
