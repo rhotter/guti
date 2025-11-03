@@ -10,11 +10,7 @@ from jwave.geometry import Medium, TimeAxis
 
 def create_medium(central_frequency: float = 0.25e6, pad: int = None):
     min_speed_of_sound = 1500.
-    # PPW = 12
     PPW = 24
-    # PPW = 32
-    # PPW = 48
-    # PPW = 140
     # Simulation parameters
     dx_m = min_speed_of_sound / (PPW * central_frequency)
     print(f"dx_m: {dx_m}")
@@ -94,6 +90,23 @@ def create_sources_real(domain, time_axis, freq_Hz=0.25e6, inside: bool = False,
     x_real, y_real, z_real = source_positions[:, 0], source_positions[:, 1], source_positions[:, 2]
     return np.stack([x_real, y_real, z_real], axis=1)*1e-3
 
+def create_receivers_real(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
+    N = domain.N
+    dx = domain.dx
+    # Get spiral sensor positions in world coordinates
+    if spiral:
+        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
+    else:
+        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
+    print("Got sensor positions")
+    # Convert to voxel indices
+    sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
+    x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
+    return np.stack([x_real, y_real, z_real], axis=1)*1e-3
+
+
+# Create sources and receivers used for non-free field simulations
+
 def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, pad: int = 0):
     """
     Create sources and source mask.
@@ -142,22 +155,6 @@ def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_so
     source_mask = source_mask.at[:, x, y, z].set(True)
 
     return sources, source_mask
-    # return np.stack(sources.positions).T * dx * 1e-3
-    # return np.stack([x_real, y_real, z_real], axis=1) * 1e-3
-
-def create_receivers_real(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
-    N = domain.N
-    dx = domain.dx
-    # Get spiral sensor positions in world coordinates
-    if spiral:
-        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
-    else:
-        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
-    print("Got sensor positions")
-    # Convert to voxel indices
-    sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
-    x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
-    return np.stack([x_real, y_real, z_real], axis=1)*1e-3
 
 
 def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
@@ -192,17 +189,7 @@ def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, st
     # Instantiate sensors
     sensors = jwave.geometry.Sensors(positions=tuple(receiver_positions.T.tolist()))
     sensors_all = jwave.geometry.Sensors(positions=tuple(jnp.argwhere(jnp.ones(N)).T.tolist()))
-    # breakpoint()
-
-    # return np.stack(sensors.positions).T
     return sensors, sensors_all, receivers_mask
-    # return np.stack([x_real, y_real, z_real], axis=1) * 1e-3
-
-
-def create_sources_receivers(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, n_sensors: int = 400, pad: int = 30):
-    sources, source_mask = create_sources(domain, time_axis, freq_Hz, inside, n_sources, pad)
-    sensors, sensors_all, receivers_mask = create_receivers(domain, time_axis, freq_Hz, n_sensors, pad)
-    return sources, sensors, sensors_all, source_mask, receivers_mask
 
 def plot_medium(medium, sources, sensors, time_axis):
     N = medium.domain.N
