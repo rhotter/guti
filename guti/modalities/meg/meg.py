@@ -133,8 +133,8 @@ plt.show()
 # %%
 from guti.parameters import Parameters
 from guti.data_utils import save_svd
-for n_sensors in [50, 100, 200, 500, 700]:
-    for grid_spacing_mm in [5.0, 10.0, 15, 20.0, 30]:
+for n_sensors in [600, 1000]:
+    for grid_spacing_mm in [3., 5.0]:
         A, s = compute_svd(n_sensors=n_sensors, grid_spacing_mm=grid_spacing_mm, offset=opm_distance)
         save_svd(s, f'meg_opm', Parameters(num_sensors=n_sensors, source_spacing_mm=grid_spacing_mm, sensor_offset_mm=opm_distance))
         print(f'Saved SVD for {n_sensors} sensors, {grid_spacing_mm} mm grid spacing')
