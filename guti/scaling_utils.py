@@ -22,9 +22,18 @@ def normalize_singular_values(s: np.ndarray, params: Parameters, method: Literal
             Noutput = matrix_size[0]
         else:
             Ninput = getattr(params, "num_brain_grid_points", None)
+            if Ninput is None:
+                # Try to get source_spacing_mm and generate grid
+                source_spacing_mm = getattr(params, "source_spacing_mm", None)
+                if source_spacing_mm is not None:
+                    from guti.core import get_grid_positions
+                    grid_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
+                    Ninput = len(grid_positions)
+                else:
+                    raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or source_spacing_mm in parameters.")
             Noutput = getattr(params, "num_sensors", None)
-            if Ninput is None or Noutput is None:
-                raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or num_sensors in parameters.")
+            if Noutput is None:
+                raise ValueError("Cannot normalize: missing num_sensors in parameters.")
         return s / np.sqrt(Ninput * Noutput)
     else:
         raise ValueError(f"Invalid normalization method: {method}")
