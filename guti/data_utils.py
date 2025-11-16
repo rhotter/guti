@@ -95,18 +95,12 @@ def load_all_svds() -> Dict[str, Tuple[NDArray, Optional[Parameters]]]:
         Dictionary mapping modality names to tuples of (singular_values, Parameters)
         where Parameters is a Parameters object or None if no parameters were saved
     """
-    filenames_to_labels = {
-        "eeg_openmeeg": "EEG",
-        "fnirs_analytical_cw": "fNIRS (CW)",
-    }
-
     results = {}
     for filename in os.listdir(RESULTS_DIR):
         if filename.endswith("_svd_spectrum.npz"):
             modality_name = filename.replace("_svd_spectrum.npz", "")
             # Use label if exists, otherwise use modality_name
-            label = filenames_to_labels.get(modality_name, modality_name)
-            results[label] = load_svd(modality_name)
+            results[modality_name] = load_svd(modality_name)
     return results
 
 
