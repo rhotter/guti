@@ -954,52 +954,51 @@ def get_bitrate(
 
 def water_filling_spectrum(
     s: np.ndarray, # svd spectrum
-    noise: float, # noise level
-    total_output_power: float,
+    snr: float, # noise level
 ) -> np.ndarray:
     """
     P_i is either 0 or mu - (noise/s)**2, where mu is the water level.
     """
     # Binary search for water level mu
-    # We want: sum_k s_k^2 * max(0, mu - (noise/s_k)^2) = total_output_power
+    # We want: sum_k s_k^2 * max(0, mu_tilde - (1/s_k)^2) = snr^2
     
     # Precompute (noise/s_k)^2 for all k
-    noise_over_s_sq = (noise / s) ** 2
+    reciprocal_s_squared = (1 / s) ** 2
     
     # Sort in ascending order for water-filling
-    sorted_indices = np.argsort(noise_over_s_sq)
-    noise_over_s_sq_sorted = noise_over_s_sq[sorted_indices]
+    sorted_indices = np.argsort(reciprocal_s_squared)
+    reciprocal_s_squared_sorted = reciprocal_s_squared[sorted_indices]
     s_sorted = s[sorted_indices]
     s_sq_sorted = s_sorted ** 2
     
     # Binary search bounds
-    mu_min = 0.0
-    mu_max = noise_over_s_sq_sorted[-1] + total_output_power / s_sq_sorted.min()
+    mu_tilde_min = 0.0
+    mu_tilde_max = reciprocal_s_squared_sorted[-1] + snr**2 / s_sq_sorted.min()
     
     tolerance = 1e-10
     max_iterations = 1000
     
     for _ in range(max_iterations):
-        mu = (mu_min + mu_max) / 2
+        mu_tilde = (mu_tilde_min + mu_tilde_max) / 2
         
         # Compute total output power for this mu
-        power_allocation = np.maximum(0, mu - noise_over_s_sq_sorted)
-        output_power = np.sum(s_sq_sorted * power_allocation)
+        power_allocation_tilde = np.maximum(0, mu_tilde - reciprocal_s_squared_sorted)
+        output_snr_squared = np.sum(s_sq_sorted * power_allocation_tilde)
         
-        if abs(output_power - total_output_power) < tolerance:
+        if abs(output_snr_squared - snr**2) < tolerance:
             break
         
-        if output_power < total_output_power:
-            mu_min = mu
+        if output_snr_squared < snr**2:
+            mu_tilde_min = mu_tilde
         else:
-            mu_max = mu
+            mu_tilde_max = mu_tilde
     
     # Compute final power allocation and unsort
-    power_allocation = np.maximum(0, mu - noise_over_s_sq_sorted)
-    P = np.zeros_like(s)
-    P[sorted_indices] = power_allocation
+    power_allocation_tilde = np.maximum(0, mu_tilde - reciprocal_s_squared_sorted)
+    P_tilde = np.zeros_like(s)
+    P_tilde[sorted_indices] = power_allocation_tilde
     
-    return P
+    return P_tilde
 
 def total_iid_input_power(
     s: np.ndarray, # svd spectrum
@@ -1010,17 +1009,15 @@ def total_iid_input_power(
 
 def get_bitrate_channel_capacity(
     s: np.ndarray, # svd spectrum
-    noise_at_reference_nsensors: float, # noise level
-    nsensors_reference: int, # reference number of sensors
     n_sensors: int, # number of sensors
+    snr_at_reference_nsensors: float, # snr level
+    nsensors_reference: int, # reference number of sensors
     time_resolution: float = 1.0,
-    output_power_per_channel: float = 1.0,
 ) -> float:
-    noise = noise_at_reference_nsensors * np.sqrt(n_sensors / nsensors_reference)
-    total_output_power = output_power_per_channel * n_sensors
-    optimal_input_power_spectrum = water_filling_spectrum(s, noise, total_output_power)
+    snr = snr_at_reference_nsensors * np.sqrt(nsensors_reference/n_sensors)
+    optimal_input_power_spectrum_over_noise = water_filling_spectrum(s, snr)
     channel_capacity = (1 / (2*time_resolution)) * np.sum(
-        np.log2(1 + optimal_input_power_spectrum*(s/noise)**2)
+        np.log2(1 + optimal_input_power_spectrum_over_noise*s**2)
     )
     return channel_capacity
     
