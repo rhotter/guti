@@ -1009,12 +1009,15 @@ def total_iid_input_power(
 
 def get_bitrate_channel_capacity(
     s: np.ndarray, # svd spectrum
-    n_sensors: int, # number of sensors
     snr_at_reference_nsensors: float, # snr level
-    nsensors_reference: int, # reference number of sensors
+    nsensors_reference: int | None = None, # reference number of sensors
+    n_sensors: int | None = None, # number of sensors
     time_resolution: float = 1.0,
 ) -> float:
-    snr = snr_at_reference_nsensors * np.sqrt(nsensors_reference/n_sensors)
+    if nsensors_reference is None:
+        snr = snr_at_reference_nsensors
+    else:
+        snr = snr_at_reference_nsensors * np.sqrt(nsensors_reference/n_sensors)
     optimal_input_power_spectrum_over_noise = water_filling_spectrum(s, snr)
     channel_capacity = (1 / (2*time_resolution)) * np.sum(
         np.log2(1 + optimal_input_power_spectrum_over_noise*s**2)
