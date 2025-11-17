@@ -1,5 +1,11 @@
 # Grand unified theory of imaging
 
+### Channel Capacities
+
+![Birate](./bitrate.png)
+
+### SVD Spectrum
+
 ![Singular value spectrum](./spectrum.png)
 
 The idea is each modality has some way of transforming the state of the brain into a set of measurements. By state of brain, we mean, for example, which neurons are firing and when. And by measurements, we mean, like with eeg, you put electrodes on the head and measure voltage. What we’re trying to do is study the function that maps brain state to measurements mathematically and ask how much of the brain state is actually represented in the measurement.
