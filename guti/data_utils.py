@@ -40,10 +40,15 @@ def save_svd(
             noise_full_brain: float
         )
     """
+    if params is None:
+        structured_params = None
+    else:
+        structured_params = asdict(params)
+
     if default_run:
         # Save as default configuration in main results directory
         filepath = os.path.join(RESULTS_DIR, f"{modality_name}_svd_spectrum.npz")
-        np.savez(filepath, singular_values=s)
+        np.savez(filepath, singular_values=s, parameters=structured_params)
         print(f"Saved default SVD spectrum to {filepath}")
     else:
         if params is None:
@@ -53,9 +58,7 @@ def save_svd(
         # Directory: variants/[modality_name]/
         target_dir = os.path.join(VARIANTS_DIR, modality_name)
         os.makedirs(target_dir, exist_ok=True)
-
         filepath = os.path.join(target_dir, f"{params_hash}.npz")
-        structured_params = asdict(params)
         np.savez(filepath, singular_values=s, parameters=structured_params)  # type: ignore
     return filepath
 
