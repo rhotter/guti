@@ -4,6 +4,10 @@
 
 ![Birate](./bitrate.png)
 
+### Spatial Channel Capacities
+
+![Spatial Channel Capacities](./spatial_channel_capacity.png)
+
 ### SVD Spectrum
 
 ![Singular value spectrum](./spectrum.png)
