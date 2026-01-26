@@ -38,10 +38,10 @@ image = (
         "jwave==0.2.1",
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
+    .add_local_dir(".", remote_path=MOUNT_PATH)
 )
 
 app = modal.App(APP_NAME)
-repo_mount = modal.Mount.from_local_dir(".", remote_path=MOUNT_PATH)
 
 
 def _find_latest_npz(results_dir: Path) -> Optional[Path]:
@@ -57,7 +57,6 @@ def _find_latest_npz(results_dir: Path) -> Optional[Path]:
     cpu=int(os.environ.get("MODAL_CPU", "8")),
     memory=int(os.environ.get("MODAL_MEMORY", "32768")),
     timeout=int(os.environ.get("MODAL_TIMEOUT", "60")) * 60,
-    mounts=[repo_mount],
 )
 def run_us_analytical(args: List[str]) -> Tuple[str, Optional[bytes]]:
     cmd = ["python", f"{MOUNT_PATH}/guti/modalities/us/analytical.py"] + args
