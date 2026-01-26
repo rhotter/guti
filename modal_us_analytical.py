@@ -1,5 +1,6 @@
 import argparse
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional
@@ -14,13 +15,9 @@ MOUNT_PATH = "/root/guti"
 def _gpu_config():
     gpu_type = os.environ.get("MODAL_GPU_TYPE", "H100")
     gpu_count = int(os.environ.get("MODAL_GPU_COUNT", "1"))
-    if gpu_type == "H100":
-        return modal.gpu.H100(count=gpu_count)
-    if gpu_type == "A100":
-        return modal.gpu.A100(count=gpu_count)
-    if gpu_type == "A10G":
-        return modal.gpu.A10G(count=gpu_count)
-    return "any"
+    if gpu_count <= 1:
+        return gpu_type
+    return f"{gpu_type}:{gpu_count}"
 
 
 image = (
@@ -68,12 +65,17 @@ def run_us_analytical(args: List[str]) -> Tuple[str, Optional[bytes]]:
 
 
 @app.local_entrypoint()
-def main():
+def main(*cli_args):
     parser = argparse.ArgumentParser(
         description="Run guti/modalities/us/analytical.py on Modal with the same CLI."
     )
     parser.add_argument("--modal-output-dir", default="results_modal", help="Where to save downloaded npz")
-    args, passthrough = parser.parse_known_args()
+    passthrough_args = list(cli_args)
+    if not passthrough_args:
+        env_args = os.environ.get("MODAL_ARGS")
+        if env_args:
+            passthrough_args = shlex.split(env_args)
+    args, passthrough = parser.parse_known_args(passthrough_args)
 
     filename, payload = run_us_analytical.remote(passthrough)
     if payload is None:
