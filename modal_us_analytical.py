@@ -56,8 +56,10 @@ def _find_latest_npz(results_dir: Path) -> Optional[Path]:
     timeout=int(os.environ.get("MODAL_TIMEOUT", "60")) * 60,
 )
 def run_us_analytical(args: List[str]) -> Tuple[str, Optional[bytes]]:
-    cmd = ["python", f"{MOUNT_PATH}/guti/modalities/us/analytical.py"] + args
-    subprocess.run(cmd, check=True, cwd=MOUNT_PATH)
+    cmd = ["python", "-m", "guti.modalities.us.analytical"] + args
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{MOUNT_PATH}:{env.get('PYTHONPATH', '')}"
+    subprocess.run(cmd, check=True, cwd=MOUNT_PATH, env=env)
     latest = _find_latest_npz(Path(MOUNT_PATH) / "results")
     if latest is None:
         return "", None
