@@ -1012,9 +1012,9 @@ parser.add_argument(
     choices=['svd', 'slq', 'both'],
     help='Compute bitrate via SVD, SLQ, or both',
 )
-parser.add_argument('--slq_s', type=int, default=64, help='Number of SLQ probe vectors')
-parser.add_argument('--slq_t', type=int, default=64, help='Lanczos steps for SLQ')
-parser.add_argument('--slq_batch', type=int, default=64, help='SLQ batch size per iteration')
+parser.add_argument('--slq_s', type=int, default=128, help='Number of SLQ probe vectors')
+parser.add_argument('--slq_t', type=int, default=128, help='Lanczos steps for SLQ')
+parser.add_argument('--slq_batch', type=int, default=128, help='SLQ batch size per iteration')
 parser.add_argument('--slq_chunk_rows', type=int, default=65536, help='Row chunk size for SLQ matvecs')
 parser.add_argument('--slq_verbose', action='store_true', default=True, help='Print SLQ progress logs')
 parser.add_argument('--slq_multi_gpu', action='store_true', help='Use multi-GPU sharded SLQ')
@@ -1196,7 +1196,7 @@ t0 = time.perf_counter()
 # s = torch.sqrt(s)
 
 from guti.data_utils import Parameters
-from guti.core import get_bitrate, noise_floor_heuristic
+from guti.core import get_bitrate, get_bitrate_channel_capacity, noise_floor_heuristic
 from guti.data_utils import save_svd
 
 noise_level = args.noise_level
@@ -1235,7 +1235,9 @@ if bitrate_method in {"svd", "both"}:
     s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
     noise_level = noise_floor_heuristic(s_normalized, heuristic=args.noise_heuristic, snr=args.noise_snr)
     print(f"noise_level: {noise_level}")
-    print(f"bitrate: {get_bitrate(s_normalized, noise_level, time_resolution=1.0)}")
+    #print(f"bitrate: {get_bitrate(s_normalized, noise_level, time_resolution=1.0)}")
+    print(n_sensors)
+    print(f"bitrate: {get_bitrate_channel_capacity(s, args.noise_snr, nsensors_reference=n_sensors, n_sensors=n_sensors, time_resolution=1.0)}")
 
 if bitrate_method in {"slq", "both"}:
     if not torch.cuda.is_available():
