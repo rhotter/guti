@@ -23,6 +23,7 @@ def normalize_singular_values(s: np.ndarray, params: Parameters, method: Literal
         else:
             Ninput = getattr(params, "num_brain_grid_points", None)
             Noutput = getattr(params, "num_sensors", None)
+            print(Ninput, Noutput, s[0], np.sqrt(Ninput * Noutput))
             if Ninput is None or Noutput is None:
                 raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or num_sensors in parameters.")
         return s / np.sqrt(Ninput * Noutput)
@@ -77,17 +78,30 @@ def plot_parameter_sweep_spectra(
     min_val, max_val = min(param_values), max(param_values)
     colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
 
+    # Track which parameter values we've seen to detect duplicates
+    seen_param_values = {}
+
     plt.figure(figsize=figsize)
     for (v, s_normalized), color in zip(normalized_svs, colors):
         params = v["params"]
         param_value = getattr(params, param_key)
         s = s_normalized / max_sv  # Normalize by largest singular value across all params
 
+        # Determine if this is a duplicate
+        is_duplicate = param_value in seen_param_values
+        linestyle = '--' if is_duplicate else '-'
+
+        # Track this parameter value
+        if param_value not in seen_param_values:
+            seen_param_values[param_value] = 0
+        seen_param_values[param_value] += 1
+
         plt.plot(
             np.arange(1, len(s) + 1),
             s,
             label=f"{param_key}={param_value}",
-            color=color
+            color=color,
+            linestyle=linestyle
         )
 
     plt.legend()
