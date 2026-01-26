@@ -44,6 +44,8 @@ class Parameters:
     comment: Optional[str] = None
     noise_full_brain: Optional[float] = None
     matrix_size: Optional[tuple[int, int]] = None
+    vincent_trick: Optional[bool] = None
+    frequency_hz: Optional[float] = None
 
     # for 1d blurring
     input_dim: Optional[int] = None

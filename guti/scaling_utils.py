@@ -22,10 +22,18 @@ def normalize_singular_values(s: np.ndarray, params: Parameters, method: Literal
             Noutput = matrix_size[0]
         else:
             Ninput = getattr(params, "num_brain_grid_points", None)
+            if Ninput is None:
+                # Try to get source_spacing_mm and generate grid
+                source_spacing_mm = getattr(params, "source_spacing_mm", None)
+                if source_spacing_mm is not None:
+                    from guti.core import get_grid_positions
+                    grid_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
+                    Ninput = len(grid_positions)
+                else:
+                    raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or source_spacing_mm in parameters.")
             Noutput = getattr(params, "num_sensors", None)
-            print(Ninput, Noutput, s[0], np.sqrt(Ninput * Noutput))
-            if Ninput is None or Noutput is None:
-                raise ValueError("Cannot normalize: missing matrix_size, num_brain_grid_points, or num_sensors in parameters.")
+            if Noutput is None:
+                raise ValueError("Cannot normalize: missing num_sensors in parameters.")
         return s / np.sqrt(Ninput * Noutput)
     else:
         raise ValueError(f"Invalid normalization method: {method}")
@@ -47,6 +55,7 @@ def get_normalized_variants(modality_name: str, param_key: str, constant_params:
         constant_params=constant_params,
         sort_by=param_key
     )
+
 
     # Normalize all singular values
     normalized_svs = []
@@ -76,10 +85,8 @@ def plot_parameter_sweep_spectra(
 
     param_values = [getattr(v["params"], param_key) for v, _ in normalized_svs]
     min_val, max_val = min(param_values), max(param_values)
-    colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
-
-    # Track which parameter values we've seen to detect duplicates
-    seen_param_values = {}
+    # colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
+    colors = [plt.cm.viridis(i) for i in np.linspace(0, 1, len(normalized_svs))]
 
     plt.figure(figsize=figsize)
     for (v, s_normalized), color in zip(normalized_svs, colors):
@@ -251,7 +258,7 @@ def plot_bitrate_vs_snr(
     plt.title(f'Information Capacity vs SNR \n {modality_name} ({param_key}={param_value})')
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"plots/{modality_name}_{param_key}_bitrate_vs_snr.png")
+    plt.savefig(f"plots/bitrate_vs_snr.png")
     plt.show()
 
 

@@ -87,8 +87,6 @@ def get_grid_positions(
     inside_hemisphere = (distances <= radius) & (grid_points[:, 2] >= 0)
     hemisphere_points = grid_points[inside_hemisphere]
 
-    print(f"Using {len(hemisphere_points)} grid points")
-
     return hemisphere_points
 
 

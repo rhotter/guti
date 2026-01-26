@@ -12,5 +12,10 @@ packages = [{ include = "guti" }]
 [tool.poetry.dependencies]
 python = "^3.8"
 
-[tool.poetry.group.dev.dependencies]
+# [tool.poetry.group.dev.dependencies]
 # Add development dependencies here if needed
+# numpy=2.1.2
+# scipy=1.16.3
+# torch=2.8.0+cu128
+# matplotlib=3.10.7
+# jwave=0.2.1
