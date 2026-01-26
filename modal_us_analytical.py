@@ -11,7 +11,7 @@ APP_NAME = "guti-us-analytical"
 MOUNT_PATH = "/root/guti"
 
 
-def _gpu_config() -> modal.gpu.GPU | str:
+def _gpu_config():
     gpu_type = os.environ.get("MODAL_GPU_TYPE", "H100")
     gpu_count = int(os.environ.get("MODAL_GPU_COUNT", "1"))
     if gpu_type == "H100":
