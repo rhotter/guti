@@ -16,6 +16,9 @@ from guti.modalities.us.utils import create_medium, create_sources_real, create_
 import time
 
 import torch, torch.backends.cuda as cu
+import torch.cuda.comm as cuda_comm
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 torch.set_float32_matmul_precision('high')  # allow TF32 on Ampere+
 torch.backends.cuda.matmul.allow_tf32 = True
 cu.preferred_linalg_library("magma")        # robust & fast dense LA
@@ -107,7 +110,7 @@ def bitrate_slq_torch_gpu_chunked(
             if device == "cuda":
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - t0
-            print(f"[slq] batch {batch_idx}, probes {done}/{s}, elapsed {elapsed:.2f}s")
+            print(f"[slq] batch {batch_idx}, probes {done}/{s}, elapsed {elapsed:.2f}s", flush=True)
         Z = (torch.randint(0, 2, (d, b), device=device) * 2 - 1).to(krylov_dtype)
         Q[:, :b] = Z / sqrt_d
         Qm1[:, :b].zero_()
@@ -118,7 +121,7 @@ def bitrate_slq_torch_gpu_chunked(
                 if device == "cuda":
                     torch.cuda.synchronize()
                 elapsed = time.perf_counter() - t0
-                print(f"[slq] batch {batch_idx} lanczos {k + 1}/{t} elapsed {elapsed:.2f}s")
+                print(f"[slq] batch {batch_idx} lanczos {k + 1}/{t} elapsed {elapsed:.2f}s", flush=True)
             if k > 0:
                 W -= Qm1[:, :b] * be[k - 1, :b][None, :]
             ak = torch.sum(Q[:, :b] * W, dim=0)
@@ -148,6 +151,848 @@ def bitrate_slq_torch_gpu_chunked(
     bits_per_sample = est / (s * ln2)
     return float(bits_per_sample / (2.0 * time_resolution))
 
+
+@torch.no_grad()
+def bitrate_slq_torch_gpu_chunked_probe_parallel(
+    A_cpu: np.ndarray | torch.Tensor,
+    noise_std_full_brain: float,
+    time_resolution: float = 1.0,
+    n_detectors: int | None = None,
+    s: int = 16,
+    t: int = 40,
+    batch: int = 256,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    device_ids: list[int] | None = None,
+    chunk_rows: int = 1024,
+    normalize_scale: float = 1.0,
+    verbose: bool = False,
+):
+    if device_ids is None:
+        device_ids = list(range(torch.cuda.device_count()))
+    if not device_ids:
+        raise ValueError("device_ids must include at least one CUDA device")
+
+    n_dev = len(device_ids)
+    base = s // n_dev
+    remainder = s % n_dev
+    s_parts = [base + (1 if i < remainder else 0) for i in range(n_dev)]
+
+    def worker(dev_id, s_local):
+        if s_local == 0:
+            return 0.0, 0
+        torch.cuda.set_device(dev_id)
+        bitrate_local = bitrate_slq_torch_gpu_chunked(
+            A_cpu,
+            noise_std_full_brain=noise_std_full_brain,
+            time_resolution=time_resolution,
+            n_detectors=n_detectors,
+            s=s_local,
+            t=t,
+            batch=batch,
+            use_left_if_smaller=use_left_if_smaller,
+            compute_dtype=compute_dtype,
+            krylov_dtype=krylov_dtype,
+            device=f"cuda:{dev_id}",
+            chunk_rows=chunk_rows,
+            normalize_scale=normalize_scale,
+            verbose=verbose,
+        )
+        return bitrate_local, s_local
+
+    est_sum = 0.0
+    s_sum = 0
+    with ThreadPoolExecutor(max_workers=n_dev) as pool:
+        futures = []
+        for dev_id, s_local in zip(device_ids, s_parts):
+            futures.append(pool.submit(worker, dev_id, s_local))
+        for fut in as_completed(futures):
+            bitrate_local, s_local = fut.result()
+            if s_local > 0:
+                est_sum += bitrate_local * s_local
+                s_sum += s_local
+
+    if s_sum == 0:
+        return 0.0
+    return est_sum / s_sum
+
+
+@torch.no_grad()
+def bitrate_slq_torch_multi_gpu_sharded(
+    A_cpu: np.ndarray | torch.Tensor,
+    noise_std_full_brain: float,
+    time_resolution: float = 1.0,
+    n_detectors: int | None = None,
+    s: int = 16,
+    t: int = 40,
+    batch: int = 256,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    device_ids: list[int] | None = None,
+    normalize_scale: float = 1.0,
+    verbose: bool = False,
+):
+    if device_ids is None:
+        device_ids = list(range(torch.cuda.device_count()))
+    if not device_ids:
+        raise ValueError("device_ids must include at least one CUDA device")
+
+    if isinstance(A_cpu, torch.Tensor) and A_cpu.device.type != "cpu":
+        A_cpu = A_cpu.cpu()
+
+    m, n = A_cpu.shape
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    n_eff = n_detectors if n_detectors is not None else 1
+    alpha = torch.tensor(
+        1.0 / (noise_std_full_brain**2 / n_eff),
+        dtype=krylov_dtype,
+        device=f"cuda:{device_ids[0]}",
+    )
+    ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=f"cuda:{device_ids[0]}")
+
+    # Shard rows of A across devices.
+    row_splits = torch.linspace(0, m, len(device_ids) + 1, dtype=torch.int64).tolist()
+    A_shards = []
+    for i, dev in enumerate(device_ids):
+        r0, r1 = row_splits[i], row_splits[i + 1]
+        shard = torch.as_tensor(A_cpu[r0:r1], dtype=compute_dtype, device=f"cuda:{dev}")
+        if normalize_scale != 1.0:
+            shard = shard * normalize_scale
+        A_shards.append(shard)
+
+    Q_shards = None
+    Qm1_shards = None
+    if left:
+        Q_shards = [
+            torch.empty((A_shards[i].shape[0], batch), dtype=krylov_dtype, device=A_shards[i].device)
+            for i in range(len(device_ids))
+        ]
+        Qm1_shards = [torch.zeros_like(Q_shards[i]) for i in range(len(device_ids))]
+    else:
+        Q = torch.empty((d, batch), dtype=krylov_dtype, device=f"cuda:{device_ids[0]}")
+        Qm1 = torch.zeros_like(Q)
+
+    al = torch.empty((t, batch), dtype=krylov_dtype, device=f"cuda:{device_ids[0]}")
+    be = torch.empty((t - 1, batch), dtype=krylov_dtype, device=f"cuda:{device_ids[0]}")
+
+    def reduce_sum(tensors):
+        return cuda_comm.reduce_add(tensors)
+
+    def broadcast(tensor):
+        return cuda_comm.broadcast(tensor, devices=device_ids)
+
+    def B_mv_left(Q_parts):
+        # T = sum_g A_g^T Q_g
+        T_parts = [A_shards[i].T @ Q_parts[i].to(compute_dtype) for i in range(len(device_ids))]
+        T = reduce_sum(T_parts)
+        T_parts_b = broadcast(T)
+        W_parts = [A_shards[i] @ T_parts_b[i] for i in range(len(device_ids))]
+        return W_parts
+
+    def B_mv_right(Q_full):
+        Q_parts = broadcast(Q_full)
+        T_parts = [A_shards[i] @ Q_parts[i].to(compute_dtype) for i in range(len(device_ids))]
+        W_parts = [A_shards[i].T @ T_parts[i] for i in range(len(device_ids))]
+        W = reduce_sum(W_parts)
+        return W
+
+    est = torch.zeros((), dtype=krylov_dtype, device=f"cuda:{device_ids[0]}")
+    done = 0
+    sqrt_d = math.sqrt(d)
+    scale = torch.tensor(float(d), dtype=krylov_dtype, device=f"cuda:{device_ids[0]}")
+    t0 = time.perf_counter()
+    batch_idx = 0
+
+    while done < s:
+        b = min(batch, s - done)
+        batch_idx += 1
+        if verbose:
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - t0
+            print(f"[slq-mgpu] batch {batch_idx}, probes {done}/{s}, elapsed {elapsed:.2f}s", flush=True)
+
+        if left:
+            for i in range(len(device_ids)):
+                dev = A_shards[i].device
+                z = (torch.randint(0, 2, (A_shards[i].shape[0], b), device=dev) * 2 - 1).to(krylov_dtype)
+                Q_shards[i][:, :b] = z / sqrt_d
+                Qm1_shards[i][:, :b].zero_()
+        else:
+            z = (torch.randint(0, 2, (d, b), device=Q.device) * 2 - 1).to(krylov_dtype)
+            Q[:, :b] = z / sqrt_d
+            Qm1[:, :b].zero_()
+
+        for k in range(t):
+            if left:
+                W_parts = B_mv_left([Q_shards[i][:, :b] for i in range(len(device_ids))])
+                if k > 0:
+                    be_prev = be[k - 1, :b]
+                    be_parts = broadcast(be_prev)
+                    for i in range(len(device_ids)):
+                        W_parts[i] -= Qm1_shards[i][:, :b] * be_parts[i][None, :]
+                ak_parts = [
+                    torch.sum(Q_shards[i][:, :b] * W_parts[i], dim=0)
+                    for i in range(len(device_ids))
+                ]
+                ak = reduce_sum(ak_parts)
+                ak_parts = broadcast(ak)
+                for i in range(len(device_ids)):
+                    W_parts[i] -= Q_shards[i][:, :b] * ak_parts[i][None, :]
+                al[k, :b] = ak
+                if k < t - 1:
+                    bk_parts = [torch.sum(W_parts[i] ** 2, dim=0) for i in range(len(device_ids))]
+                    bk2 = reduce_sum(bk_parts)
+                    bk = torch.sqrt(bk2)
+                    be[k, :b] = bk
+                    bk_parts = broadcast(bk)
+                    mask = bk > 1e-30
+                    mask_parts = broadcast(mask)
+                    for i in range(len(device_ids)):
+                        Qm1_shards[i][:, :b] = Q_shards[i][:, :b]
+                        Q_shards[i][:, :b] = torch.where(
+                            mask_parts[i][None, :],
+                            W_parts[i] / bk_parts[i][None, :],
+                            Q_shards[i][:, :b],
+                        )
+            else:
+                W = B_mv_right(Q[:, :b])
+                if k > 0:
+                    W -= Qm1[:, :b] * be[k - 1, :b][None, :]
+                ak = torch.sum(Q[:, :b] * W, dim=0)
+                W -= Q[:, :b] * ak[None, :]
+                al[k, :b] = ak
+                if k < t - 1:
+                    bk = torch.linalg.vector_norm(W, dim=0)
+                    be[k, :b] = bk
+                    mask = bk > 1e-30
+                    Qm1[:, :b] = Q[:, :b]
+                    Q[:, :b] = torch.where(mask[None, :], W / bk[None, :], Q[:, :b])
+
+            if verbose and (k == 0 or (k + 1) % 10 == 0):
+                torch.cuda.synchronize()
+                elapsed = time.perf_counter() - t0
+                print(f"[slq-mgpu] batch {batch_idx} lanczos {k + 1}/{t} elapsed {elapsed:.2f}s", flush=True)
+
+        for j in range(b):
+            tj = t
+            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device=al.device)
+            Tj.diagonal(0).copy_(al[:tj, j])
+            if tj > 1:
+                off = be[:tj - 1, j]
+                Tj.diagonal(1).copy_(off)
+                Tj.diagonal(-1).copy_(off)
+            evals, evecs = torch.linalg.eigh(Tj)
+            w1 = evecs[0, :] ** 2
+            est += scale * torch.dot(w1, torch.log1p(alpha * evals))
+
+        done += b
+
+    bits_per_sample = est / (s * ln2)
+    return float(bits_per_sample / (2.0 * time_resolution))
+
+
+@torch.no_grad()
+def estimate_spectral_norm_chunked(
+    A_cpu: np.ndarray | torch.Tensor,
+    normalize_scale: float = 1.0,
+    n_iters: int = 20,
+    device: str = "cuda",
+    chunk_rows: int = 1024,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    verbose: bool = False,
+):
+    if isinstance(A_cpu, torch.Tensor):
+        assert A_cpu.device.type == "cpu"
+    m, n = A_cpu.shape
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    def get_chunk(start, end):
+        if isinstance(A_cpu, torch.Tensor):
+            chunk = A_cpu[start:end]
+            return chunk.to(device=device, dtype=compute_dtype, non_blocking=False)
+        return torch.as_tensor(A_cpu[start:end], dtype=compute_dtype, device=device)
+
+    def B_mv(Qk):
+        b = Qk.shape[1]
+        if left:
+            T32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+            for row_start in range(0, m, chunk_rows):
+                row_end = min(row_start + chunk_rows, m)
+                A_chunk = get_chunk(row_start, row_end)
+                if normalize_scale != 1.0:
+                    A_chunk = A_chunk * normalize_scale
+                Q_chunk32 = Qk[row_start:row_end].to(compute_dtype)
+                T32.addmm_(A_chunk.T, Q_chunk32)
+            W32 = torch.empty((m, b), dtype=compute_dtype, device=device)
+            for row_start in range(0, m, chunk_rows):
+                row_end = min(row_start + chunk_rows, m)
+                A_chunk = get_chunk(row_start, row_end)
+                if normalize_scale != 1.0:
+                    A_chunk = A_chunk * normalize_scale
+                W32[row_start:row_end] = A_chunk @ T32
+            return W32.to(krylov_dtype)
+        Q32 = Qk.to(compute_dtype)
+        W32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+        for row_start in range(0, m, chunk_rows):
+            row_end = min(row_start + chunk_rows, m)
+            A_chunk = get_chunk(row_start, row_end)
+            if normalize_scale != 1.0:
+                A_chunk = A_chunk * normalize_scale
+            T_chunk = A_chunk @ Q32
+            W32.addmm_(A_chunk.T, T_chunk)
+        return W32.to(krylov_dtype)
+
+    v = torch.randn((d, 1), dtype=krylov_dtype, device=device)
+    v = v / torch.linalg.vector_norm(v)
+    for it in range(n_iters):
+        if verbose and (it == 0 or (it + 1) % 5 == 0):
+            if device == "cuda":
+                torch.cuda.synchronize()
+            print(f"[noise-first] power iter {it + 1}/{n_iters}", flush=True)
+        w = B_mv(v)
+        w_norm = torch.linalg.vector_norm(w)
+        v = w / (w_norm + 1e-30)
+    rayleigh = torch.dot(v.squeeze(1), B_mv(v).squeeze(1))
+    return float(torch.sqrt(rayleigh).item())
+
+
+@torch.no_grad()
+def estimate_frobenius_norm_sq_hutchinson(
+    A_cpu: np.ndarray | torch.Tensor,
+    normalize_scale: float = 1.0,
+    n_probes: int = 16,
+    device: str = "cuda",
+    chunk_rows: int = 1024,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    verbose: bool = False,
+):
+    if isinstance(A_cpu, torch.Tensor):
+        assert A_cpu.device.type == "cpu"
+    m, n = A_cpu.shape
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    def get_chunk(start, end):
+        if isinstance(A_cpu, torch.Tensor):
+            chunk = A_cpu[start:end]
+            return chunk.to(device=device, dtype=compute_dtype, non_blocking=False)
+        return torch.as_tensor(A_cpu[start:end], dtype=compute_dtype, device=device)
+
+    def B_mv(Qk):
+        b = Qk.shape[1]
+        if left:
+            T32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+            for row_start in range(0, m, chunk_rows):
+                row_end = min(row_start + chunk_rows, m)
+                A_chunk = get_chunk(row_start, row_end)
+                if normalize_scale != 1.0:
+                    A_chunk = A_chunk * normalize_scale
+                Q_chunk32 = Qk[row_start:row_end].to(compute_dtype)
+                T32.addmm_(A_chunk.T, Q_chunk32)
+            W32 = torch.empty((m, b), dtype=compute_dtype, device=device)
+            for row_start in range(0, m, chunk_rows):
+                row_end = min(row_start + chunk_rows, m)
+                A_chunk = get_chunk(row_start, row_end)
+                if normalize_scale != 1.0:
+                    A_chunk = A_chunk * normalize_scale
+                W32[row_start:row_end] = A_chunk @ T32
+            return W32.to(krylov_dtype)
+        Q32 = Qk.to(compute_dtype)
+        W32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+        for row_start in range(0, m, chunk_rows):
+            row_end = min(row_start + chunk_rows, m)
+            A_chunk = get_chunk(row_start, row_end)
+            if normalize_scale != 1.0:
+                A_chunk = A_chunk * normalize_scale
+            T_chunk = A_chunk @ Q32
+            W32.addmm_(A_chunk.T, T_chunk)
+        return W32.to(krylov_dtype)
+
+    acc = 0.0
+    for i in range(n_probes):
+        if verbose:
+            if device == "cuda":
+                torch.cuda.synchronize()
+            print(f"[noise-power] probe {i + 1}/{n_probes}", flush=True)
+        z = (torch.randint(0, 2, (d, 1), device=device) * 2 - 1).to(krylov_dtype)
+        acc += torch.dot(z.squeeze(1), B_mv(z).squeeze(1)).item()
+    return acc / n_probes
+
+
+@torch.no_grad()
+def bitrate_slq_torch_gpu_streaming(
+    compute_chunk_matrix,
+    num_sensors_total: int,
+    num_sources_total: int,
+    nt: int,
+    sensor_batch_size: int,
+    noise_std_full_brain: float,
+    time_resolution: float = 1.0,
+    n_detectors: int | None = None,
+    s: int = 16,
+    t: int = 40,
+    batch: int = 256,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    device: str = "cuda",
+    normalize_scale: float = 1.0,
+    verbose: bool = False,
+):
+    m = num_sensors_total * nt
+    n = num_sources_total
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    n_eff = n_detectors if n_detectors is not None else 1
+    alpha = torch.tensor(
+        1.0 / (noise_std_full_brain**2 / n_eff),
+        dtype=krylov_dtype,
+        device=device,
+    )
+    ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=device)
+
+    Q = torch.empty((d, batch), dtype=krylov_dtype, device=device)
+    Qm1 = torch.zeros_like(Q)
+    al = torch.empty((t, batch), dtype=krylov_dtype, device=device)
+    be = torch.empty((t - 1, batch), dtype=krylov_dtype, device=device)
+
+    def B_mv(Qk):
+        b = Qk.shape[1]
+        if left:
+            T32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+            row_start = 0
+            batch_iter = range(0, num_sensors_total, sensor_batch_size)
+            if verbose:
+                batch_iter = tqdm(batch_iter, desc="[slq-stream] A^T Q", leave=False)
+            for start in batch_iter:
+                end = min(start + sensor_batch_size, num_sensors_total)
+                chunk_matrix = compute_chunk_matrix(start, end)
+                if normalize_scale != 1.0:
+                    chunk_matrix = chunk_matrix * normalize_scale
+                rows = chunk_matrix.shape[0]
+                Q_chunk32 = Qk[row_start:row_start + rows].to(compute_dtype)
+                T32.addmm_(chunk_matrix.T, Q_chunk32)
+                row_start += rows
+            W32 = torch.empty((m, b), dtype=compute_dtype, device=device)
+            row_start = 0
+            batch_iter = range(0, num_sensors_total, sensor_batch_size)
+            if verbose:
+                batch_iter = tqdm(batch_iter, desc="[slq-stream] A T", leave=False)
+            for start in batch_iter:
+                end = min(start + sensor_batch_size, num_sensors_total)
+                chunk_matrix = compute_chunk_matrix(start, end)
+                if normalize_scale != 1.0:
+                    chunk_matrix = chunk_matrix * normalize_scale
+                rows = chunk_matrix.shape[0]
+                W32[row_start:row_start + rows] = chunk_matrix @ T32
+                row_start += rows
+            return W32.to(krylov_dtype)
+        Q32 = Qk.to(compute_dtype)
+        W32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+        batch_iter = range(0, num_sensors_total, sensor_batch_size)
+        if verbose:
+            batch_iter = tqdm(batch_iter, desc="[slq-stream] A^T A Q", leave=False)
+        for start in batch_iter:
+            end = min(start + sensor_batch_size, num_sensors_total)
+            chunk_matrix = compute_chunk_matrix(start, end)
+            if normalize_scale != 1.0:
+                chunk_matrix = chunk_matrix * normalize_scale
+            T_chunk = chunk_matrix @ Q32
+            W32.addmm_(chunk_matrix.T, T_chunk)
+        return W32.to(krylov_dtype)
+
+    est = torch.zeros((), dtype=krylov_dtype, device=device)
+    done = 0
+    sqrt_d = math.sqrt(d)
+    scale = torch.tensor(float(d), dtype=krylov_dtype, device=device)
+    t0 = time.perf_counter()
+    batch_idx = 0
+
+    while done < s:
+        b = min(batch, s - done)
+        batch_idx += 1
+        if verbose:
+            if device == "cuda":
+                torch.cuda.synchronize()
+            elapsed = time.perf_counter() - t0
+            print(f"[slq-stream] batch {batch_idx}, probes {done}/{s}, elapsed {elapsed:.2f}s", flush=True)
+        Z = (torch.randint(0, 2, (d, b), device=device) * 2 - 1).to(krylov_dtype)
+        Q[:, :b] = Z / sqrt_d
+        Qm1[:, :b].zero_()
+
+        for k in range(t):
+            W = B_mv(Q[:, :b])
+            if verbose and (k == 0 or (k + 1) % 10 == 0):
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                elapsed = time.perf_counter() - t0
+                print(f"[slq-stream] batch {batch_idx} lanczos {k + 1}/{t} elapsed {elapsed:.2f}s", flush=True)
+            if k > 0:
+                W -= Qm1[:, :b] * be[k - 1, :b][None, :]
+            ak = torch.sum(Q[:, :b] * W, dim=0)
+            W -= Q[:, :b] * ak[None, :]
+            al[k, :b] = ak
+            if k < t - 1:
+                bk = torch.linalg.vector_norm(W, dim=0)
+                be[k, :b] = bk
+                mask = bk > 1e-30
+                Qm1[:, :b] = Q[:, :b]
+                Q[:, :b] = torch.where(mask[None, :], W / bk[None, :], Q[:, :b])
+
+        for j in range(b):
+            tj = t
+            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device=device)
+            Tj.diagonal(0).copy_(al[:tj, j])
+            if tj > 1:
+                off = be[:tj - 1, j]
+                Tj.diagonal(1).copy_(off)
+                Tj.diagonal(-1).copy_(off)
+            evals, evecs = torch.linalg.eigh(Tj)
+            w1 = evecs[0, :] ** 2
+            est += scale * torch.dot(w1, torch.log1p(alpha * evals))
+
+        done += b
+
+    bits_per_sample = est / (s * ln2)
+    return float(bits_per_sample / (2.0 * time_resolution))
+
+
+@torch.no_grad()
+def bitrate_slq_torch_gpu_streaming_probe_parallel(
+    make_compute_chunk_matrix,
+    device_ids: list[int],
+    num_sensors_total: int,
+    num_sources_total: int,
+    nt: int,
+    sensor_batch_size: int,
+    noise_std_full_brain: float,
+    time_resolution: float = 1.0,
+    n_detectors: int | None = None,
+    s: int = 16,
+    t: int = 40,
+    batch: int = 256,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    normalize_scale: float = 1.0,
+    verbose: bool = False,
+):
+    if not device_ids:
+        raise ValueError("device_ids must include at least one CUDA device")
+    n_dev = len(device_ids)
+    base = s // n_dev
+    remainder = s % n_dev
+    s_parts = [base + (1 if i < remainder else 0) for i in range(n_dev)]
+
+    def worker(dev_id, s_local):
+        if s_local == 0:
+            return 0.0, 0
+        torch.cuda.set_device(dev_id)
+        compute_chunk_matrix = make_compute_chunk_matrix(dev_id)
+        bitrate_local = bitrate_slq_torch_gpu_streaming(
+            compute_chunk_matrix,
+            num_sensors_total,
+            num_sources_total,
+            nt,
+            sensor_batch_size,
+            noise_std_full_brain=noise_std_full_brain,
+            time_resolution=time_resolution,
+            n_detectors=n_detectors,
+            s=s_local,
+            t=t,
+            batch=batch,
+            use_left_if_smaller=use_left_if_smaller,
+            compute_dtype=compute_dtype,
+            krylov_dtype=krylov_dtype,
+            device=f"cuda:{dev_id}",
+            normalize_scale=normalize_scale,
+            verbose=verbose,
+        )
+        return bitrate_local, s_local
+
+    est_sum = 0.0
+    s_sum = 0
+    with ThreadPoolExecutor(max_workers=n_dev) as pool:
+        futures = []
+        for dev_id, s_local in zip(device_ids, s_parts):
+            futures.append(pool.submit(worker, dev_id, s_local))
+        for fut in as_completed(futures):
+            bitrate_local, s_local = fut.result()
+            if s_local > 0:
+                est_sum += bitrate_local * s_local
+                s_sum += s_local
+
+    if s_sum == 0:
+        return 0.0
+    return est_sum / s_sum
+
+
+@torch.no_grad()
+def estimate_spectral_norm_streaming(
+    compute_chunk_matrix,
+    num_sensors_total: int,
+    num_sources_total: int,
+    nt: int,
+    sensor_batch_size: int,
+    normalize_scale: float = 1.0,
+    n_iters: int = 20,
+    device: str = "cuda",
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    verbose: bool = False,
+):
+    m = num_sensors_total * nt
+    n = num_sources_total
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    def B_mv(Qk):
+        b = Qk.shape[1]
+        if left:
+            T32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+            row_start = 0
+            batch_iter = range(0, num_sensors_total, sensor_batch_size)
+            if verbose:
+                batch_iter = tqdm(batch_iter, desc="[noise-first] A^T Q", leave=False)
+            for start in batch_iter:
+                end = min(start + sensor_batch_size, num_sensors_total)
+                chunk_matrix = compute_chunk_matrix(start, end)
+                if normalize_scale != 1.0:
+                    chunk_matrix = chunk_matrix * normalize_scale
+                rows = chunk_matrix.shape[0]
+                Q_chunk32 = Qk[row_start:row_start + rows].to(compute_dtype)
+                T32.addmm_(chunk_matrix.T, Q_chunk32)
+                row_start += rows
+            W32 = torch.empty((m, b), dtype=compute_dtype, device=device)
+            row_start = 0
+            batch_iter = range(0, num_sensors_total, sensor_batch_size)
+            if verbose:
+                batch_iter = tqdm(batch_iter, desc="[noise-first] A T", leave=False)
+            for start in batch_iter:
+                end = min(start + sensor_batch_size, num_sensors_total)
+                chunk_matrix = compute_chunk_matrix(start, end)
+                if normalize_scale != 1.0:
+                    chunk_matrix = chunk_matrix * normalize_scale
+                rows = chunk_matrix.shape[0]
+                W32[row_start:row_start + rows] = chunk_matrix @ T32
+                row_start += rows
+            return W32.to(krylov_dtype)
+        Q32 = Qk.to(compute_dtype)
+        W32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+        batch_iter = range(0, num_sensors_total, sensor_batch_size)
+        if verbose:
+            batch_iter = tqdm(batch_iter, desc="[noise-first] A^T A Q", leave=False)
+        for start in batch_iter:
+            end = min(start + sensor_batch_size, num_sensors_total)
+            chunk_matrix = compute_chunk_matrix(start, end)
+            if normalize_scale != 1.0:
+                chunk_matrix = chunk_matrix * normalize_scale
+            T_chunk = chunk_matrix @ Q32
+            W32.addmm_(chunk_matrix.T, T_chunk)
+        return W32.to(krylov_dtype)
+
+    v = torch.randn((d, 1), dtype=krylov_dtype, device=device)
+    v = v / torch.linalg.vector_norm(v)
+    for it in range(n_iters):
+        if verbose and (it == 0 or (it + 1) % 5 == 0):
+            if device == "cuda":
+                torch.cuda.synchronize()
+            print(f"[noise-first] power iter {it + 1}/{n_iters}", flush=True)
+        w = B_mv(v)
+        w_norm = torch.linalg.vector_norm(w)
+        v = w / (w_norm + 1e-30)
+    rayleigh = torch.dot(v.squeeze(1), B_mv(v).squeeze(1))
+    return float(torch.sqrt(rayleigh).item())
+
+
+@torch.no_grad()
+def estimate_frobenius_norm_sq_streaming(
+    compute_chunk_matrix,
+    num_sensors_total: int,
+    num_sources_total: int,
+    nt: int,
+    sensor_batch_size: int,
+    normalize_scale: float = 1.0,
+    n_probes: int = 16,
+    device: str = "cuda",
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    verbose: bool = False,
+):
+    m = num_sensors_total * nt
+    n = num_sources_total
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    def B_mv(Qk):
+        b = Qk.shape[1]
+        if left:
+            T32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+            row_start = 0
+            batch_iter = range(0, num_sensors_total, sensor_batch_size)
+            if verbose:
+                batch_iter = tqdm(batch_iter, desc="[noise-power] A^T Q", leave=False)
+            for start in batch_iter:
+                end = min(start + sensor_batch_size, num_sensors_total)
+                chunk_matrix = compute_chunk_matrix(start, end)
+                if normalize_scale != 1.0:
+                    chunk_matrix = chunk_matrix * normalize_scale
+                rows = chunk_matrix.shape[0]
+                Q_chunk32 = Qk[row_start:row_start + rows].to(compute_dtype)
+                T32.addmm_(chunk_matrix.T, Q_chunk32)
+                row_start += rows
+            W32 = torch.empty((m, b), dtype=compute_dtype, device=device)
+            row_start = 0
+            batch_iter = range(0, num_sensors_total, sensor_batch_size)
+            if verbose:
+                batch_iter = tqdm(batch_iter, desc="[noise-power] A T", leave=False)
+            for start in batch_iter:
+                end = min(start + sensor_batch_size, num_sensors_total)
+                chunk_matrix = compute_chunk_matrix(start, end)
+                if normalize_scale != 1.0:
+                    chunk_matrix = chunk_matrix * normalize_scale
+                rows = chunk_matrix.shape[0]
+                W32[row_start:row_start + rows] = chunk_matrix @ T32
+                row_start += rows
+            return W32.to(krylov_dtype)
+        Q32 = Qk.to(compute_dtype)
+        W32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+        batch_iter = range(0, num_sensors_total, sensor_batch_size)
+        if verbose:
+            batch_iter = tqdm(batch_iter, desc="[noise-power] A^T A Q", leave=False)
+        for start in batch_iter:
+            end = min(start + sensor_batch_size, num_sensors_total)
+            chunk_matrix = compute_chunk_matrix(start, end)
+            if normalize_scale != 1.0:
+                chunk_matrix = chunk_matrix * normalize_scale
+            T_chunk = chunk_matrix @ Q32
+            W32.addmm_(chunk_matrix.T, T_chunk)
+        return W32.to(krylov_dtype)
+
+    acc = 0.0
+    for i in range(n_probes):
+        if verbose:
+            if device == "cuda":
+                torch.cuda.synchronize()
+            print(f"[noise-power] probe {i + 1}/{n_probes}", flush=True)
+        z = (torch.randint(0, 2, (d, 1), device=device) * 2 - 1).to(krylov_dtype)
+        acc += torch.dot(z.squeeze(1), B_mv(z).squeeze(1)).item()
+    return acc / n_probes
+
+
+@torch.no_grad()
+def estimate_spectral_norm_streaming_probe_parallel(
+    make_compute_chunk_matrix,
+    device_ids: list[int],
+    num_sensors_total: int,
+    num_sources_total: int,
+    nt: int,
+    sensor_batch_size: int,
+    normalize_scale: float = 1.0,
+    n_iters: int = 20,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    verbose: bool = False,
+):
+    if not device_ids:
+        raise ValueError("device_ids must include at least one CUDA device")
+
+    def worker(dev_id):
+        torch.cuda.set_device(dev_id)
+        compute_chunk_matrix = make_compute_chunk_matrix(dev_id)
+        return estimate_spectral_norm_streaming(
+            compute_chunk_matrix,
+            num_sensors_total,
+            num_sources_total,
+            nt,
+            sensor_batch_size,
+            normalize_scale=normalize_scale,
+            n_iters=n_iters,
+            device=f"cuda:{dev_id}",
+            use_left_if_smaller=use_left_if_smaller,
+            compute_dtype=compute_dtype,
+            krylov_dtype=krylov_dtype,
+            verbose=verbose,
+        )
+
+    with ThreadPoolExecutor(max_workers=len(device_ids)) as pool:
+        futures = [pool.submit(worker, dev_id) for dev_id in device_ids]
+        vals = [f.result() for f in as_completed(futures)]
+    return max(vals)
+
+
+@torch.no_grad()
+def estimate_frobenius_norm_sq_streaming_probe_parallel(
+    make_compute_chunk_matrix,
+    device_ids: list[int],
+    num_sensors_total: int,
+    num_sources_total: int,
+    nt: int,
+    sensor_batch_size: int,
+    normalize_scale: float = 1.0,
+    n_probes: int = 16,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    verbose: bool = False,
+):
+    if not device_ids:
+        raise ValueError("device_ids must include at least one CUDA device")
+
+    n_dev = len(device_ids)
+    base = n_probes // n_dev
+    remainder = n_probes % n_dev
+    probes_parts = [base + (1 if i < remainder else 0) for i in range(n_dev)]
+
+    def worker(dev_id, n_local):
+        if n_local == 0:
+            return 0.0, 0
+        torch.cuda.set_device(dev_id)
+        compute_chunk_matrix = make_compute_chunk_matrix(dev_id)
+        val = estimate_frobenius_norm_sq_streaming(
+            compute_chunk_matrix,
+            num_sensors_total,
+            num_sources_total,
+            nt,
+            sensor_batch_size,
+            normalize_scale=normalize_scale,
+            n_probes=n_local,
+            device=f"cuda:{dev_id}",
+            use_left_if_smaller=use_left_if_smaller,
+            compute_dtype=compute_dtype,
+            krylov_dtype=krylov_dtype,
+            verbose=verbose,
+        )
+        return val * n_local, n_local
+
+    acc = 0.0
+    total = 0
+    with ThreadPoolExecutor(max_workers=n_dev) as pool:
+        futures = []
+        for dev_id, n_local in zip(device_ids, probes_parts):
+            futures.append(pool.submit(worker, dev_id, n_local))
+        for fut in as_completed(futures):
+            val, n_local = fut.result()
+            if n_local > 0:
+                acc += val
+                total += n_local
+    if total == 0:
+        return 0.0
+    return acc / total
+
 # %%
 
 import argparse
@@ -156,7 +1001,7 @@ parser = argparse.ArgumentParser(description='Ultrasound simulation parameters')
 parser.add_argument('--n_sources', type=int, default=32000, help='Number of source points')
 parser.add_argument('--n_sensors', type=int, default=1000, help='Number of sensor points') 
 parser.add_argument('--temporal_sampling', type=int, default=5, help='Temporal sampling rate')
-parser.add_argument('--sensor_batch_size', type=int, default=256, help='Batch size across sensors for Gram accumulation')
+parser.add_argument('--sensor_batch_size', type=int, default=512, help='Batch size across sensors for Gram accumulation')
 parser.add_argument('--center_frequency', type=float, default=0.05e6, help='Center frequency in Hz')
 parser.add_argument('--accumulate_on_cpu', action='store_true', help='Accumulate Gram matrix on CPU instead of GPU')
 parser.add_argument('--svd_device', type=str, default='cuda', choices=['cpu', 'cuda'], help='Device to compute eigenvalues/SVD of Gram')
@@ -167,11 +1012,21 @@ parser.add_argument(
     choices=['svd', 'slq', 'both'],
     help='Compute bitrate via SVD, SLQ, or both',
 )
-parser.add_argument('--slq_s', type=int, default=16, help='Number of SLQ probe vectors')
-parser.add_argument('--slq_t', type=int, default=40, help='Lanczos steps for SLQ')
+parser.add_argument('--slq_s', type=int, default=64, help='Number of SLQ probe vectors')
+parser.add_argument('--slq_t', type=int, default=64, help='Lanczos steps for SLQ')
 parser.add_argument('--slq_batch', type=int, default=64, help='SLQ batch size per iteration')
-parser.add_argument('--slq_chunk_rows', type=int, default=1024, help='Row chunk size for SLQ matvecs')
-parser.add_argument('--slq_verbose', action='store_true', help='Print SLQ progress logs')
+parser.add_argument('--slq_chunk_rows', type=int, default=65536, help='Row chunk size for SLQ matvecs')
+parser.add_argument('--slq_verbose', action='store_true', default=True, help='Print SLQ progress logs')
+parser.add_argument('--slq_multi_gpu', action='store_true', help='Use multi-GPU sharded SLQ')
+parser.add_argument('--slq_devices', type=str, default='', help='Comma-separated CUDA device IDs for SLQ')
+parser.add_argument('--slq_streaming', action='store_true', help='Stream SLQ matvecs without materializing G')
+parser.add_argument('--slq_probe_parallel', action='store_true', help='Parallelize SLQ probes across GPUs (chunked mode)')
+parser.add_argument('--noise_heuristic', type=str, default='power', choices=['power', 'first'], help='Noise heuristic to use when estimating without SVD')
+parser.add_argument('--noise_snr', type=float, default=2000.0, help='SNR used by noise heuristic')
+parser.add_argument('--noise_power_probes', type=int, default=16, help='Probes for power heuristic via Hutchinson')
+parser.add_argument('--noise_iters', type=int, default=100, help='Power-iteration steps for spectral norm')
+parser.add_argument('--noise_level', type=float, default=None, help='Override noise level (skip estimation)')
+parser.add_argument('--noise_verbose', action='store_true', default=True, help='Print noise estimation logs')
 
 args = parser.parse_args()
 
@@ -213,9 +1068,17 @@ device = "cuda"
 temporal_sampling = 5
 use_complex_ampitudes = False
 
+if args.slq_streaming and bitrate_method in {"svd", "both"}:
+    raise ValueError("--slq_streaming cannot be used with bitrate_method=svd or both")
+if args.slq_streaming and args.slq_multi_gpu:
+    raise ValueError("--slq_streaming currently supports single-GPU SLQ only")
+if args.slq_streaming and args.slq_probe_parallel:
+    pass
+
 # %%
 
-print("Computing SVD (batched simulation + Gram accumulation)...")
+if not args.slq_streaming:
+    print("Computing SVD (batched simulation + Gram accumulation)...")
 
 num_sensors_total = sensor_positions.shape[0]
 num_sources_total = n_sources
@@ -226,22 +1089,26 @@ source_positions_t = torch.tensor(source_positions, device=device)
 source_signals_t = torch.tensor(source_signals, device=device)
 voxel_size_t = torch.tensor(voxel_size, device=device)
 
-# Accumulate Gram or do TSQR in batches over sensors
-t0 = time.perf_counter()
-G = None
-R_acc = None
-gram_via_tiling = False
-G_device = "cpu" if accumulate_on_cpu else device
-G = torch.zeros((num_sensors_total * nt, num_sources_total), dtype=torch.float32, device=G_device)
-k = 10  # Number of chunks to accumulate on GPU before transferring to CPU
-gpu_chunks = []
-gpu_start_idx = 0
-last_index = 0
-print(f"num_sensors_total: {num_sensors_total}, nt: {nt}")
-for start in range(0, num_sensors_total, sensor_batch_size):
-    print(f"Processing batch {start // sensor_batch_size + 1} of {(num_sensors_total + sensor_batch_size - 1) // sensor_batch_size}")
-    end = min(start + sensor_batch_size, num_sensors_total)
-    print(f"start: {start}, end: {end}")
+stream_device_ids = None
+source_positions_t_list = None
+source_signals_t_list = None
+voxel_size_t_list = None
+if args.slq_streaming and args.slq_probe_parallel:
+    if args.slq_devices:
+        stream_device_ids = [int(x) for x in args.slq_devices.split(",") if x.strip() != ""]
+    else:
+        stream_device_ids = list(range(torch.cuda.device_count()))
+    source_positions_t_list = [
+        torch.tensor(source_positions, device=f"cuda:{dev}") for dev in stream_device_ids
+    ]
+    source_signals_t_list = [
+        torch.tensor(source_signals, device=f"cuda:{dev}") for dev in stream_device_ids
+    ]
+    voxel_size_t_list = [
+        torch.tensor(voxel_size, device=f"cuda:{dev}") for dev in stream_device_ids
+    ]
+
+def compute_chunk_matrix(start, end):
     receiver_positions_t = torch.tensor(sensor_positions[start:end], device=device)
     pf_chunk = simulate_free_field_propagation(
         source_positions_t,
@@ -254,24 +1121,68 @@ for start in range(0, num_sensors_total, sensor_batch_size):
         compute_time_series=not use_complex_ampitudes,
         temporal_sampling=temporal_sampling
     )
-    # Build chunk matrix [rows, n_sources]
     if use_complex_ampitudes:
-        chunk_matrix = torch.cat([pf_chunk.real, pf_chunk.imag], dim=0).float()
-    else:
-        # ensure receivers/time are flattened to rows, sources are columns
-        chunk_matrix = pf_chunk.permute(0, 2, 1).reshape(-1, num_sources_total).float()
-    chunk_rows = chunk_matrix.shape[0]
-    print(f"last_index: {last_index}, chunk_rows: {chunk_rows}")
-    if accumulate_on_cpu:
-        G[last_index:last_index + chunk_rows] = chunk_matrix.cpu()
-    else:
-        G[last_index:last_index + chunk_rows] = chunk_matrix
-    last_index += chunk_rows
+        return torch.cat([pf_chunk.real, pf_chunk.imag], dim=0).float()
+    return pf_chunk.permute(0, 2, 1).reshape(-1, num_sources_total).float()
 
-if device == "cuda":
-    torch.cuda.synchronize()
-t1 = time.perf_counter()
-print(f"gram_accumulate: {t1 - t0:.3f}s")
+
+def make_compute_chunk_matrix_for_device(dev_id: int):
+    if stream_device_ids is None or source_positions_t_list is None:
+        raise ValueError("Streaming probe-parallel tensors are not initialized")
+    idx = stream_device_ids.index(dev_id)
+    source_positions_t_dev = source_positions_t_list[idx]
+    source_signals_t_dev = source_signals_t_list[idx]
+    voxel_size_t_dev = voxel_size_t_list[idx]
+
+    def _compute(start, end):
+        receiver_positions_t = torch.tensor(sensor_positions[start:end], device=f"cuda:{dev_id}")
+        pf_chunk = simulate_free_field_propagation(
+            source_positions_t_dev,
+            receiver_positions_t,
+            source_signals_t_dev,
+            time_step,
+            center_frequency,
+            voxel_size_t_dev,
+            device=f"cuda:{dev_id}",
+            compute_time_series=not use_complex_ampitudes,
+            temporal_sampling=temporal_sampling
+        )
+        if use_complex_ampitudes:
+            return torch.cat([pf_chunk.real, pf_chunk.imag], dim=0).float()
+        return pf_chunk.permute(0, 2, 1).reshape(-1, num_sources_total).float()
+
+    return _compute
+
+G = None
+if not args.slq_streaming:
+    # Accumulate Gram or do TSQR in batches over sensors
+    t0 = time.perf_counter()
+    R_acc = None
+    gram_via_tiling = False
+    G_device = "cpu" if accumulate_on_cpu else device
+    G = torch.zeros((num_sensors_total * nt, num_sources_total), dtype=torch.float32, device=G_device)
+    k = 10  # Number of chunks to accumulate on GPU before transferring to CPU
+    gpu_chunks = []
+    gpu_start_idx = 0
+    last_index = 0
+    print(f"num_sensors_total: {num_sensors_total}, nt: {nt}")
+    for start in range(0, num_sensors_total, sensor_batch_size):
+        print(f"Processing batch {start // sensor_batch_size + 1} of {(num_sensors_total + sensor_batch_size - 1) // sensor_batch_size}")
+        end = min(start + sensor_batch_size, num_sensors_total)
+        print(f"start: {start}, end: {end}")
+        chunk_matrix = compute_chunk_matrix(start, end)
+        chunk_rows = chunk_matrix.shape[0]
+        print(f"last_index: {last_index}, chunk_rows: {chunk_rows}")
+        if accumulate_on_cpu:
+            G[last_index:last_index + chunk_rows] = chunk_matrix.cpu()
+        else:
+            G[last_index:last_index + chunk_rows] = chunk_matrix
+        last_index += chunk_rows
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    print(f"gram_accumulate: {t1 - t0:.3f}s")
 
 
 t0 = time.perf_counter()
@@ -288,8 +1199,7 @@ from guti.data_utils import Parameters
 from guti.core import get_bitrate, noise_floor_heuristic
 from guti.data_utils import save_svd
 
-#noise_level = None
-noise_level = 10
+noise_level = args.noise_level
 s_normalized = None
 
 if bitrate_method in {"svd", "both"}:
@@ -323,34 +1233,175 @@ if bitrate_method in {"svd", "both"}:
     ))
 
     s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
-    noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=2000.0)
+    noise_level = noise_floor_heuristic(s_normalized, heuristic=args.noise_heuristic, snr=args.noise_snr)
     print(f"noise_level: {noise_level}")
     print(f"bitrate: {get_bitrate(s_normalized, noise_level, time_resolution=1.0)}")
 
 if bitrate_method in {"slq", "both"}:
-    if noise_level is None:
-        G_svd = G if G.device.type == svd_device else G.to(svd_device)
-        s = torch.linalg.svdvals(G_svd)
-        s = s.cpu().numpy()
-        s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
-        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=2000.0)
-    if torch.cuda.is_available():
-        print("Computing bitrate using SLQ")
-        G_cpu = G if G.device.type == "cpu" else G.cpu()
-        bitrate_slq = bitrate_slq_torch_gpu_chunked(
-            G_cpu,
-            noise_std_full_brain=noise_level,
-            time_resolution=1.0,
-            s=args.slq_s,
-            t=args.slq_t,
-            batch=args.slq_batch,
-            chunk_rows=args.slq_chunk_rows,
-            normalize_scale=1.0 / math.sqrt(len(source_positions) * len(sensor_positions)),
-            verbose=args.slq_verbose,
-        )
-        print(f"bitrate (SLQ GPU): {bitrate_slq}")
-    else:
+    if not torch.cuda.is_available():
         print("CUDA unavailable; skipping SLQ bitrate approximation.")
+    else:
+        normalize_scale = 1.0 / math.sqrt(len(source_positions) * len(sensor_positions))
+        if args.slq_streaming:
+            if noise_level is None:
+                if args.noise_heuristic == "first":
+                    if args.slq_probe_parallel:
+                        sigma_max = estimate_spectral_norm_streaming_probe_parallel(
+                            make_compute_chunk_matrix_for_device,
+                            stream_device_ids,
+                            num_sensors_total,
+                            num_sources_total,
+                            nt,
+                            sensor_batch_size,
+                            normalize_scale=normalize_scale,
+                            n_iters=args.noise_iters,
+                            verbose=args.noise_verbose,
+                        )
+                    else:
+                        sigma_max = estimate_spectral_norm_streaming(
+                            compute_chunk_matrix,
+                            num_sensors_total,
+                            num_sources_total,
+                            nt,
+                            sensor_batch_size,
+                            normalize_scale=normalize_scale,
+                            n_iters=args.noise_iters,
+                            device="cuda",
+                            verbose=args.noise_verbose,
+                        )
+                    noise_level = sigma_max / args.noise_snr
+                else:
+                    if args.slq_probe_parallel:
+                        frob_sq = estimate_frobenius_norm_sq_streaming_probe_parallel(
+                            make_compute_chunk_matrix_for_device,
+                            stream_device_ids,
+                            num_sensors_total,
+                            num_sources_total,
+                            nt,
+                            sensor_batch_size,
+                            normalize_scale=normalize_scale,
+                            n_probes=args.noise_power_probes,
+                            verbose=args.noise_verbose,
+                        )
+                    else:
+                        frob_sq = estimate_frobenius_norm_sq_streaming(
+                            compute_chunk_matrix,
+                            num_sensors_total,
+                            num_sources_total,
+                            nt,
+                            sensor_batch_size,
+                            normalize_scale=normalize_scale,
+                            n_probes=args.noise_power_probes,
+                            device="cuda",
+                            verbose=args.noise_verbose,
+                        )
+                    noise_level = math.sqrt(frob_sq) / args.noise_snr
+                print(f"noise_level (estimated): {noise_level}")
+            print("Computing bitrate using SLQ (streaming)")
+            if args.slq_probe_parallel:
+                if stream_device_ids is None:
+                    raise ValueError("stream_device_ids not initialized for probe-parallel streaming")
+                bitrate_slq = bitrate_slq_torch_gpu_streaming_probe_parallel(
+                    make_compute_chunk_matrix_for_device,
+                    stream_device_ids,
+                    num_sensors_total,
+                    num_sources_total,
+                    nt,
+                    sensor_batch_size,
+                    noise_std_full_brain=noise_level,
+                    time_resolution=1.0,
+                    s=args.slq_s,
+                    t=args.slq_t,
+                    batch=args.slq_batch,
+                    normalize_scale=normalize_scale,
+                    verbose=args.slq_verbose,
+                )
+            else:
+                bitrate_slq = bitrate_slq_torch_gpu_streaming(
+                    compute_chunk_matrix,
+                    num_sensors_total,
+                    num_sources_total,
+                    nt,
+                    sensor_batch_size,
+                    noise_std_full_brain=noise_level,
+                    time_resolution=1.0,
+                    s=args.slq_s,
+                    t=args.slq_t,
+                    batch=args.slq_batch,
+                    normalize_scale=normalize_scale,
+                    verbose=args.slq_verbose,
+                )
+        else:
+            G_cpu = G if G.device.type == "cpu" else G.cpu()
+            if noise_level is None:
+                if args.noise_heuristic == "first":
+                    sigma_max = estimate_spectral_norm_chunked(
+                        G_cpu,
+                        normalize_scale=normalize_scale,
+                        n_iters=args.noise_iters,
+                        device="cuda",
+                        chunk_rows=args.slq_chunk_rows,
+                        verbose=args.noise_verbose,
+                    )
+                    noise_level = sigma_max / args.noise_snr
+                else:
+                    frob_sq = estimate_frobenius_norm_sq_hutchinson(
+                        G_cpu,
+                        normalize_scale=normalize_scale,
+                        n_probes=args.noise_power_probes,
+                        device="cuda",
+                        chunk_rows=args.slq_chunk_rows,
+                        verbose=args.noise_verbose,
+                    )
+                    noise_level = math.sqrt(frob_sq) / args.noise_snr
+                print(f"noise_level (estimated): {noise_level}")
+            print("Computing bitrate using SLQ")
+            if args.slq_probe_parallel:
+                if args.slq_devices:
+                    device_ids = [int(x) for x in args.slq_devices.split(",") if x.strip() != ""]
+                else:
+                    device_ids = list(range(torch.cuda.device_count()))
+                bitrate_slq = bitrate_slq_torch_gpu_chunked_probe_parallel(
+                    G_cpu,
+                    noise_std_full_brain=noise_level,
+                    time_resolution=1.0,
+                    s=args.slq_s,
+                    t=args.slq_t,
+                    batch=args.slq_batch,
+                    device_ids=device_ids,
+                    chunk_rows=args.slq_chunk_rows,
+                    normalize_scale=normalize_scale,
+                    verbose=args.slq_verbose,
+                )
+            elif args.slq_multi_gpu:
+                if args.slq_devices:
+                    device_ids = [int(x) for x in args.slq_devices.split(",") if x.strip() != ""]
+                else:
+                    device_ids = list(range(torch.cuda.device_count()))
+                bitrate_slq = bitrate_slq_torch_multi_gpu_sharded(
+                    G_cpu,
+                    noise_std_full_brain=noise_level,
+                    time_resolution=1.0,
+                    s=args.slq_s,
+                    t=args.slq_t,
+                    batch=args.slq_batch,
+                    device_ids=device_ids,
+                    normalize_scale=normalize_scale,
+                    verbose=args.slq_verbose,
+                )
+            else:
+                bitrate_slq = bitrate_slq_torch_gpu_chunked(
+                    G_cpu,
+                    noise_std_full_brain=noise_level,
+                    time_resolution=1.0,
+                    s=args.slq_s,
+                    t=args.slq_t,
+                    batch=args.slq_batch,
+                    chunk_rows=args.slq_chunk_rows,
+                    normalize_scale=normalize_scale,
+                    verbose=args.slq_verbose,
+                )
+        print(f"bitrate (SLQ GPU): {bitrate_slq}")
 
 exit(0)
 
