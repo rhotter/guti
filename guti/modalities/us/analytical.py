@@ -288,7 +288,8 @@ from guti.data_utils import Parameters
 from guti.core import get_bitrate, noise_floor_heuristic
 from guti.data_utils import save_svd
 
-noise_level = None
+#noise_level = None
+noise_level = 10
 s_normalized = None
 
 if bitrate_method in {"svd", "both"}:
