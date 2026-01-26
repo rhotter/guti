@@ -6,7 +6,7 @@
 
 ### Spatial Channel Capacities
 
-<!-- ![Spatial Channel Capacities](./spatial_channel_capacity.png) -->
+![Spatial Channel Capacities](./spatial_channel_capacity.png)
 
 ### SVD Spectrum
 
