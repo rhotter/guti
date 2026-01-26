@@ -257,7 +257,7 @@ def multi_gpu_svd_from_matrix(G, k=50, n_oversamples=10, n_iter=2):
 # Main simulation function
 # ============================================================================
 
-@app.function(gpu="T4:2", timeout=3600, memory=32768, volumes={"/results": results_volume})
+@app.function(gpu="H200:8", timeout=3600, memory=32768, volumes={"/results": results_volume})
 def run_us_simulation(
     n_sources: int = 32000,
     n_sensors: int = 1000,
@@ -265,7 +265,7 @@ def run_us_simulation(
     center_frequency: float = 0.05e6,
     sensor_batch_size: int = 256,
     use_multi_gpu_svd: bool = True,
-    k: int = 100,
+    k: int | None = None,
     n_iter: int = 1,
     save_results: bool = True,
 ):
@@ -279,7 +279,7 @@ def run_us_simulation(
         center_frequency: Center frequency in Hz
         sensor_batch_size: Batch size for sensor processing
         use_multi_gpu_svd: If True, use multi-GPU randomized SVD
-        k: Number of singular values to compute (for randomized SVD)
+        k: Number of singular values to compute. If None, computes all (rank of matrix)
         n_iter: Number of power iterations for SVD
         save_results: If True, save results to volume
 
@@ -375,8 +375,10 @@ def run_us_simulation(
 
     if use_multi_gpu_svd and matrix_size_gb > 0.5:
         # Use multi-GPU randomized SVD
-        print("Using multi-GPU randomized SVD...")
-        s = multi_gpu_svd_from_matrix(G, k=k, n_oversamples=10, n_iter=n_iter)
+        # If k is None, compute all singular values (rank of matrix)
+        k_actual = k if k is not None else min(matrix_rows, matrix_cols)
+        print(f"Using multi-GPU randomized SVD with k={k_actual}...")
+        s = multi_gpu_svd_from_matrix(G, k=k_actual, n_oversamples=10, n_iter=n_iter)
     else:
         # For smaller matrices, use direct torch SVD
         print("Using direct torch SVD...")
@@ -483,7 +485,7 @@ def main(
     temporal_sampling: int = 5,
     center_frequency: float = 0.05e6,
     sensor_batch_size: int = 256,
-    k: int = 100,
+    k: int | None = None,
     n_iter: int = 1,
     list_only: bool = False,
     download: str = None,
@@ -539,7 +541,7 @@ def main(
     print(f"  temporal_sampling: {temporal_sampling}")
     print(f"  center_frequency: {center_frequency/1e3:.1f} kHz")
     print(f"  sensor_batch_size: {sensor_batch_size}")
-    print(f"  k (SVD rank): {k}")
+    print(f"  k (SVD rank): {k if k is not None else 'all (full rank)'}")
     print(f"  n_iter (power iterations): {n_iter}")
     print()
 
