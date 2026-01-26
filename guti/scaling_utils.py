@@ -88,6 +88,7 @@ def plot_parameter_sweep_spectra(
     # colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
     colors = [plt.cm.viridis(i) for i in np.linspace(0, 1, len(normalized_svs))]
 
+    seen_param_values = {}
     plt.figure(figsize=figsize)
     for (v, s_normalized), color in zip(normalized_svs, colors):
         params = v["params"]
