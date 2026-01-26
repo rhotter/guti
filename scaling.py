@@ -9,13 +9,14 @@ from guti.scaling_utils import (
     plot_bitrate_vs_snr
 )
 from guti.parameters import Parameters
+from guti.data_utils import add_param_to_svd_variants
 import numpy as np
 
-modality_name = "meg_opm"
-param_key = "source_spacing_mm"
-constant_params = Parameters(num_sensors=700)
-# param_key = "num_sensors"
-# constant_params = Parameters(num_brain_grid_points=34*34*34)
+modality_name = "us_free_field_analytical_frequency_sweep"
+param_key = "frequency_hz"
+constant_params = Parameters(num_sensors=6000, num_brain_grid_points=32940)
+# param_key = "num_brain_grid_points"
+# constant_params = Parameters(num_sensors=6000, frequency_hz=30000)
 
 # %%
 plot_parameter_sweep_spectra(

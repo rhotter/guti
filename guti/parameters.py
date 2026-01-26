@@ -16,7 +16,11 @@ class Parameters:
     grid_resolution_mm : float, optional
         Resolution of the computational grid (mesh resolution)
     source_spacing_mm : float, optional
-        Spacing between dipole sources (for EEG/MEG)
+        Spacing between dipole sources (for EEG/MEG grid-based method)
+    n_radial_lines : int, optional
+        Number of radial lines from center to brain surface (for radial dipole method)
+    n_dipoles_per_line : int, optional
+        Number of dipoles along each radial line (for radial dipole method)
     sensor_offset_mm : float, optional
         Distance of sensors from scalp surface (for MEG: 5mm=OPMs, 20mm=SQUIDs)
     num_brain_grid_points : int, optional
@@ -32,6 +36,8 @@ class Parameters:
     num_sensors: Optional[int] = None
     grid_resolution_mm: Optional[float] = None
     source_spacing_mm: Optional[float] = None
+    n_radial_lines: Optional[int] = None
+    n_dipoles_per_line: Optional[int] = None
     sensor_offset_mm: Optional[float] = None
     num_brain_grid_points: Optional[int] = None
     time_resolution: Optional[float] = None
@@ -39,6 +45,7 @@ class Parameters:
     noise_full_brain: Optional[float] = None
     matrix_size: Optional[tuple[int, int]] = None
     vincent_trick: Optional[bool] = None
+    frequency_hz: Optional[float] = None
 
     # for 1d blurring
     input_dim: Optional[int] = None

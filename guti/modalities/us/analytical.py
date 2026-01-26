@@ -164,10 +164,11 @@ from guti.core import get_bitrate, noise_floor_heuristic
 
 from guti.data_utils import save_svd
 
-save_svd(s, f'us_free_field_analytical_n_sources_sweep_{int(center_frequency/1e3)}khz', params=Parameters(
+save_svd(s, f'us_free_field_analytical_frequency_sweep', params=Parameters(
     num_sensors=len(sensor_positions),
     num_brain_grid_points=len(source_positions),
     time_resolution=time_step,
+    frequency_hz=center_frequency,
     vincent_trick=False
 ))
 

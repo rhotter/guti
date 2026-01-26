@@ -1,7 +1,7 @@
 import numpy as np
 import os
 from dataclasses import asdict
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 from numpy.typing import NDArray
 from guti.parameters import Parameters
 
@@ -40,10 +40,15 @@ def save_svd(
             noise_full_brain: float
         )
     """
+    if params is None:
+        structured_params = None
+    else:
+        structured_params = asdict(params)
+
     if default_run:
         # Save as default configuration in main results directory
         filepath = os.path.join(RESULTS_DIR, f"{modality_name}_svd_spectrum.npz")
-        np.savez(filepath, singular_values=s)
+        np.savez(filepath, singular_values=s, parameters=structured_params)
         print(f"Saved default SVD spectrum to {filepath}")
     else:
         if params is None:
@@ -53,9 +58,7 @@ def save_svd(
         # Directory: variants/[modality_name]/
         target_dir = os.path.join(VARIANTS_DIR, modality_name)
         os.makedirs(target_dir, exist_ok=True)
-
         filepath = os.path.join(target_dir, f"{params_hash}.npz")
-        structured_params = asdict(params)
         np.savez(filepath, singular_values=s, parameters=structured_params)  # type: ignore
     return filepath
 
@@ -79,6 +82,7 @@ def load_svd(modality_name: str) -> Tuple[NDArray, Optional[Parameters]]:
     data = np.load(filepath, allow_pickle=True)
     try:
         params_dict = data["parameters"].item()  # Use .item() to get the dictionary
+        print(data["singular_values"].shape)
         return data["singular_values"], Parameters.from_dict(params_dict)
     except KeyError:
         return data["singular_values"], None
@@ -94,18 +98,12 @@ def load_all_svds() -> Dict[str, Tuple[NDArray, Optional[Parameters]]]:
         Dictionary mapping modality names to tuples of (singular_values, Parameters)
         where Parameters is a Parameters object or None if no parameters were saved
     """
-    filenames_to_labels = {
-        "eeg_openmeeg": "EEG",
-        "fnirs_analytical_cw": "fNIRS (CW)",
-    }
-
     results = {}
     for filename in os.listdir(RESULTS_DIR):
         if filename.endswith("_svd_spectrum.npz"):
             modality_name = filename.replace("_svd_spectrum.npz", "")
             # Use label if exists, otherwise use modality_name
-            label = filenames_to_labels.get(modality_name, modality_name)
-            results[label] = load_svd(modality_name)
+            results[modality_name] = load_svd(modality_name)
     return results
 
 
@@ -183,6 +181,7 @@ def list_svd_variants(
             if len(hash_part) == 8:  # Our hashes are 8 characters
                 try:
                     s, params = load_svd_variant(modality_name, hash_part)
+                    print(f"Loaded variant {hash_part} with params {params}")
                     if params is not None:
                         variants[hash_part] = dict(s=s, params=params)
                 except FileNotFoundError:
@@ -218,3 +217,103 @@ def list_svd_variants(
         return sorted(variants.items(), key=lambda x: getattr(x[1]["params"], sort_by))
 
     return variants
+
+
+def add_param_to_svd_variants(
+    modality_name: str,
+    param_key: str,
+    param_value: Any,
+    target_subdir: str,
+    source_subdir: Optional[str] = None,
+) -> Dict[str, str]:
+    """
+    Load all SVD variants for a modality, add/update a parameter, and save to a subfolder.
+
+    Parameters
+    ----------
+    modality_name : str
+        Modality name, e.g., 'fnirs_cw' or 'eeg'
+    param_key : str
+        Parameter key to add/update in the saved parameters dict
+    param_value : Any
+        Value to assign to the specified parameter key
+    target_subdir : str
+        Subdirectory under variants/[modality_name]/ to write updated files into
+    source_subdir : str, optional
+        If provided, read variants from variants/[modality_name]/[source_subdir] instead of the root
+
+    Returns
+    -------
+    dict
+        Mapping from source file path to saved destination file path
+    """
+    # Resolve input and output directories
+    source_dir = (
+        os.path.join(VARIANTS_DIR, modality_name, source_subdir)
+        if source_subdir is not None
+        else os.path.join(VARIANTS_DIR, modality_name)
+    )
+    dest_dir = os.path.join(VARIANTS_DIR, target_subdir)
+
+    if not os.path.exists(source_dir):
+        print(f"No variants directory found at {source_dir}")
+        return {}
+
+    os.makedirs(dest_dir, exist_ok=True)
+
+    saved_mapping: Dict[str, str] = {}
+
+    for filename in os.listdir(source_dir):
+        if not filename.endswith(".npz"):
+            continue
+
+        src_path = os.path.join(source_dir, filename)
+        try:
+            data = np.load(src_path, allow_pickle=True)
+        except EOFError:
+            # Corrupted file; skip
+            continue
+
+        try:
+            s = data["singular_values"]
+        except KeyError:
+            # Not an SVD variant file; skip
+            # Ensure file is closed before continue
+            try:
+                data.close()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            continue
+
+        # Extract existing parameters dict if present
+        params_dict: Dict[str, Any]
+        if "parameters" in data:
+            try:
+                params_obj = data["parameters"].item()
+                params_dict = dict(params_obj) if isinstance(params_obj, dict) else {}
+            except Exception:
+                params_dict = {}
+        else:
+            params_dict = {}
+
+        # Add or update the specified parameter
+        params_dict[param_key] = param_value
+
+        print(params_dict)
+        print(f"Added {param_key} = {param_value} to {filename}")
+
+        # Save updated variant into destination subdirectory, preserving filename
+        dest_path = os.path.join(dest_dir, filename)
+        np.savez(dest_path, singular_values=s, parameters=params_dict)  # type: ignore
+        saved_mapping[src_path] = dest_path
+
+        # Attempt to close npz handle
+        try:
+            data.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+    if not saved_mapping:
+        print(f"No variant files were processed in {source_dir}")
+
+    return saved_mapping

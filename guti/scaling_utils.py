@@ -94,11 +94,21 @@ def plot_parameter_sweep_spectra(
         param_value = getattr(params, param_key)
         s = s_normalized / max_sv  # Normalize by largest singular value across all params
 
+        # Determine if this is a duplicate
+        is_duplicate = param_value in seen_param_values
+        linestyle = '--' if is_duplicate else '-'
+
+        # Track this parameter value
+        if param_value not in seen_param_values:
+            seen_param_values[param_value] = 0
+        seen_param_values[param_value] += 1
+
         plt.plot(
             np.arange(1, len(s) + 1),
             s,
             label=f"{param_key}={param_value}",
-            color=color
+            color=color,
+            linestyle=linestyle
         )
 
     plt.legend()
