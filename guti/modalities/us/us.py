@@ -5,11 +5,15 @@
 # %%
 # ---- JAX memory behaviour ---------------------------------------------
 import os
+import math
+import torch
 os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'   # ⬅ no 75 % grab
 os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = '1.0'   # optional, 30 %
 # os.environ['XLA_PYTHON_CLIENT_ALLOCATOR'] = 'platform'  # safer allocator
 # os.environ['CUDA_VISIBLE_DEVICES'] = ''                 # ← CPU-only fallback
 # # ------------------------------------------------------------------------
+
+torch.set_num_threads(os.cpu_count() or 192)
 
 from jax import jit
 
@@ -28,9 +32,220 @@ import jax
 
 from scipy.sparse.linalg import LinearOperator, svds
 
+from guti.core import get_bitrate, noise_floor_heuristic
 from guti.modalities.us.utils import create_medium, create_sources, create_receivers, plot_medium, find_arrival_time
 import scipy.sparse
 
+
+# %%
+
+@torch.no_grad()
+def bitrate_slq_torch_gpu(
+    A: torch.Tensor,
+    noise_std_full_brain: float,
+    time_resolution: float = 1.0,
+    n_detectors: int | None = None,
+    s: int = 16,
+    t: int = 40,
+    batch: int = 256,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+):
+    assert A.device.type == "cuda"
+    A = A.contiguous()
+    m, n = A.shape
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    n_eff = n_detectors if n_detectors is not None else 1
+    alpha = torch.tensor(
+        1.0 / (noise_std_full_brain**2 / n_eff),
+        dtype=krylov_dtype,
+        device=A.device,
+    )
+    ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=A.device)
+
+    A32 = A.to(compute_dtype, copy=False)
+
+    if left:
+        T32 = torch.empty((n, batch), dtype=compute_dtype, device=A.device)
+        W32 = torch.empty((m, batch), dtype=compute_dtype, device=A.device)
+    else:
+        T32 = torch.empty((m, batch), dtype=compute_dtype, device=A.device)
+        W32 = torch.empty((n, batch), dtype=compute_dtype, device=A.device)
+
+    Q = torch.empty((d, batch), dtype=krylov_dtype, device=A.device)
+    Qm1 = torch.zeros_like(Q)
+    al = torch.empty((t, batch), dtype=krylov_dtype, device=A.device)
+    be = torch.empty((t - 1, batch), dtype=krylov_dtype, device=A.device)
+
+    def B_mv(Qk):
+        Q32 = Qk.to(compute_dtype)
+        if left:
+            torch.matmul(A32.T, Q32, out=T32)
+            torch.matmul(A32, T32, out=W32)
+        else:
+            torch.matmul(A32, Q32, out=T32)
+            torch.matmul(A32.T, T32, out=W32)
+        return W32.to(krylov_dtype)
+
+    est = torch.zeros((), dtype=krylov_dtype, device=A.device)
+    done = 0
+    sqrt_d = math.sqrt(d)
+    scale = torch.tensor(float(d), dtype=krylov_dtype, device=A.device)
+
+    while done < s:
+        b = min(batch, s - done)
+
+        Z = (torch.randint(0, 2, (d, b), device=A.device) * 2 - 1).to(krylov_dtype)
+        Q[:, :b] = Z / sqrt_d
+        Qm1[:, :b].zero_()
+
+        for k in range(t):
+            W = B_mv(Q[:, :b])
+            if k > 0:
+                W -= Qm1[:, :b] * be[k - 1, :b][None, :]
+            ak = torch.sum(Q[:, :b] * W, dim=0)
+            W -= Q[:, :b] * ak[None, :]
+            al[k, :b] = ak
+            if k < t - 1:
+                bk = torch.linalg.vector_norm(W, dim=0)
+                be[k, :b] = bk
+                mask = bk > 1e-30
+                Qm1[:, :b] = Q[:, :b]
+                Q[:, :b] = torch.where(mask[None, :], W / bk[None, :], Q[:, :b])
+
+        for j in range(b):
+            tj = t
+            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device=A.device)
+            Tj.diagonal(0).copy_(al[:tj, j])
+            if tj > 1:
+                off = be[:tj - 1, j]
+                Tj.diagonal(1).copy_(off)
+                Tj.diagonal(-1).copy_(off)
+            evals, evecs = torch.linalg.eigh(Tj)
+            w1 = evecs[0, :] ** 2
+            est += scale * torch.dot(w1, torch.log1p(alpha * evals))
+
+        done += b
+
+    bits_per_sample = est / (s * ln2)
+    return float(bits_per_sample / (2.0 * time_resolution))
+
+
+@torch.no_grad()
+def bitrate_slq_torch_gpu_chunked(
+    A_cpu: np.ndarray | torch.Tensor,
+    noise_std_full_brain: float,
+    time_resolution: float = 1.0,
+    n_detectors: int | None = None,
+    s: int = 16,
+    t: int = 40,
+    batch: int = 256,
+    use_left_if_smaller: bool = True,
+    compute_dtype=torch.float32,
+    krylov_dtype=torch.float64,
+    device: str = "cuda",
+    chunk_rows: int = 1024,
+    normalize_scale: float = 1.0,
+):
+    if isinstance(A_cpu, torch.Tensor):
+        assert A_cpu.device.type == "cpu"
+    m, n = A_cpu.shape
+    left = (m <= n) if use_left_if_smaller else True
+    d = m if left else n
+
+    n_eff = n_detectors if n_detectors is not None else 1
+    alpha = torch.tensor(
+        1.0 / (noise_std_full_brain**2 / n_eff),
+        dtype=krylov_dtype,
+        device=device,
+    )
+    ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=device)
+
+    Q = torch.empty((d, batch), dtype=krylov_dtype, device=device)
+    Qm1 = torch.zeros_like(Q)
+    al = torch.empty((t, batch), dtype=krylov_dtype, device=device)
+    be = torch.empty((t - 1, batch), dtype=krylov_dtype, device=device)
+
+    def get_chunk(start, end):
+        if isinstance(A_cpu, torch.Tensor):
+            chunk = A_cpu[start:end]
+            return chunk.to(device=device, dtype=compute_dtype, non_blocking=False)
+        return torch.as_tensor(A_cpu[start:end], dtype=compute_dtype, device=device)
+
+    def B_mv(Qk):
+        b = Qk.shape[1]
+        if left:
+            T32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+            for row_start in range(0, m, chunk_rows):
+                row_end = min(row_start + chunk_rows, m)
+                A_chunk = get_chunk(row_start, row_end)
+                if normalize_scale != 1.0:
+                    A_chunk = A_chunk * normalize_scale
+                Q_chunk32 = Qk[row_start:row_end].to(compute_dtype)
+                T32.addmm_(A_chunk.T, Q_chunk32)
+            W32 = torch.empty((m, b), dtype=compute_dtype, device=device)
+            for row_start in range(0, m, chunk_rows):
+                row_end = min(row_start + chunk_rows, m)
+                A_chunk = get_chunk(row_start, row_end)
+                if normalize_scale != 1.0:
+                    A_chunk = A_chunk * normalize_scale
+                W32[row_start:row_end] = A_chunk @ T32
+            return W32.to(krylov_dtype)
+        Q32 = Qk.to(compute_dtype)
+        W32 = torch.zeros((n, b), dtype=compute_dtype, device=device)
+        for row_start in range(0, m, chunk_rows):
+            row_end = min(row_start + chunk_rows, m)
+            A_chunk = get_chunk(row_start, row_end)
+            if normalize_scale != 1.0:
+                A_chunk = A_chunk * normalize_scale
+            T_chunk = A_chunk @ Q32
+            W32.addmm_(A_chunk.T, T_chunk)
+        return W32.to(krylov_dtype)
+
+    est = torch.zeros((), dtype=krylov_dtype, device=device)
+    done = 0
+    sqrt_d = math.sqrt(d)
+    scale = torch.tensor(float(d), dtype=krylov_dtype, device=device)
+
+    while done < s:
+        b = min(batch, s - done)
+        Z = (torch.randint(0, 2, (d, b), device=device) * 2 - 1).to(krylov_dtype)
+        Q[:, :b] = Z / sqrt_d
+        Qm1[:, :b].zero_()
+
+        for k in range(t):
+            W = B_mv(Q[:, :b])
+            if k > 0:
+                W -= Qm1[:, :b] * be[k - 1, :b][None, :]
+            ak = torch.sum(Q[:, :b] * W, dim=0)
+            W -= Q[:, :b] * ak[None, :]
+            al[k, :b] = ak
+            if k < t - 1:
+                bk = torch.linalg.vector_norm(W, dim=0)
+                be[k, :b] = bk
+                mask = bk > 1e-30
+                Qm1[:, :b] = Q[:, :b]
+                Q[:, :b] = torch.where(mask[None, :], W / bk[None, :], Q[:, :b])
+
+        for j in range(b):
+            tj = t
+            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device=device)
+            Tj.diagonal(0).copy_(al[:tj, j])
+            if tj > 1:
+                off = be[:tj - 1, j]
+                Tj.diagonal(1).copy_(off)
+                Tj.diagonal(-1).copy_(off)
+            evals, evecs = torch.linalg.eigh(Tj)
+            w1 = evecs[0, :] ** 2
+            est += scale * torch.dot(w1, torch.log1p(alpha * evals))
+
+        done += b
+
+    bits_per_sample = est / (s * ln2)
+    return float(bits_per_sample / (2.0 * time_resolution))
 
 #NOTE: There's a bug in jwave, where the gradients are not computed correctly when using FiniteDifferences. Therefore, we use the FourierSeries class instead.
 
@@ -125,7 +340,7 @@ nt = time_axis.Nt
 
 n_sensors = len(sensors.positions[0])
 
-combined_jacobian = np.zeros((int(n_sensors * nt), int(n_inputs)))
+combined_jacobian = np.zeros((int(n_sensors * nt), int(n_inputs)), dtype=np.float32)
 
 print(f"Jacobian shape: {combined_jacobian.shape}")
 
@@ -158,6 +373,29 @@ for i in range(20):
 
 # Compute the singular value spectrum.
 u, s, vh = np.linalg.svd(np.array(combined_jacobian))
+
+# Compute bitrate from the SVD spectrum (reference computation).
+s_normalized = s / math.sqrt(n_inputs * n_sensors)
+noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=2000.0)
+bitrate_exact = get_bitrate(s_normalized, noise_level, time_resolution=1.0)
+print(f"noise_level: {noise_level}")
+print(f"bitrate (exact, SVD): {bitrate_exact}")
+
+# Approximate bitrate on GPU via Lanczos SLQ without forming Gram matrices.
+if torch.cuda.is_available():
+    bitrate_slq = bitrate_slq_torch_gpu_chunked(
+        combined_jacobian,
+        noise_std_full_brain=noise_level,
+        time_resolution=1.0,
+        s=16,
+        t=40,
+        batch=64,
+        chunk_rows=1024,
+        normalize_scale=1.0 / math.sqrt(n_inputs * n_sensors),
+    )
+    print(f"bitrate (SLQ GPU): {bitrate_slq}")
+else:
+    print("CUDA unavailable; skipping SLQ bitrate approximation.")
 
 # Plot singular value spectrum
 plt.figure(figsize=(10, 6))
@@ -241,4 +479,3 @@ np.save('combined_jacobian.npy', combined_jacobian)
 # plt.show()
 
 # %%
-
