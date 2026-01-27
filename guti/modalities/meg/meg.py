@@ -8,9 +8,11 @@ squid_distance = 25
 
 # %%
 import numpy as np
-from guti.core import get_sensor_positions, get_grid_positions
+from guti.core import get_sensor_positions, get_grid_positions, BRAIN_RADIUS
 
-def sarvas_formula(r, r0):
+SPHERE_CENTER = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
+
+def sarvas_formula(r, r0, center=SPHERE_CENTER):
     """
     Compute the 3×3 lead‐field matrix M such that B = M @ q,
     using the Sarvas formula for a spherical conductor.
@@ -27,23 +29,41 @@ def sarvas_formula(r, r0):
     M : ndarray, shape (3, 3)
         Lead‐field matrix.
     """
-    mu0 = 4*np.pi*1e-7           # vacuum permeability
-    R = np.asarray(r) - np.asarray(r0)
-    a = np.linalg.norm(R)
+    mu0 = 4 * np.pi * 1e-7  # vacuum permeability
+
+    # Sarvas assumes the sphere center is the origin; convert mm -> m.
+    r = (np.asarray(r) - center) * 1e-3
+    r0 = (np.asarray(r0) - center) * 1e-3
+
+    a_vec = r - r0
+    a = np.linalg.norm(a_vec)
     r_norm = np.linalg.norm(r)
 
-    F = a * (a * r_norm + r_norm ** 2 - np.dot(r0, r))
-    nabla_F = (a**2 / r_norm + np.dot(R, r) / a + 2 * a + 2 * r_norm) * r - (a + 2 * r_norm + np.dot(R, r) / a) * r0
+    if a < 1e-12 or r_norm < 1e-12:
+        return np.zeros((3, 3))
 
-    # Cross‐product matrix for R
-    R_cross = np.array([
-        [    0, -R[2],  R[1]],
-        [ R[2],     0, -R[0]],
-        [-R[1],  R[0],     0]
-    ])
+    F = a * (a * r_norm + r_norm**2 - np.dot(r0, r))
+    if abs(F) < 1e-20:
+        return np.zeros((3, 3))
 
-    # Lead‐field matrix
-    M = (mu0/(4*np.pi)) * (F - np.dot(r, nabla_F)) / (F**2) * R_cross
+    a_dot_r = np.dot(a_vec, r)
+    nabla_F = (
+        (a**2 / r_norm + a_dot_r / a + 2 * a + 2 * r_norm) * r
+        - (a + 2 * r_norm + a_dot_r / a) * r0
+    )
+
+    # Cross‐product matrix for r0 (so that r0_cross @ q = r0 × q)
+    r0_cross = np.array(
+        [
+            [0.0, -r0[2], r0[1]],
+            [r0[2], 0.0, -r0[0]],
+            [-r0[1], r0[0], 0.0],
+        ]
+    )
+
+    # Sarvas lead field matrix: B = M @ q
+    r0xr = r0_cross @ r
+    M = (mu0 / (4 * np.pi)) * (-F * r0_cross - np.outer(nabla_F, r0xr)) / (F**2)
 
     return M
 

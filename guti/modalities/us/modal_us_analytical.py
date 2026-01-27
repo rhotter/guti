@@ -474,10 +474,34 @@ def run_us_simulation(
                         torch.cuda.empty_cache()
                         print(f"    Processed columns {col_start}-{col_end} of {n} ({i+1}/{num_col_chunks})")
 
-                # Convert back to float32 for eigendecomposition
-                gram = gram.float()
-
+                # Free G_cpu memory before conversion
                 del G_cpu
+
+                # Convert to float32 for eigendecomposition (eigvalsh needs float32)
+                # Do this carefully to avoid OOM: copy to CPU, delete GPU, reload as float32
+                print(f"    Converting Gram matrix to float32...")
+                gram_cpu = gram.cpu()
+                del gram
+                torch.cuda.empty_cache()
+
+                # Check for NaN/Inf values on CPU (memory efficient)
+                nan_count = torch.isnan(gram_cpu).sum().item()
+                inf_count = torch.isinf(gram_cpu).sum().item()
+                if nan_count > 0 or inf_count > 0:
+                    print(f"    WARNING: Gram matrix has {nan_count} NaN and {inf_count} Inf values!")
+                    print(f"    Replacing NaN/Inf with zeros...")
+                    gram_cpu = torch.nan_to_num(gram_cpu, nan=0.0, posinf=0.0, neginf=0.0)
+
+                # Convert to float32
+                gram_cpu = gram_cpu.float()
+
+                # Symmetrize on CPU to ensure numerical symmetry (required for eigvalsh)
+                print(f"    Symmetrizing Gram matrix on CPU...")
+                gram_cpu = 0.5 * (gram_cpu + gram_cpu.T)
+
+                # Move to GPU
+                gram = gram_cpu.to(device)
+                del gram_cpu
                 t1 = time.perf_counter()
                 print(f"  Gram matrix computed in {t1 - t0:.3f}s")
                 G = None  # Signal that we used streaming
@@ -525,11 +549,57 @@ def run_us_simulation(
             del G_f16
             torch.cuda.empty_cache()
 
-        print(f"  Computing eigenvalues (torch.linalg.eigvalsh with cusolver)...")
-        t_eig = time.perf_counter()
-        eigenvalues = torch.linalg.eigvalsh(gram)
-        torch.cuda.synchronize()
-        print(f"  Eigenvalues computed in {time.perf_counter() - t_eig:.3f}s")
+        # Check Gram matrix stats (without creating large boolean tensors)
+        print(f"  Gram matrix range: [{gram.min().item():.4e}, {gram.max().item():.4e}]")
+        # Quick NaN/Inf check using any() which is memory efficient
+        has_nan = torch.isnan(gram.view(-1)[:1000]).any().item() or torch.isnan(gram.view(-1)[-1000:]).any().item()
+        has_inf = torch.isinf(gram.view(-1)[:1000]).any().item() or torch.isinf(gram.view(-1)[-1000:]).any().item()
+        if has_nan or has_inf:
+            print(f"  WARNING: Gram matrix may have NaN or Inf values (sampled check)")
+
+        gram_size = gram.shape[0]
+        # cuSOLVER has limits around 50k-60k for eigendecomposition
+        use_cpu_fallback = gram_size > 50000
+
+        if use_cpu_fallback:
+            print(f"  Gram matrix ({gram_size}x{gram_size}) too large for GPU cuSOLVER")
+            print(f"  Using scipy on CPU (this will be slower but works for any size)...")
+
+            # Move to CPU and use scipy
+            gram_cpu = gram.cpu().numpy()
+            del gram
+            torch.cuda.empty_cache()
+
+            from scipy.linalg import eigvalsh as scipy_eigvalsh
+            t_eig = time.perf_counter()
+            eigenvalues_np = scipy_eigvalsh(gram_cpu)
+            print(f"  Eigenvalues computed with scipy in {time.perf_counter() - t_eig:.3f}s")
+
+            # Convert to torch tensor (eigenvalues are in ascending order)
+            eigenvalues = torch.from_numpy(eigenvalues_np)
+            del gram_cpu, eigenvalues_np
+        else:
+            print(f"  Computing eigenvalues (torch.linalg.eigvalsh with cusolver)...")
+            t_eig = time.perf_counter()
+            try:
+                eigenvalues = torch.linalg.eigvalsh(gram)
+                torch.cuda.synchronize()
+                print(f"  Eigenvalues computed in {time.perf_counter() - t_eig:.3f}s")
+            except Exception as e:
+                print(f"  cusolver failed: {e}")
+                print(f"  Falling back to scipy on CPU...")
+
+                gram_cpu = gram.cpu().numpy()
+                del gram
+                torch.cuda.empty_cache()
+
+                from scipy.linalg import eigvalsh as scipy_eigvalsh
+                t_eig = time.perf_counter()
+                eigenvalues_np = scipy_eigvalsh(gram_cpu)
+                print(f"  Eigenvalues computed with scipy in {time.perf_counter() - t_eig:.3f}s")
+
+                eigenvalues = torch.from_numpy(eigenvalues_np)
+                del gram_cpu, eigenvalues_np
 
         del gram
         torch.cuda.empty_cache()

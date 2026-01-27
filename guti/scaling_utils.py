@@ -90,6 +90,7 @@ def plot_parameter_sweep_spectra(
 
     seen_param_values = {}
     plt.figure(figsize=figsize)
+    seen_param_values = {}
     for (v, s_normalized), color in zip(normalized_svs, colors):
         params = v["params"]
         param_value = getattr(params, param_key)

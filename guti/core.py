@@ -1144,7 +1144,7 @@ def get_bitrate_channel_capacity(
     else:
         snr = snr_at_reference_nsensors * np.sqrt(nsensors_reference/n_sensors)
     optimal_input_power_spectrum_over_noise = water_filling_spectrum(s, snr)
-    channel_capacity = (1 / (2*time_resolution)) * np.sum(
+    channel_capacity = (1 / (time_resolution)) * np.sum(
         np.log2(1 + optimal_input_power_spectrum_over_noise*s**2)
     )
     return channel_capacity
