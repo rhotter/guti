@@ -41,11 +41,23 @@ image = (
 app = modal.App(APP_NAME)
 
 
-def _find_latest_npz(results_dir: Path) -> Optional[Path]:
-    candidates = list(results_dir.rglob("*.npz"))
-    if not candidates:
+def _snapshot_npzs(results_dir: Path) -> dict[str, int]:
+    return {
+        str(path.relative_to(results_dir)): path.stat().st_mtime_ns
+        for path in results_dir.rglob("*.npz")
+    }
+
+
+def _find_changed_npz(results_dir: Path, before: dict[str, int]) -> Optional[Path]:
+    changed: list[Path] = []
+    for path in results_dir.rglob("*.npz"):
+        rel = str(path.relative_to(results_dir))
+        mtime_ns = path.stat().st_mtime_ns
+        if before.get(rel) != mtime_ns:
+            changed.append(path)
+    if not changed:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+    return max(changed, key=lambda p: p.stat().st_mtime_ns)
 
 
 @app.function(
@@ -54,16 +66,19 @@ def _find_latest_npz(results_dir: Path) -> Optional[Path]:
     cpu=int(os.environ.get("MODAL_CPU", "8")),
     memory=int(os.environ.get("MODAL_MEMORY", "32768")),
     timeout=int(os.environ.get("MODAL_TIMEOUT", "60")) * 60,
+    single_use_containers=True,
 )
 def run_us_analytical(args: List[str]) -> Tuple[str, Optional[bytes]]:
     cmd = ["python", "-m", "guti.modalities.us.analytical"] + args
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{MOUNT_PATH}:{env.get('PYTHONPATH', '')}"
+    results_dir = Path(MOUNT_PATH) / "results"
+    before = _snapshot_npzs(results_dir)
     subprocess.run(cmd, check=True, cwd=MOUNT_PATH, env=env)
-    latest = _find_latest_npz(Path(MOUNT_PATH) / "results")
-    if latest is None:
+    changed = _find_changed_npz(results_dir, before)
+    if changed is None:
         return "", None
-    return latest.name, latest.read_bytes()
+    return changed.name, changed.read_bytes()
 
 
 @app.local_entrypoint()
@@ -86,5 +101,6 @@ def main(*cli_args):
     output_dir = Path(args.modal_output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_bytes(payload)
     print(f"Downloaded {output_path}")

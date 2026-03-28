@@ -24,6 +24,43 @@ torch.backends.cuda.matmul.allow_tf32 = True
 cu.preferred_linalg_library("magma")        # robust & fast dense LA
 
 
+def build_source_signal(
+    time_axis: np.ndarray,
+    center_frequency: float,
+    signal_type: str = "tone_burst",
+    signal_cycles: float = 2.0,
+    signal_window: str = "hann",
+) -> np.ndarray:
+    carrier = np.sin(2 * np.pi * time_axis * center_frequency)
+    if signal_type == "cw":
+        return carrier
+    if signal_type != "tone_burst":
+        raise ValueError(f"Unsupported signal_type={signal_type!r}")
+
+    if time_axis.size == 0:
+        return carrier
+    if signal_cycles <= 0:
+        raise ValueError("signal_cycles must be positive")
+
+    if time_axis.size == 1:
+        dt = 1.0 / (10.0 * center_frequency)
+    else:
+        dt = float(time_axis[1] - time_axis[0])
+    active_duration = signal_cycles / center_frequency
+    active_samples = max(1, min(time_axis.size, int(round(active_duration / dt))))
+
+    envelope = np.ones(active_samples, dtype=np.float64)
+    if signal_window == "hann":
+        if active_samples > 1:
+            envelope = np.hanning(active_samples)
+    elif signal_window != "rect":
+        raise ValueError(f"Unsupported signal_window={signal_window!r}")
+
+    signal = np.zeros_like(carrier)
+    signal[:active_samples] = carrier[:active_samples] * envelope
+    return signal
+
+
 @torch.no_grad()
 def bitrate_slq_torch_gpu_chunked(
     A_cpu: np.ndarray | torch.Tensor,
@@ -53,6 +90,7 @@ def bitrate_slq_torch_gpu_chunked(
         dtype=krylov_dtype,
         device=device,
     )
+    alpha_cpu = alpha.cpu()
     ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=device)
 
     Q = torch.empty((d, batch), dtype=krylov_dtype, device=device)
@@ -136,15 +174,16 @@ def bitrate_slq_torch_gpu_chunked(
 
         for j in range(b):
             tj = t
-            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device=device)
-            Tj.diagonal(0).copy_(al[:tj, j])
+            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device="cpu")
+            Tj.diagonal(0).copy_(al[:tj, j].cpu())
             if tj > 1:
-                off = be[:tj - 1, j]
+                off = be[:tj - 1, j].cpu()
                 Tj.diagonal(1).copy_(off)
                 Tj.diagonal(-1).copy_(off)
             evals, evecs = torch.linalg.eigh(Tj)
             w1 = evecs[0, :] ** 2
-            est += scale * torch.dot(w1, torch.log1p(alpha * evals))
+            quad = torch.dot(w1, torch.log1p(alpha_cpu * evals))
+            est += scale * quad.to(device=est.device)
 
         done += b
 
@@ -252,6 +291,7 @@ def bitrate_slq_torch_multi_gpu_sharded(
         dtype=krylov_dtype,
         device=f"cuda:{device_ids[0]}",
     )
+    alpha_cpu = alpha.cpu()
     ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=f"cuda:{device_ids[0]}")
 
     # Shard rows of A across devices.
@@ -379,15 +419,16 @@ def bitrate_slq_torch_multi_gpu_sharded(
 
         for j in range(b):
             tj = t
-            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device=al.device)
-            Tj.diagonal(0).copy_(al[:tj, j])
+            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device="cpu")
+            Tj.diagonal(0).copy_(al[:tj, j].cpu())
             if tj > 1:
-                off = be[:tj - 1, j]
+                off = be[:tj - 1, j].cpu()
                 Tj.diagonal(1).copy_(off)
                 Tj.diagonal(-1).copy_(off)
             evals, evecs = torch.linalg.eigh(Tj)
             w1 = evecs[0, :] ** 2
-            est += scale * torch.dot(w1, torch.log1p(alpha * evals))
+            quad = torch.dot(w1, torch.log1p(alpha_cpu * evals))
+            est += scale * quad.to(device=est.device)
 
         done += b
 
@@ -559,6 +600,7 @@ def bitrate_slq_torch_gpu_streaming(
         dtype=krylov_dtype,
         device=device,
     )
+    alpha_cpu = alpha.cpu()
     ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=device)
 
     Q = torch.empty((d, batch), dtype=krylov_dtype, device=device)
@@ -651,15 +693,16 @@ def bitrate_slq_torch_gpu_streaming(
 
         for j in range(b):
             tj = t
-            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device=device)
-            Tj.diagonal(0).copy_(al[:tj, j])
+            Tj = torch.zeros((tj, tj), dtype=krylov_dtype, device="cpu")
+            Tj.diagonal(0).copy_(al[:tj, j].cpu())
             if tj > 1:
-                off = be[:tj - 1, j]
+                off = be[:tj - 1, j].cpu()
                 Tj.diagonal(1).copy_(off)
                 Tj.diagonal(-1).copy_(off)
             evals, evecs = torch.linalg.eigh(Tj)
             w1 = evecs[0, :] ** 2
-            est += scale * torch.dot(w1, torch.log1p(alpha * evals))
+            quad = torch.dot(w1, torch.log1p(alpha_cpu * evals))
+            est += scale * quad.to(device=est.device)
 
         done += b
 
@@ -1003,6 +1046,9 @@ parser.add_argument('--n_sensors', type=int, default=1000, help='Number of senso
 parser.add_argument('--temporal_sampling', type=int, default=5, help='Temporal sampling rate')
 parser.add_argument('--sensor_batch_size', type=int, default=512, help='Batch size across sensors for Gram accumulation')
 parser.add_argument('--center_frequency', type=float, default=0.05e6, help='Center frequency in Hz')
+parser.add_argument('--signal_type', type=str, default='tone_burst', choices=['cw', 'tone_burst'], help='Excitation waveform type')
+parser.add_argument('--signal_cycles', type=float, default=2.0, help='Cycles in the emitted tone burst')
+parser.add_argument('--signal_window', type=str, default='hann', choices=['rect', 'hann'], help='Envelope for tone-burst excitation')
 parser.add_argument('--accumulate_on_cpu', action='store_true', help='Accumulate Gram matrix on CPU instead of GPU')
 parser.add_argument('--svd_device', type=str, default='cuda', choices=['cpu', 'cuda'], help='Device to compute eigenvalues/SVD of Gram')
 parser.add_argument(
@@ -1050,11 +1096,18 @@ sensor_positions = create_receivers_real(domain, time_axis, freq_Hz=center_frequ
 
 n_sources = source_positions.shape[0]
 
-# Continuous wave signals
+# Source waveform
 time_step = 1e-1 / center_frequency
 time_duration = 120e-6
 time_axis = np.arange(0, time_duration, time_step)
-source_signals = np.sin(2 * np.pi * time_axis * center_frequency)
+source_signal = build_source_signal(
+    time_axis,
+    center_frequency,
+    signal_type=args.signal_type,
+    signal_cycles=args.signal_cycles,
+    signal_window=args.signal_window,
+)
+source_signals = source_signal
 source_signals = np.tile(source_signals, (n_sources, 1))
 
 nt = time_axis.shape[0]//temporal_sampling + 1
@@ -1229,15 +1282,16 @@ if bitrate_method in {"svd", "both"}:
         num_brain_grid_points=len(source_positions),
         time_resolution=time_step,
         frequency_hz=center_frequency,
+        comment=f"signal_type={args.signal_type},signal_cycles={args.signal_cycles},signal_window={args.signal_window}",
         vincent_trick=False
     ))
 
     s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
     noise_level = noise_floor_heuristic(s_normalized, heuristic=args.noise_heuristic, snr=args.noise_snr)
     print(f"noise_level: {noise_level}")
-    #print(f"bitrate: {get_bitrate(s_normalized, noise_level, time_resolution=1.0)}")
+    print(f"bitrate: {get_bitrate(s_normalized, noise_level, time_resolution=1.0)}")
     print(n_sensors)
-    print(f"bitrate: {get_bitrate_channel_capacity(s, args.noise_snr, nsensors_reference=n_sensors, n_sensors=n_sensors, time_resolution=1.0)}")
+    # print(f"bitrate: {get_bitrate_channel_capacity(s, args.noise_snr, nsensors_reference=n_sensors, n_sensors=n_sensors, time_resolution=1.0)}")
 
 if bitrate_method in {"slq", "both"}:
     if not torch.cuda.is_available():
