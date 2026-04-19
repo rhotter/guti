@@ -1148,6 +1148,49 @@ def get_bitrate_channel_capacity(
         np.log2(1 + optimal_input_power_spectrum_over_noise*s**2)
     )
     return channel_capacity
+
+
+def get_bitrate_channel_capacity_temporal(
+    s: np.ndarray,                      # (K,) spatial singular values
+    freqs: np.ndarray,                  # (M,) frequency bins in Hz (uniform spacing)
+    H_magnitude: np.ndarray,            # (M,) |H(f_m)|, normalized so peak(|H|) = 1
+    snr_at_reference_nsensors: float,
+    snr_integration_time_s: float = 1.0,
+    nsensors_reference: int | None = None,
+    n_sensors: int | None = None,
+) -> float:
+    """Channel capacity in bits/s for a spatial-temporal MIMO Gaussian channel.
+
+    Each (spatial mode k, frequency bin m) is treated as a parallel Gaussian
+    channel with effective singular value σ_km = s_k · |H(f_m)|. Joint
+    water-filling over all (k, m) gives the capacity-achieving input PSD;
+    integrating over frequency (multiplying by df) converts the per-bin
+    capacity to bits per second.
+
+    SNR convention. ``snr_at_reference_nsensors`` is the peak received SNR for
+    the strongest spatial mode at the HRF peak frequency, measured over an
+    observation window of length ``snr_integration_time_s``. Because a
+    DFT-bin observation of length T = 1/df accumulates signal coherently
+    (∝ T) while noise grows as √T, the per-DFT-bin SNR scales as
+    √(T/T_ref). The function applies this scaling internally so the
+    resulting bits/s is invariant to ``df`` (once ``df`` is small enough to
+    resolve ``H(f)``).
+    """
+    if nsensors_reference is None:
+        snr_ref = snr_at_reference_nsensors
+    else:
+        snr_ref = snr_at_reference_nsensors * np.sqrt(nsensors_reference / n_sensors)
+
+    df = float(freqs[1] - freqs[0])
+    snr_bin = snr_ref * np.sqrt(1.0 / (df * snr_integration_time_s))
+
+    sigma_eff = np.outer(s, H_magnitude).ravel()
+    active = sigma_eff > 0
+    sigma_active = sigma_eff[active]
+
+    P_over_N = water_filling_spectrum(sigma_active, snr_bin)
+    log_terms = np.log2(1 + (sigma_active ** 2) * P_over_N)
+    return df * float(np.sum(log_terms))
     
 
 
