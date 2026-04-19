@@ -5,7 +5,7 @@ Parameter sweep visualization utilities.
 from guti.data_utils import list_svd_variants
 from guti.parameters import Parameters
 from guti.core import get_bitrate, noise_floor_from_total_snr
-from guti.noise_models import get_effective_total_snr, get_noise_model, compute_noise_effective
+from guti.noise_models import get_effective_total_snr, get_noise_model, compute_noise_effective, compute_noise_empirical
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Optional, Literal
@@ -181,7 +181,10 @@ def plot_bitrate_vs_parameter(
         model = get_noise_model(modality_name)
         n_sensors = params.num_sensors or model.reference_sensor_count
         freq = getattr(params, "frequency_hz", None)
-        noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
+        if model.typical_signal_amplitude > 0.0:
+            noise_eff = compute_noise_empirical(v["s"], modality_name, n_sensors=n_sensors, frequency_hz=freq)
+        else:
+            noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
         bitrate = get_bitrate(v["s"], noise_eff, time_resolution=time_resolution)
         param_values.append(param_value)
         bitrates.append(bitrate)
