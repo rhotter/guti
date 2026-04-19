@@ -18,9 +18,9 @@ noptodes = 800
 max_dist = 50  # mm
 time_gates_ns = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]  # nanoseconds
 
-# Optical properties (typical brain tissue at ~800nm)
-mu_a = 0.02  # mm^-1 (absorption)
-mu_s_prime = 0.67  # mm^-1 (reduced scattering)
+# Optical properties (brain at ~800 nm, Jacques 2013 PMB)
+mu_a = 0.013  # mm^-1 (absorption)
+mu_s_prime = 1.14  # mm^-1 (reduced scattering)
 n_tissue = 1.4
 c_vacuum = 299.792  # mm/ns
 c = c_vacuum / n_tissue  # speed of light in tissue [mm/ns]
@@ -40,23 +40,28 @@ print(f"Grid points: {grid_points_torch.shape[0]}")
 print(f"Sensors: {sensor_positions_torch.shape[0]}")
 
 # %%
-# Get valid source-detector pairs
-sources, detectors = get_valid_source_detector_pairs(sensor_positions_torch, max_dist)
+# Get valid source-detector pairs and their outward hemisphere normals.
+sources, source_normals, detectors, detector_normals = get_valid_source_detector_pairs(
+    sensor_positions_torch, max_dist
+)
 print(f"Valid S-D pairs: {sources.shape[0]}")
 
 # %%
-# Compute TD sensitivity for each time gate
+# Compute TD sensitivity for each time gate (semi-infinite medium).
 all_sensitivities = []
 for t_ns in time_gates_ns:
     print(f"\nComputing sensitivity for t = {t_ns} ns...")
     sensitivities = td_sensitivity_batched(
         pos=grid_points_torch,
         source_pos=sources,
+        source_normal=source_normals,
         detector_pos=detectors,
+        detector_normal=detector_normals,
         t=t_ns,
         D=D,
         mu_a=mu_a,
         c=c,
+        mu_s_prime=mu_s_prime,
         batch_size=500,
     )
     all_sensitivities.append(sensitivities)

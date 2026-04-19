@@ -107,10 +107,13 @@ class TDfNIRSAnalytical(ImagingModality):
             torch.from_numpy(self.sensor_positions).float().to(self.device)
         )
 
-        # Get valid source-detector pairs (within max_dist)
-        valid_sources, valid_detectors = get_valid_source_detector_pairs(
-            sensor_positions_torch, self.params.max_dist
-        )
+        # Get valid source-detector pairs and their outward normals on the hemisphere.
+        (
+            valid_sources,
+            valid_source_normals,
+            valid_detectors,
+            valid_detector_normals,
+        ) = get_valid_source_detector_pairs(sensor_positions_torch, self.params.max_dist)
 
         n_pairs = valid_sources.shape[0]
         n_points = grid_points_torch.shape[0]
@@ -121,17 +124,20 @@ class TDfNIRSAnalytical(ImagingModality):
         print(f"  Time gates: {self.time_gates_ns} ns")
         print(f"  Output matrix shape: ({n_pairs * n_gates}, {n_points})")
 
-        # Compute sensitivities for each time gate
+        # Compute sensitivities for each time gate (semi-infinite medium).
         all_sensitivities = []
         for t_ns in self.time_gates_ns:
             sensitivities = td_sensitivity_batched(
                 pos=grid_points_torch,
                 source_pos=valid_sources,
+                source_normal=valid_source_normals,
                 detector_pos=valid_detectors,
+                detector_normal=valid_detector_normals,
                 t=t_ns,
                 D=self.D,
                 mu_a=self.mu_a,
                 c=self.c,
+                mu_s_prime=self.mu_s_prime,
             )
             all_sensitivities.append(sensitivities)
 
