@@ -4,7 +4,8 @@ Parameter sweep visualization utilities.
 
 from guti.data_utils import list_svd_variants
 from guti.parameters import Parameters
-from guti.core import get_bitrate, noise_floor_heuristic
+from guti.core import get_bitrate, noise_floor_from_total_snr
+from guti.noise_models import get_effective_total_snr, get_noise_model, compute_noise_effective
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Optional, Literal
@@ -163,7 +164,7 @@ def plot_bitrate_vs_parameter(
     constant_params: Optional[Parameters] = None,
     figsize: tuple = (10, 6),
     time_resolution: float = 1.0,
-    snr: float = 10.0
+    snr: float | None = None,
 ):
     normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
 
@@ -177,9 +178,11 @@ def plot_bitrate_vs_parameter(
     for v, s_normalized in normalized_svs:
         params = v["params"]
         param_value = getattr(params, param_key)
-        n_sensors = params.num_sensors
-        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=snr, n_detectors=n_sensors)
-        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution)
+        model = get_noise_model(modality_name)
+        n_sensors = params.num_sensors or model.reference_sensor_count
+        freq = getattr(params, "frequency_hz", None)
+        noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
+        bitrate = get_bitrate(v["s"], noise_eff, time_resolution=time_resolution)
         param_values.append(param_value)
         bitrates.append(bitrate)
 
@@ -245,11 +248,13 @@ def plot_bitrate_vs_snr(
     params = v["params"]
     n_sensors = params.num_sensors
 
-    # Compute bitrates for each SNR
+    # Compute bitrates for each SNR (snr acts as multiplier: noise = noise_eff / snr)
+    freq = getattr(params, "frequency_hz", None)
+    noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
     bitrates = []
     for snr in snr_values:
-        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=snr, n_detectors=n_sensors)
-        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution)
+        noise = noise_eff / snr
+        bitrate = get_bitrate(v["s"], noise, time_resolution=time_resolution)
         bitrates.append(bitrate)
 
     plt.figure(figsize=figsize)

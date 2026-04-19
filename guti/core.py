@@ -1077,6 +1077,21 @@ def get_bitrate(
         np.log2(1 + (s/noise)**2)
     )
 
+
+def noise_floor_from_total_snr(
+    s: np.ndarray,
+    total_snr: float,
+) -> float:
+    """
+    Convert a target total output SNR into an equivalent flat detector noise level.
+
+    For iid unit-variance inputs, total output SNR is
+    sqrt(sum_i s_i^2) / noise, so the matching flat noise floor is
+    sqrt(sum_i s_i^2) / total_snr.
+    """
+    total_power = np.sum(np.abs(s) ** 2)
+    return np.sqrt(total_power) / total_snr
+
 def water_filling_spectrum(
     s: np.ndarray, # svd spectrum
     snr: float, # noise level
@@ -1138,13 +1153,16 @@ def get_bitrate_channel_capacity(
     nsensors_reference: int | None = None, # reference number of sensors
     n_sensors: int | None = None, # number of sensors
     time_resolution: float = 1.0,
+    sensor_count_snr_exponent: float = 0.5,
 ) -> float:
-    if nsensors_reference is None:
+    if nsensors_reference is None or n_sensors is None:
         snr = snr_at_reference_nsensors
     else:
-        snr = snr_at_reference_nsensors * np.sqrt(nsensors_reference/n_sensors)
+        snr = snr_at_reference_nsensors * (
+            nsensors_reference / n_sensors
+        ) ** sensor_count_snr_exponent
     optimal_input_power_spectrum_over_noise = water_filling_spectrum(s, snr)
-    channel_capacity = (1 / (time_resolution)) * np.sum(
+    channel_capacity = (1 / (2 * time_resolution)) * np.sum(
         np.log2(1 + optimal_input_power_spectrum_over_noise*s**2)
     )
     return channel_capacity
@@ -1202,8 +1220,7 @@ def noise_floor_heuristic(
 ) -> float:
     # n_detectors = n_detectors or 1
     if heuristic == "power":
-        total_power = np.sum(np.abs(s) ** 2)
-        return np.sqrt(total_power) / snr
+        return noise_floor_from_total_snr(s, snr)
     elif heuristic == "first":
         return s[0] / snr
 
