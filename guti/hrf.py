@@ -27,6 +27,43 @@ def compute_psd(signal, dt):
     return freqs, psd
 
 
+def get_canonical_hrf_spectrum(
+    f_max: float = 2.0,
+    df: float = 0.01,
+    hrf_type: str = "spm",
+    tr: float = 0.01,
+):
+    """Return (freqs, |H(f)|) for a canonical HRF, peak-normalized to 1.
+
+    The HRF is sampled at period ``tr`` and zero-padded so that the rfft
+    frequency resolution is ``df``. Output is truncated to ``[0, f_max]``.
+    """
+    from nilearn.glm.first_level import spm_hrf, glover_hrf
+
+    if hrf_type == "spm":
+        hrf = spm_hrf(tr, oversampling=1)
+    elif hrf_type == "glover":
+        hrf = glover_hrf(tr, oversampling=1)
+    else:
+        raise ValueError(f"Unknown hrf_type: {hrf_type}")
+
+    n_samples = int(round(1.0 / (df * tr)))
+    if n_samples < len(hrf):
+        # df is too coarse to resolve the HRF — bump n_samples up.
+        n_samples = len(hrf)
+    padded = np.zeros(n_samples)
+    padded[: len(hrf)] = hrf
+
+    freqs = np.fft.rfftfreq(n_samples, d=tr)
+    H_mag = np.abs(np.fft.rfft(padded))
+
+    mask = freqs <= f_max
+    freqs = freqs[mask]
+    H_mag = H_mag[mask]
+    H_mag = H_mag / H_mag.max()
+    return freqs, H_mag
+
+
 def get_empirical_hrf():
     """Extract an empirical HRF from real fMRI data via FIR deconvolution."""
     from nilearn.maskers import NiftiSpheresMasker

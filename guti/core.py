@@ -1077,6 +1077,21 @@ def get_bitrate(
         np.log2(1 + (s/noise)**2)
     )
 
+
+def noise_floor_from_total_snr(
+    s: np.ndarray,
+    total_snr: float,
+) -> float:
+    """
+    Convert a target total output SNR into an equivalent flat detector noise level.
+
+    For iid unit-variance inputs, total output SNR is
+    sqrt(sum_i s_i^2) / noise, so the matching flat noise floor is
+    sqrt(sum_i s_i^2) / total_snr.
+    """
+    total_power = np.sum(np.abs(s) ** 2)
+    return np.sqrt(total_power) / total_snr
+
 def water_filling_spectrum(
     s: np.ndarray, # svd spectrum
     snr: float, # noise level
@@ -1138,16 +1153,62 @@ def get_bitrate_channel_capacity(
     nsensors_reference: int | None = None, # reference number of sensors
     n_sensors: int | None = None, # number of sensors
     time_resolution: float = 1.0,
+    sensor_count_snr_exponent: float = 0.5,
 ) -> float:
-    if nsensors_reference is None:
+    if nsensors_reference is None or n_sensors is None:
         snr = snr_at_reference_nsensors
     else:
-        snr = snr_at_reference_nsensors * np.sqrt(nsensors_reference/n_sensors)
+        snr = snr_at_reference_nsensors * (
+            nsensors_reference / n_sensors
+        ) ** sensor_count_snr_exponent
     optimal_input_power_spectrum_over_noise = water_filling_spectrum(s, snr)
-    channel_capacity = (1 / (time_resolution)) * np.sum(
+    channel_capacity = (1 / (2 * time_resolution)) * np.sum(
         np.log2(1 + optimal_input_power_spectrum_over_noise*s**2)
     )
     return channel_capacity
+
+
+def get_bitrate_channel_capacity_temporal(
+    s: np.ndarray,                      # (K,) spatial singular values
+    freqs: np.ndarray,                  # (M,) frequency bins in Hz (uniform spacing)
+    H_magnitude: np.ndarray,            # (M,) |H(f_m)|, normalized so peak(|H|) = 1
+    snr_at_reference_nsensors: float,
+    snr_integration_time_s: float = 1.0,
+    nsensors_reference: int | None = None,
+    n_sensors: int | None = None,
+) -> float:
+    """Channel capacity in bits/s for a spatial-temporal MIMO Gaussian channel.
+
+    Each (spatial mode k, frequency bin m) is treated as a parallel Gaussian
+    channel with effective singular value σ_km = s_k · |H(f_m)|. Joint
+    water-filling over all (k, m) gives the capacity-achieving input PSD;
+    integrating over frequency (multiplying by df) converts the per-bin
+    capacity to bits per second.
+
+    SNR convention. ``snr_at_reference_nsensors`` is the peak received SNR for
+    the strongest spatial mode at the HRF peak frequency, measured over an
+    observation window of length ``snr_integration_time_s``. Because a
+    DFT-bin observation of length T = 1/df accumulates signal coherently
+    (∝ T) while noise grows as √T, the per-DFT-bin SNR scales as
+    √(T/T_ref). The function applies this scaling internally so the
+    resulting bits/s is invariant to ``df`` (once ``df`` is small enough to
+    resolve ``H(f)``).
+    """
+    if nsensors_reference is None:
+        snr_ref = snr_at_reference_nsensors
+    else:
+        snr_ref = snr_at_reference_nsensors * np.sqrt(nsensors_reference / n_sensors)
+
+    df = float(freqs[1] - freqs[0])
+    snr_bin = snr_ref * np.sqrt(1.0 / (df * snr_integration_time_s))
+
+    sigma_eff = np.outer(s, H_magnitude).ravel()
+    active = sigma_eff > 0
+    sigma_active = sigma_eff[active]
+
+    P_over_N = water_filling_spectrum(sigma_active, snr_bin)
+    log_terms = np.log2(1 + (sigma_active ** 2) * P_over_N)
+    return df * float(np.sum(log_terms))
     
 
 
@@ -1159,8 +1220,7 @@ def noise_floor_heuristic(
 ) -> float:
     # n_detectors = n_detectors or 1
     if heuristic == "power":
-        total_power = np.sum(np.abs(s) ** 2)
-        return np.sqrt(total_power) / snr
+        return noise_floor_from_total_snr(s, snr)
     elif heuristic == "first":
         return s[0] / snr
 

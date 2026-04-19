@@ -160,7 +160,8 @@ ax.grid(True, which='both', linestyle='--', alpha=0.3)
 plt.tight_layout()
 
 from guti.data_utils import Parameters
-from guti.core import get_bitrate, noise_floor_heuristic
+from guti.core import get_bitrate
+from guti.noise_models import compute_noise_effective
 
 from guti.data_utils import save_svd
 
@@ -172,12 +173,10 @@ save_svd(s, f'us_free_field_analytical_frequency_sweep', params=Parameters(
     vincent_trick=False
 ))
 
-s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
+noise_eff = compute_noise_effective("us_analytical", n_sensors=len(sensor_positions), frequency_hz=center_frequency)
 
-noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=2000.0)
-
-print(f"noise_level: {noise_level}")
-print(f"bitrate: {get_bitrate(s_normalized, noise_level, time_resolution=1.0)}")
+print(f"noise_eff: {noise_eff}")
+print(f"bitrate: {get_bitrate(s, noise_eff, time_resolution=1.0)}")
 
 exit(0)
 
