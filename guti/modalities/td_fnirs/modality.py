@@ -57,10 +57,10 @@ class TDfNIRSAnalytical(ImagingModality):
         # GPU setup
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Optical properties (typical brain tissue at ~800nm)
+        # Optical properties (brain at ~800 nm, Jacques 2013 PMB)
         # Units: mm and ns
-        self.mu_a = 0.02  # Absorption coefficient [mm⁻¹]
-        self.mu_s_prime = 0.67  # Reduced scattering coefficient [mm⁻¹]
+        self.mu_a = 0.013  # Absorption coefficient [mm^-1]
+        self.mu_s_prime = 1.14  # Reduced scattering coefficient [mm^-1]
         self.n_tissue = 1.4  # Refractive index of tissue
         self.c_vacuum = 299.792  # Speed of light in vacuum [mm/ns]
         self.c = self.c_vacuum / self.n_tissue  # Speed of light in tissue [mm/ns]

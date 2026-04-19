@@ -79,12 +79,10 @@ class fNIRSAnalytical(ImagingModality):
             where each element J[i,j] is the sensitivity of measurement i
             to absorption changes at grid point j.
         """
-        # Compute effective attenuation coefficient from tissue constants
-        # Physics constants (tissue optical properties)
-        mu_a = 0.02  # Absorption coefficient (cm^-1)
-        mu_s_prime = 6.7  # Reduced scattering coefficient (cm^-1)
-        mu_eff = np.sqrt(3 * mu_a * (mu_s_prime + mu_a))
-        mu_eff = mu_eff * 1e-1  # Convert cm^-1 to mm^-1
+        # Tissue optical properties (brain at ~800 nm, Jacques 2013 PMB)
+        mu_a = 0.013  # Absorption coefficient [mm^-1]
+        mu_s_prime = 1.14  # Reduced scattering coefficient [mm^-1]
+        mu_eff = np.sqrt(3 * mu_a * (mu_s_prime + mu_a))  # [mm^-1]
 
         # Convert to torch tensors and move to GPU
         grid_points_torch = torch.from_numpy(self.grid_points).float().to(self.device)
