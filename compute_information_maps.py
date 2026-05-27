@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
@@ -279,7 +279,7 @@ def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
             ax.set_ylabel("Information (bits/sample/voxel)")
 
         ax.set_xlabel("Depth from brain surface (mm)")
-        ax.set_title(f"{name}: information by radial depth", pad=14)
+        ax.set_title(f"{name}: information by radial depth", pad=34)
         ax.set_xlim(0, BRAIN_RADIUS)
         ax.grid(True, alpha=0.3, which="both")
         add_plot_legends(ax)
@@ -304,15 +304,46 @@ def anatomy_band_handles() -> list[Patch]:
 
 def add_anatomy_depth_bands(ax) -> None:
     """Add approximate radial-depth anatomy bands behind the data."""
+    xaxis_transform = ax.get_xaxis_transform()
     for band in ANATOMICAL_DEPTH_BANDS:
         start = band["start_mm"]
         end = band["end_mm"]
-        ax.axvspan(start, end, color=band["color"], alpha=0.25, lw=0, zorder=0)
-        ax.axvline(end, color="#6b7280", linewidth=0.8, alpha=0.35, zorder=1)
+        width = end - start
+        ax.axvspan(start, end, color=band["color"], alpha=0.38, lw=0, zorder=0)
+        ax.axvline(end, color="#4b5563", linewidth=1.0, alpha=0.55, zorder=1)
+        ax.add_patch(
+            Rectangle(
+                (start, 1.015),
+                width,
+                0.055,
+                transform=xaxis_transform,
+                facecolor=band["color"],
+                edgecolor="#4b5563",
+                linewidth=0.6,
+                alpha=0.92,
+                clip_on=False,
+                zorder=5,
+            )
+        )
+
+        label = f"{band['label']}\n{start:g}-{end:g} mm"
+        ax.text(
+            start + width / 2,
+            1.045,
+            label,
+            transform=xaxis_transform,
+            ha="center",
+            va="center",
+            rotation=90 if width < 8 else 0,
+            fontsize=8.0 if width < 8 else 8.7,
+            color="#111827",
+            clip_on=False,
+            zorder=6,
+        )
 
     ax.text(
         1.0,
-        -0.32,
+        -0.34,
         "Anatomical bands are approximate radial-depth regions, not segmented anatomy.",
         transform=ax.transAxes,
         ha="right",
@@ -381,7 +412,7 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
             ax.set_ylabel("Mean information (bits/sample/voxel)")
 
         ax.set_xlabel("Depth from brain surface (mm)")
-        ax.set_title(f"Posterior information by radial depth ({scaling} scaling)", pad=14)
+        ax.set_title(f"Posterior information by radial depth ({scaling} scaling)", pad=34)
         ax.set_xlim(0, BRAIN_RADIUS)
         ax.grid(True, alpha=0.3, which="both")
         add_plot_legends(ax)
