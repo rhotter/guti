@@ -572,10 +572,10 @@ def run_fnirs(
         )
     )
     modality.setup_geometry()
-    A_raw = as_numpy(modality.compute_forward_model())
+    A_transfer = as_numpy(modality.compute_forward_model())
     positions = modality.grid_points
     voxel_volume_mm3 = grid_spacing_mm**3
-    A = np.asarray(A_raw, dtype=np.float64) * model.source_amplitude * voxel_volume_mm3
+    A = np.asarray(A_transfer, dtype=np.float64) * model.source_amplitude
     noise, scaling_params = choose_noise(
         A,
         "fnirs_analytical_cw",
@@ -599,6 +599,8 @@ def run_fnirs(
             "detector_noise_today": physical_noise,
             "source_amplitude": model.source_amplitude,
             "voxel_volume_mm3": voxel_volume_mm3,
+            "transfer_function_units": "mm^-1",
+            "transfer_function_convention": "voxel-integrated before absorption scaling",
             "model": (
                 "CW fNIRS analytical diffusion sensitivity; scalar absorption "
                 "contrast integrated over each voxel"

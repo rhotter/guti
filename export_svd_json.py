@@ -33,10 +33,12 @@ from guti.data_utils import list_svd_variants, load_svd_variant
 from guti.parameters import Parameters
 from guti.core import get_bitrate
 from guti.noise_models import (
+    capacity_forward_gain_scale,
     compute_noise_empirical,
     compute_noise_effective,
     compute_empirical_snr,
     get_noise_model,
+    scale_singular_values_for_capacity,
 )
 
 OUT_DIR = "web/public/data"
@@ -72,15 +74,29 @@ def downsample(arr, n):
     return idx.tolist(), arr[idx].tolist()
 
 
-def compute_bitrate(s, modality, n_sensors, freq=None, tier="today", time_resolution=0.01):
+def compute_bitrate(
+    s,
+    modality,
+    n_sensors,
+    freq=None,
+    tier="today",
+    time_resolution=0.01,
+    params=None,
+):
     model = get_noise_model(modality)
+    s_capacity = scale_singular_values_for_capacity(
+        s,
+        modality,
+        params=params,
+        voxel_size_mm=getattr(params, "grid_resolution_mm", None),
+    )
     if model.typical_signal_amplitude > 0.0:
-        noise = compute_noise_empirical(s, modality, n_sensors=n_sensors,
+        noise = compute_noise_empirical(s_capacity, modality, n_sensors=n_sensors,
                                         frequency_hz=freq, tier=tier)
     else:
         noise = compute_noise_effective(modality, n_sensors=n_sensors,
                                         frequency_hz=freq, tier=tier)
-    return float(get_bitrate(s, noise, time_resolution=time_resolution))
+    return float(get_bitrate(s_capacity, noise, time_resolution=time_resolution))
 
 
 def export_modality(modality, label):
@@ -100,6 +116,11 @@ def export_modality(modality, label):
         params = v["params"]
         n_sensors = params.num_sensors
         freq = getattr(params, "frequency_hz", None)
+        capacity_sv_scale = capacity_forward_gain_scale(
+            modality,
+            params=params,
+            voxel_size_mm=getattr(params, "grid_resolution_mm", None),
+        )
 
         # Downsample singular values for web
         idx, sv_vals = downsample(s, MAX_SV_POINTS)
@@ -107,13 +128,13 @@ def export_modality(modality, label):
 
         # Bitrates
         try:
-            br_today = compute_bitrate(s, modality, n_sensors, freq, "today", tr)
+            br_today = compute_bitrate(s, modality, n_sensors, freq, "today", tr, params)
         except Exception as e:
             br_today = None
             print(f"  bitrate today failed: {e}")
 
         try:
-            br_fund = compute_bitrate(s, modality, n_sensors, freq, "fundamental", tr)
+            br_fund = compute_bitrate(s, modality, n_sensors, freq, "fundamental", tr, params)
         except Exception as e:
             br_fund = None
 
@@ -133,6 +154,7 @@ def export_modality(modality, label):
             "sv_indices": sv_indices,
             "singular_values": [float(x) for x in sv_vals],
             "first_sv": float(s[0]),
+            "capacity_singular_value_scale": capacity_sv_scale,
             "bitrate_today": br_today,
             "bitrate_fundamental": br_fund,
             "snr_empirical_today": snr_emp,

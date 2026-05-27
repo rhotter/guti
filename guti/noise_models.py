@@ -488,6 +488,35 @@ def compute_noise_effective(
     return detector_noise / model.source_amplitude
 
 
+def capacity_forward_gain_scale(
+    modality_name: str,
+    params=None,
+    voxel_size_mm: float | None = None,
+) -> float:
+    """Scale raw saved singular values into capacity forward-model units.
+
+    Saved fNIRS transfer matrices are voxel-integrated before SVD, so no hidden
+    voxel-volume correction is applied in the SNR/capacity path.  This helper is
+    kept as a single hook for future modalities that may need a convention
+    conversion at export time.
+    """
+    return 1.0
+
+
+def scale_singular_values_for_capacity(
+    s: np.ndarray,
+    modality_name: str,
+    params=None,
+    voxel_size_mm: float | None = None,
+) -> np.ndarray:
+    """Apply modality-specific gain scaling before a capacity calculation."""
+    return np.asarray(s) * capacity_forward_gain_scale(
+        modality_name,
+        params=params,
+        voxel_size_mm=voxel_size_mm,
+    )
+
+
 def compute_empirical_snr(
     modality_name: str,
     n_sensors: int | None = None,

@@ -7,6 +7,13 @@ from compute_information_maps import (
     posterior_info_scalar,
     posterior_info_vector3,
 )
+from export_svd_json import compute_bitrate
+from guti.core import get_bitrate
+from guti.noise_models import (
+    capacity_forward_gain_scale,
+    compute_noise_empirical,
+)
+from guti.parameters import Parameters
 
 
 class InformationMapMathTests(unittest.TestCase):
@@ -47,6 +54,36 @@ class InformationMapMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(meta_a["empirical_snr"], meta_b["empirical_snr"])
         np.testing.assert_allclose(A / noise_a, (37.0 * A) / noise_b, atol=1e-12)
+
+    def test_fnirs_bitrate_uses_voxel_integrated_transfer_function(self):
+        s_integrated = np.array([6.0e-2, 2.0e-2, 1.0e-2])
+        params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
+        noise = compute_noise_empirical(
+            s_integrated,
+            "fnirs_analytical_cw",
+            n_sensors=800,
+            tier="today",
+        )
+
+        actual = compute_bitrate(
+            s_integrated,
+            "fnirs_analytical_cw",
+            n_sensors=800,
+            tier="today",
+            time_resolution=1.0,
+            params=params,
+        )
+        expected = get_bitrate(
+            s_integrated,
+            noise,
+            time_resolution=1.0,
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+        self.assertEqual(
+            capacity_forward_gain_scale("fnirs_analytical_cw", params=params),
+            1.0,
+        )
 
 
 if __name__ == "__main__":
