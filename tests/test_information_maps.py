@@ -4,13 +4,20 @@ import numpy as np
 import torch
 
 from compute_information_maps import (
+    DEFAULT_SCALING,
+    capacity_attribution_scalar,
+    capacity_attribution_vector3,
     compute_meg_forward_matrix,
     empirical_noise_for_matrix,
+    mode_bits_from_singular_values,
     normalize_to_first_in_brain_value,
     posterior_info_scalar,
     posterior_info_vector3,
 )
-from guti.core import get_sensor_positions
+from export_svd_json import compute_bitrate
+from guti.core import get_bitrate, get_sensor_positions
+from guti.noise_models import capacity_forward_gain_scale, compute_noise_effective
+from guti.parameters import Parameters
 from guti.modalities.fnirs_analytical.utils import (
     get_valid_source_detector_pairs as get_cw_pairs,
 )
@@ -21,6 +28,9 @@ from recompute_meg_variants import sarvas_formula
 
 
 class InformationMapMathTests(unittest.TestCase):
+    def test_default_depth_map_scaling_is_physical(self):
+        self.assertEqual(DEFAULT_SCALING, "physical")
+
     def test_scalar_posterior_matches_direct_covariance(self):
         rng = np.random.default_rng(0)
         A = rng.normal(size=(8, 12)) * 0.1
@@ -60,6 +70,47 @@ class InformationMapMathTests(unittest.TestCase):
         np.testing.assert_allclose(posterior_det, expected_det, atol=1e-12)
         np.testing.assert_allclose(info, -0.5 * np.log2(expected_det), atol=1e-12)
 
+    def test_scalar_capacity_attribution_sums_to_svd_capacity(self):
+        rng = np.random.default_rng(4)
+        A = rng.normal(size=(9, 5)) * 0.1
+        noise = 0.2
+
+        attribution, singular_values, mode_bits = capacity_attribution_scalar(A, noise)
+        expected_bits = mode_bits_from_singular_values(np.linalg.svd(A, compute_uv=False), noise)
+
+        np.testing.assert_allclose(np.sum(attribution), np.sum(expected_bits), atol=1e-12)
+        np.testing.assert_allclose(mode_bits, expected_bits, atol=1e-12)
+
+    def test_vector3_capacity_attribution_sums_to_svd_capacity(self):
+        rng = np.random.default_rng(5)
+        A = rng.normal(size=(7, 12)) * 0.1
+        noise = 0.2
+
+        attribution, singular_values, mode_bits = capacity_attribution_vector3(
+            A,
+            noise,
+            n_voxels=4,
+        )
+        expected_bits = mode_bits_from_singular_values(np.linalg.svd(A, compute_uv=False), noise)
+
+        np.testing.assert_allclose(np.sum(attribution), np.sum(expected_bits), atol=1e-12)
+        np.testing.assert_allclose(mode_bits, expected_bits, atol=1e-12)
+
+    def test_capacity_attribution_keeps_tiny_si_scale_modes(self):
+        rng = np.random.default_rng(6)
+        A = rng.normal(size=(5, 9)) * 1e-13
+        noise = 2e-14
+
+        attribution, _, mode_bits = capacity_attribution_vector3(
+            A,
+            noise,
+            n_voxels=3,
+        )
+        expected_bits = mode_bits_from_singular_values(np.linalg.svd(A, compute_uv=False), noise)
+
+        np.testing.assert_allclose(np.sum(attribution), np.sum(expected_bits), rtol=1e-10)
+        np.testing.assert_allclose(mode_bits, expected_bits, rtol=1e-10)
+
     def test_empirical_noise_preserves_ratios_under_global_gain(self):
         rng = np.random.default_rng(2)
         A = rng.normal(size=(6, 10))
@@ -69,6 +120,74 @@ class InformationMapMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(meta_a["empirical_snr"], meta_b["empirical_snr"])
         np.testing.assert_allclose(A / noise_a, (37.0 * A) / noise_b, atol=1e-12)
+
+    def test_physical_bitrate_preserves_forward_gain_unlike_empirical_mode(self):
+        s = np.array([0.12, 0.03, 0.01])
+        physical = compute_bitrate(
+            s,
+            "meg_opm",
+            n_sensors=1000,
+            tier="today",
+            time_resolution=0.01,
+            noise_mode="physical_detector_floor",
+        )
+        physical_scaled = compute_bitrate(
+            10.0 * s,
+            "meg_opm",
+            n_sensors=1000,
+            tier="today",
+            time_resolution=0.01,
+            noise_mode="physical_detector_floor",
+        )
+        empirical = compute_bitrate(
+            s,
+            "meg_opm",
+            n_sensors=1000,
+            tier="today",
+            time_resolution=0.01,
+            noise_mode="empirical_observed_snr",
+        )
+        empirical_scaled = compute_bitrate(
+            10.0 * s,
+            "meg_opm",
+            n_sensors=1000,
+            tier="today",
+            time_resolution=0.01,
+            noise_mode="empirical_observed_snr",
+        )
+
+        self.assertGreater(physical_scaled, physical)
+        self.assertAlmostEqual(empirical_scaled, empirical)
+
+    def test_fnirs_physical_bitrate_uses_voxel_integrated_transfer_function(self):
+        s_integrated = np.array([6.0e-2, 2.0e-2, 1.0e-2])
+        params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
+        noise = compute_noise_effective(
+            "fnirs_analytical_cw",
+            n_sensors=800,
+            tier="today",
+        )
+
+        actual = compute_bitrate(
+            s_integrated,
+            "fnirs_analytical_cw",
+            n_sensors=800,
+            tier="today",
+            time_resolution=1.0,
+            params=params,
+            noise_mode="physical_detector_floor",
+        )
+        expected = get_bitrate(
+            s_integrated,
+            noise,
+            time_resolution=1.0,
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+        self.assertEqual(
+            capacity_forward_gain_scale("fnirs_analytical_cw", params=params),
+            1.0,
+        )
 
     def test_normalize_to_first_in_brain_value_uses_first_positive_depth(self):
         x = np.array([-1.0, 1.0, 3.0, 5.0])

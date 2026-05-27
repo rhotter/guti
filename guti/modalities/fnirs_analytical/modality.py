@@ -76,8 +76,11 @@ class fNIRSAnalytical(ImagingModality):
         -------
         np.ndarray
             Sensitivity matrix of shape (n_valid_pairs, n_grid_points)
-            where each element J[i,j] is the sensitivity of measurement i
-            to absorption changes at grid point j.
+            where each element J[i,j] is the voxel-integrated transfer
+            function from absorption change at grid point j to measurement i.
+            The underlying analytical sensitivity is a density sampled in
+            mm coordinates; multiplying by voxel volume makes the returned
+            transfer function have units of mm^-1.
         """
         # Tissue optical properties (brain at ~800 nm, Jacques 2013 PMB)
         mu_a = 0.013  # Absorption coefficient [mm^-1]
@@ -102,8 +105,12 @@ class fNIRSAnalytical(ImagingModality):
             detector_pos=valid_detectors,
             mu_eff=mu_eff,
         )
+        voxel_volume_mm3 = float(self.params.grid_resolution_mm) ** 3
+        self.params.forward_model_convention = "voxel_integrated_transfer"
+        self.params.forward_model_units = "mm^-1"
+        self.params.voxel_volume_mm3 = voxel_volume_mm3
 
-        return sensitivities
+        return sensitivities * voxel_volume_mm3
 
 
 if __name__ == "__main__":

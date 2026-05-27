@@ -7,13 +7,15 @@ The model is:
     x ~ N(0, I)
     n ~ N(0, noise^2 I)
 
-By default the maps use the same empirical-SNR normalization as the web bitrate
-export: the whole forward matrix is scaled relative to a noise floor such that
-sqrt(sum(s_i^2)) / noise equals the modality's empirical SNR.  This preserves the
-spatial structure of the forward model while avoiding claims that depend on an
-unvalidated absolute Jacobian gain.
+By default the maps use the physical detector-floor path: the forward model is
+scaled by the source amplitude and compared directly to the detector noise floor.
+This preserves the raw forward gain, matching the first-principles capacity
+interpretation used for the blog figures.
 
-Use --scaling physical to inspect the raw source-amplitude/noise model instead.
+Use --scaling empirical to inspect the observed-SNR diagnostic path instead.  In
+that mode the whole forward matrix is scaled relative to a noise floor such that
+sqrt(sum(s_i^2)) / noise equals the modality's empirical SNR, which normalizes
+away absolute forward gain.
 For EEG/MEG, each voxel has a 3-vector dipole source and the voxel score is the
 mutual information for that 3D block.  For fNIRS, each voxel is scalar absorption
 contrast integrated over the voxel volume.
@@ -52,14 +54,35 @@ OUT_DIR = Path("results/information_maps")
 HEAD_CENTER = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
 OUTER_SCALP_DEPTH_MM = BRAIN_RADIUS - SCALP_RADIUS
 SCALING_CHOICES = ("empirical", "physical")
-DEFAULT_SCALING = "empirical"
+MAP_KIND_CHOICES = ("posterior", "capacity", "both")
+DEFAULT_SCALING = "physical"
+SCALING_LABELS = {
+    "physical": "physical detector-floor",
+    "empirical": "empirical observed-SNR",
+}
+TIME_RESOLUTION_S = {
+    "eeg_openmeeg": 0.01,
+    "eeg_homogeneous": 0.01,
+    "meg_opm": 0.01,
+    "meg_squid": 0.01,
+    "fnirs_analytical_cw": 0.1,
+    "td_fnirs_analytical": 0.1,
+}
 TABLE_DEFAULTS = {
+    "eeg_openmeeg": {
+        "n_sensors": 256,
+        "grid_spacing_mm": 5.0,
+        "mesh_resolution_mm": 10.0,
+        "leadfield_path": "guti/modalities/leadfields/eeg/eeg_leadfield.mat",
+        "dipoles_path": "guti/modalities/bem_model/eeg/dipole_locations.txt",
+        "reference": "results/variants/eeg_openmeeg/cedd0dd5.npz",
+    },
     "eeg_homogeneous": {
         "n_sensors": 256,
         "grid_spacing_mm": 5.0,
         "reference": (
-            "Best EEG/OpenMEEG spectrum has no saved metadata; use the "
-            "256-sensor, 5 mm source spacing from the selected EEG sweep."
+            "Lightweight homogeneous-sphere EEG approximation; retained as a "
+            "diagnostic fallback, not used in the default combined chart."
         ),
     },
     "meg_opm": {
@@ -90,8 +113,10 @@ TABLE_DEFAULTS = {
 }
 MODALITY_ALIASES = {
     "all": "all",
-    "eeg": "eeg_homogeneous",
+    "eeg": "eeg_openmeeg",
+    "eeg_openmeeg": "eeg_openmeeg",
     "eeg_homogeneous": "eeg_homogeneous",
+    "homogeneous_eeg": "eeg_homogeneous",
     "meg_opm": "meg_opm",
     "opm": "meg_opm",
     "meg_squid": "meg_squid",
@@ -104,8 +129,29 @@ MODALITY_ALIASES = {
     "td-fnirs": "td_fnirs_analytical",
     "td_fnirs_analytical": "td_fnirs_analytical",
 }
-MODALITY_ORDER = tuple(TABLE_DEFAULTS)
+DEFAULT_MODALITIES = (
+    "eeg_openmeeg",
+    "meg_opm",
+    "meg_squid",
+    "fnirs_analytical_cw",
+    "td_fnirs_analytical",
+)
+CAPACITY_ATTRIBUTION_DEFAULT_MODALITIES = (
+    "eeg_openmeeg",
+    "meg_opm",
+    "meg_squid",
+    "fnirs_analytical_cw",
+)
+MODALITY_ORDER = (
+    "eeg_openmeeg",
+    "eeg_homogeneous",
+    "meg_opm",
+    "meg_squid",
+    "fnirs_analytical_cw",
+    "td_fnirs_analytical",
+)
 COMPARISON_LABELS = {
+    "eeg_openmeeg": "EEG OpenMEEG",
     "eeg_homogeneous": "EEG homogeneous",
     "meg_opm": "MEG OPM",
     "meg_squid": "MEG SQUID",
@@ -113,7 +159,8 @@ COMPARISON_LABELS = {
     "td_fnirs_analytical": "TD-fNIRS",
 }
 MODALITY_COLORS = {
-    "EEG homogeneous": "#2563eb",
+    "EEG OpenMEEG": "#2563eb",
+    "EEG homogeneous": "#60a5fa",
     "MEG OPM": "#ea580c",
     "MEG SQUID": "#16a34a",
     "fNIRS CW": "#dc2626",
@@ -191,6 +238,90 @@ def compute_eeg_forward_matrix(
         block = coeff * r / np.maximum(dist[:, None], 1e-12) ** 3
         rows.append(block.reshape(1, -1))
     return np.vstack(rows), sources
+
+
+def load_openmeeg_leadfield(leadfield_path: str | Path) -> np.ndarray:
+    """Load an OpenMEEG HDF5 leadfield matrix from a .mat file."""
+    try:
+        import h5py
+    except ImportError as exc:
+        raise RuntimeError(
+            "Reading OpenMEEG .mat leadfields requires h5py. Install it in the "
+            "active environment or run with an environment that includes h5py."
+        ) from exc
+
+    path = Path(leadfield_path)
+    with h5py.File(path, "r") as f:
+        for key in ("linop", "matrix"):
+            if key in f:
+                return np.asarray(f[key], dtype=np.float64)
+        raise ValueError(
+            f"{path} does not contain an OpenMEEG leadfield dataset named "
+            "'linop' or 'matrix'; found {sorted(f.keys())}"
+        )
+
+
+def compute_eeg_openmeeg_forward_matrix(
+    leadfield_path: str | Path,
+    dipoles_path: str | Path,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load OpenMEEG EEG leadfield as sensors x (3 orientations per voxel)."""
+    leadfield = load_openmeeg_leadfield(leadfield_path)
+    dipoles = np.loadtxt(dipoles_path, dtype=np.float64)
+    if dipoles.ndim != 2 or dipoles.shape[1] != 6:
+        raise ValueError(
+            f"Expected dipoles file with columns x y z ox oy oz; got {dipoles.shape}"
+        )
+    if len(dipoles) % 3:
+        raise ValueError(
+            f"OpenMEEG dipoles must come in x/y/z orientation triples; got {len(dipoles)}"
+        )
+
+    n_dipoles = len(dipoles)
+    if leadfield.shape[0] == n_dipoles:
+        A_raw = leadfield.T
+    elif leadfield.shape[1] == n_dipoles:
+        A_raw = leadfield
+    else:
+        raise ValueError(
+            "OpenMEEG leadfield shape does not match dipole count: "
+            f"leadfield={leadfield.shape}, dipoles={n_dipoles}"
+        )
+
+    grouped_positions = dipoles[:, :3].reshape(-1, 3, 3)
+    if not np.allclose(grouped_positions, grouped_positions[:, :1, :]):
+        raise ValueError("OpenMEEG dipole positions are not grouped in orientation triples")
+
+    grouped_orientations = dipoles[:, 3:].reshape(-1, 3, 3)
+    if not np.allclose(grouped_orientations, np.eye(3)[None, :, :]):
+        raise ValueError("OpenMEEG dipole orientations are not x/y/z triples")
+
+    return np.asarray(A_raw, dtype=np.float64), grouped_positions[:, 0, :]
+
+
+def reference_svd_metadata(A_raw: np.ndarray, reference_path: str | Path) -> dict:
+    """Compare a loaded OpenMEEG leadfield against its saved SVD reference."""
+    path = Path(reference_path)
+    if not path.exists():
+        return {"reference_svd_path": str(path), "reference_svd_status": "missing"}
+
+    saved = np.load(path, allow_pickle=True)["singular_values"]
+    current = np.linalg.svd(np.asarray(A_raw, dtype=np.float64), compute_uv=False)
+    width = min(len(current), len(saved))
+    rel = np.abs(current[:width] - saved[:width]) / np.maximum(
+        np.abs(saved[:width]),
+        1e-300,
+    )
+    return {
+        "reference_svd_path": str(path),
+        "reference_svd_status": "compared",
+        "reference_svd_max_relative_error": float(np.max(rel)),
+        "reference_svd_max_absolute_error": float(
+            np.max(np.abs(current[:width] - saved[:width]))
+        ),
+        "reference_svd_current_first3": list(map(float, current[:3])),
+        "reference_svd_saved_first3": list(map(float, saved[:3])),
+    }
 
 
 def compute_meg_forward_matrix(
@@ -356,6 +487,94 @@ def posterior_info_vector3(
     return posterior_det, info_bits
 
 
+def mode_bits_from_singular_values(
+    singular_values: np.ndarray,
+    noise: float,
+) -> np.ndarray:
+    """Capacity contribution of each singular mode in bits/sample."""
+    s = np.asarray(singular_values, dtype=np.float64)
+    return 0.5 * np.log2(1.0 + (s / noise) ** 2)
+
+
+def _positive_eigen_spectrum(
+    eigvals: np.ndarray,
+    eigvecs: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    order = np.argsort(eigvals)[::-1]
+    eigvals = np.asarray(eigvals[order], dtype=np.float64)
+    eigvecs = np.asarray(eigvecs[:, order], dtype=np.float64)
+    eig_floor = max(float(eigvals[0]) * 1e-14, 0.0)
+    positive = eigvals > eig_floor
+    return np.sqrt(np.clip(eigvals[positive], 0.0, None)), eigvecs[:, positive]
+
+
+def capacity_attribution_vector3(
+    A: np.ndarray,
+    noise: float,
+    n_voxels: int,
+    chunk_voxels: int = 512,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Attribute SVD mode capacity to 3-orientation voxels by right-mode energy.
+
+    The returned voxel attributions sum to ``sum(mode_bits)`` up to numerical
+    precision.  This is a spatial attribution of the joint SVD capacity, not a
+    marginal posterior-identifiability score.
+    """
+    A64 = np.asarray(A, dtype=np.float64)
+    m, n = A64.shape
+    if n != 3 * n_voxels:
+        raise ValueError(f"Expected {3 * n_voxels} source columns, got {n}")
+
+    if m <= n:
+        eigvals, U = np.linalg.eigh(A64 @ A64.T)
+        singular_values, U = _positive_eigen_spectrum(eigvals, U)
+        mode_bits = mode_bits_from_singular_values(singular_values, noise)
+        attribution = np.zeros(n_voxels, dtype=np.float64)
+        inv_s = 1.0 / singular_values
+        for start in range(0, n_voxels, chunk_voxels):
+            stop = min(start + chunk_voxels, n_voxels)
+            cols = slice(3 * start, 3 * stop)
+            projected = U.T @ A64[:, cols]
+            right_energy = (projected * inv_s[:, None]) ** 2
+            right_energy = right_energy.reshape(len(singular_values), stop - start, 3)
+            attribution[start:stop] = mode_bits @ right_energy.sum(axis=2)
+        return attribution, singular_values, mode_bits
+
+    eigvals, V = np.linalg.eigh(A64.T @ A64)
+    singular_values, V = _positive_eigen_spectrum(eigvals, V)
+    mode_bits = mode_bits_from_singular_values(singular_values, noise)
+    right_energy = (V**2).reshape(n_voxels, 3, len(singular_values)).sum(axis=1)
+    return right_energy @ mode_bits, singular_values, mode_bits
+
+
+def capacity_attribution_scalar(
+    A: np.ndarray,
+    noise: float,
+    chunk_cols: int = 4096,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Attribute SVD mode capacity to scalar voxels by right-mode energy."""
+    A64 = np.asarray(A, dtype=np.float64)
+    m, n = A64.shape
+
+    if n <= m:
+        eigvals, V = np.linalg.eigh(A64.T @ A64)
+        singular_values, V = _positive_eigen_spectrum(eigvals, V)
+        mode_bits = mode_bits_from_singular_values(singular_values, noise)
+        return (V**2) @ mode_bits, singular_values, mode_bits
+
+    eigvals, U = np.linalg.eigh(A64 @ A64.T)
+    singular_values, U = _positive_eigen_spectrum(eigvals, U)
+    mode_bits = mode_bits_from_singular_values(singular_values, noise)
+    attribution = np.zeros(n, dtype=np.float64)
+    inv_s = 1.0 / singular_values
+    for start in range(0, n, chunk_cols):
+        stop = min(start + chunk_cols, n)
+        projected = U.T @ A64[:, start:stop]
+        right_energy = (projected * inv_s[:, None]) ** 2
+        attribution[start:stop] = mode_bits @ right_energy
+    return attribution, singular_values, mode_bits
+
+
 def as_numpy(array) -> np.ndarray:
     """Convert numpy/torch-like arrays to a CPU numpy array."""
     if hasattr(array, "detach"):
@@ -389,6 +608,7 @@ def empirical_noise_for_matrix(
     model = get_noise_model(modality_name)
     return noise, {
         "scaling": "empirical",
+        "noise_model": "empirical_observed_snr",
         "empirical_snr": empirical_snr,
         "typical_signal_amplitude": model.typical_signal_amplitude,
         "matrix_frobenius_norm": matrix_norm,
@@ -412,6 +632,8 @@ def choose_noise(
     if scaling == "physical":
         return physical_noise, {
             "scaling": "physical",
+            "noise_model": "physical_detector_floor",
+            "detector_noise_std": physical_noise,
             "noise_used": physical_noise,
             "noise_interpretation": "detector noise in forward-model measurement units",
         }
@@ -426,7 +648,10 @@ def summarize_by_depth(depth: np.ndarray, info_bits: np.ndarray, bin_width_mm: f
     p90 = np.full_like(centers, np.nan, dtype=np.float64)
     count = np.zeros_like(centers, dtype=np.int64)
     for i in range(len(centers)):
-        mask = (depth >= bins[i]) & (depth < bins[i + 1])
+        if i == len(centers) - 1:
+            mask = (depth >= bins[i]) & (depth <= bins[i + 1])
+        else:
+            mask = (depth >= bins[i]) & (depth < bins[i + 1])
         count[i] = int(mask.sum())
         if count[i]:
             vals = info_bits[mask]
@@ -459,13 +684,16 @@ def normalize_to_first_in_brain_value(
     return y / reference, reference
 
 
-def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
+def plot_depth_profile(name: str, profile: dict[str, np.ndarray], scaling: str) -> None:
     x = profile["bin_centers_mm"]
     series = [
         ("mean", profile["mean_bits"]),
         ("median", profile["median_bits"]),
         ("p90", profile["p90_bits"]),
     ]
+    stems = [f"{name}_{scaling}"]
+    if scaling == DEFAULT_SCALING:
+        stems.append(name)
 
     for scale in ("linear", "log"):
         fig, ax = plt.subplots(figsize=(8.0, 4.8))
@@ -483,14 +711,27 @@ def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
             ax.set_ylabel("Information (bits/sample/voxel)")
 
         ax.set_xlabel("Radial position relative to brain surface (mm)")
-        ax.set_title(f"{name}: information by radial depth", pad=14)
+        ax.set_title(
+            f"{name}: information by radial depth "
+            f"({SCALING_LABELS.get(scaling, scaling)} scaling)",
+            pad=14,
+        )
         ax.set_xlim(OUTER_SCALP_DEPTH_MM, BRAIN_RADIUS)
         ax.grid(True, alpha=0.3, which="both")
         add_plot_legends(ax)
         fig.tight_layout()
-        fig.savefig(OUT_DIR / f"{name}_depth_profile_{scale}.png", dpi=180, bbox_inches="tight")
-        if scale == "linear":
-            fig.savefig(OUT_DIR / f"{name}_depth_profile.png", dpi=180, bbox_inches="tight")
+        for stem in stems:
+            fig.savefig(
+                OUT_DIR / f"{stem}_depth_profile_{scale}.png",
+                dpi=180,
+                bbox_inches="tight",
+            )
+            if scale == "linear":
+                fig.savefig(
+                    OUT_DIR / f"{stem}_depth_profile.png",
+                    dpi=180,
+                    bbox_inches="tight",
+                )
         plt.close(fig)
 
 
@@ -559,15 +800,30 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
                 COMPARISON_LABELS.get(name, name),
                 data["depth_bin_centers_mm"],
                 data["depth_mean_bits"],
+                data["depth_bin_count"],
             )
         )
 
-    def plot_combined(normalized: bool) -> None:
+    def plot_combined(normalized: bool, aggregation: str) -> None:
+        if aggregation == "mean":
+            title_base = "posterior information"
+            y_base = "Mean information"
+            filename_metric = "mean"
+        elif aggregation == "total":
+            title_base = "total posterior information"
+            y_base = "Total information"
+            filename_metric = "total"
+        else:
+            raise ValueError(f"Unknown aggregation {aggregation!r}")
+
         for scale in ("linear", "log"):
             fig, ax = plt.subplots(figsize=(8.8, 5.2))
             add_anatomy_depth_bands(ax)
-            for label, x, values in loaded:
-                y = values.copy()
+            for label, x, mean_values, counts in loaded:
+                if aggregation == "mean":
+                    y = mean_values.copy()
+                else:
+                    y = mean_values * counts
                 if normalized:
                     y, _ = normalize_to_first_in_brain_value(x, y)
                 if scale == "log":
@@ -585,27 +841,33 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
             if normalized:
                 if scale == "log":
                     ax.set_yscale("log")
-                    ax.set_ylabel("Relative mean information (first bin = 1, log scale)")
+                    ax.set_ylabel(f"Relative {y_base.lower()} (first bin = 1, log scale)")
                 else:
-                    ax.set_ylabel("Relative mean information (first bin = 1)")
-                title = "Relative posterior information by radial depth"
+                    ax.set_ylabel(f"Relative {y_base.lower()} (first bin = 1)")
+                title = f"Relative {title_base} by radial depth"
                 suffix = "normalized"
             else:
                 if scale == "log":
                     ax.set_yscale("log")
-                    ax.set_ylabel("Mean information (bits/sample/voxel, log scale)")
+                    if aggregation == "mean":
+                        ax.set_ylabel("Mean information (bits/sample/voxel, log scale)")
+                    else:
+                        ax.set_ylabel("Total information (bits/sample/depth bin, log scale)")
                 else:
-                    ax.set_ylabel("Mean information (bits/sample/voxel)")
-                title = "Posterior information by radial depth"
+                    if aggregation == "mean":
+                        ax.set_ylabel("Mean information (bits/sample/voxel)")
+                    else:
+                        ax.set_ylabel("Total information (bits/sample/depth bin)")
+                title = f"{title_base.capitalize()} by radial depth"
                 suffix = None
 
             ax.set_xlabel("Radial position relative to brain surface (mm)")
-            ax.set_title(f"{title} ({scaling} scaling)", pad=14)
+            ax.set_title(f"{title} ({SCALING_LABELS.get(scaling, scaling)} scaling)", pad=14)
             ax.set_xlim(OUTER_SCALP_DEPTH_MM, BRAIN_RADIUS)
             ax.grid(True, alpha=0.3, which="both")
             add_plot_legends(ax)
             fig.tight_layout()
-            filename_parts = ["all_modalities_depth_mean"]
+            filename_parts = ["all_modalities_depth", filename_metric]
             if suffix is not None:
                 filename_parts.append(suffix)
             filename_parts.extend([scaling, scale])
@@ -615,7 +877,7 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
                 bbox_inches="tight",
             )
             if scaling == DEFAULT_SCALING:
-                alias_parts = ["all_modalities_depth_mean"]
+                alias_parts = ["all_modalities_depth", filename_metric]
                 if suffix is not None:
                     alias_parts.append(suffix)
                 alias_parts.append(scale)
@@ -626,8 +888,118 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
                 )
             plt.close(fig)
 
-    plot_combined(normalized=False)
-    plot_combined(normalized=True)
+    for aggregation in ("mean", "total"):
+        plot_combined(normalized=False, aggregation=aggregation)
+        plot_combined(normalized=True, aggregation=aggregation)
+
+
+def plot_combined_capacity_attribution_profiles(paths: list[Path], scaling: str) -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    loaded = []
+    for path in paths:
+        data = np.load(path, allow_pickle=True)
+        params = json.loads(str(data["params_json"]))
+        name = params["modality"]
+        loaded.append(
+            (
+                COMPARISON_LABELS.get(name, name),
+                data["depth_bin_centers_mm"],
+                data["depth_mean_bits"],
+                data["depth_bin_count"],
+            )
+        )
+
+    def plot_combined(normalized: bool, aggregation: str) -> None:
+        if aggregation == "mean":
+            title_base = "SVD capacity attribution"
+            y_base = "Mean attributed capacity"
+            filename_metric = "mean"
+        elif aggregation == "total":
+            title_base = "SVD capacity attribution"
+            y_base = "Attributed capacity"
+            filename_metric = "total"
+        else:
+            raise ValueError(f"Unknown aggregation {aggregation!r}")
+
+        for scale in ("linear", "log"):
+            fig, ax = plt.subplots(figsize=(8.8, 5.2))
+            add_anatomy_depth_bands(ax)
+            for label, x, mean_values, counts in loaded:
+                if aggregation == "mean":
+                    y = mean_values.copy()
+                else:
+                    y = mean_values * counts
+                if normalized:
+                    y, _ = normalize_to_first_in_brain_value(x, y)
+                if scale == "log":
+                    y = np.where(y > 0, y, np.nan)
+                ax.plot(
+                    x,
+                    y,
+                    marker="o",
+                    markersize=3.8,
+                    linewidth=2.0,
+                    label=label,
+                    color=MODALITY_COLORS.get(label),
+                )
+
+            if normalized:
+                if scale == "log":
+                    ax.set_yscale("log")
+                    ax.set_ylabel(f"Relative {y_base.lower()} (first bin = 1, log scale)")
+                else:
+                    ax.set_ylabel(f"Relative {y_base.lower()} (first bin = 1)")
+                title = f"Relative {title_base} by radial depth"
+                suffix = "normalized"
+            else:
+                if scale == "log":
+                    ax.set_yscale("log")
+                    if aggregation == "mean":
+                        ax.set_ylabel(
+                            "Mean attributed capacity (bits/sample/voxel, log scale)"
+                        )
+                    else:
+                        ax.set_ylabel(
+                            "Attributed capacity (bits/sample/depth bin, log scale)"
+                        )
+                else:
+                    if aggregation == "mean":
+                        ax.set_ylabel("Mean attributed capacity (bits/sample/voxel)")
+                    else:
+                        ax.set_ylabel("Attributed capacity (bits/sample/depth bin)")
+                title = f"{title_base} by radial depth"
+                suffix = None
+
+            ax.set_xlabel("Radial position relative to brain surface (mm)")
+            ax.set_title(f"{title} ({SCALING_LABELS.get(scaling, scaling)} scaling)", pad=14)
+            ax.set_xlim(OUTER_SCALP_DEPTH_MM, BRAIN_RADIUS)
+            ax.grid(True, alpha=0.3, which="both")
+            add_plot_legends(ax)
+            fig.tight_layout()
+            filename_parts = ["all_modalities_depth_capacity", filename_metric]
+            if suffix is not None:
+                filename_parts.append(suffix)
+            filename_parts.extend([scaling, scale])
+            fig.savefig(
+                OUT_DIR / f"{'_'.join(filename_parts)}.png",
+                dpi=180,
+                bbox_inches="tight",
+            )
+            if scaling == DEFAULT_SCALING:
+                alias_parts = ["all_modalities_depth_capacity", filename_metric]
+                if suffix is not None:
+                    alias_parts.append(suffix)
+                alias_parts.append(scale)
+                fig.savefig(
+                    OUT_DIR / f"{'_'.join(alias_parts)}.png",
+                    dpi=180,
+                    bbox_inches="tight",
+                )
+            plt.close(fig)
+
+    for aggregation in ("mean", "total"):
+        plot_combined(normalized=False, aggregation=aggregation)
+        plot_combined(normalized=True, aggregation=aggregation)
 
 
 def save_result(
@@ -642,13 +1014,13 @@ def save_result(
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     d = depth_mm(positions)
     profile = summarize_by_depth(d, info_bits, depth_bin_width_mm)
-    out_path = OUT_DIR / f"{name}_posterior_info.npz"
+    scaling = params.get("scaling", DEFAULT_SCALING)
+    out_path = OUT_DIR / f"{name}_posterior_info_{scaling}.npz"
     params_with_context = {
         **params,
         "anatomical_depth_bands_mm": ANATOMICAL_DEPTH_BAND_META,
     }
-    np.savez(
-        out_path,
+    payload = dict(
         positions_mm=positions,
         depth_mm=d,
         info_bits_per_sample=info_bits,
@@ -661,9 +1033,58 @@ def save_result(
         depth_bin_width_mm=depth_bin_width_mm,
         params_json=json.dumps(params_with_context, sort_keys=True),
     )
+    np.savez(out_path, **payload)
+    if scaling == DEFAULT_SCALING:
+        np.savez(OUT_DIR / f"{name}_posterior_info.npz", **payload)
 
-    plot_depth_profile(name, profile)
+    plot_depth_profile(name, profile, scaling)
 
+    return out_path
+
+
+def save_capacity_attribution_result(
+    name: str,
+    positions: np.ndarray,
+    capacity_bits: np.ndarray,
+    singular_values: np.ndarray,
+    mode_bits: np.ndarray,
+    params: dict,
+    depth_bin_width_mm: float,
+) -> Path:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    d = depth_mm(positions)
+    profile = summarize_by_depth(d, capacity_bits, depth_bin_width_mm)
+    scaling = params.get("scaling", DEFAULT_SCALING)
+    out_path = OUT_DIR / f"{name}_capacity_attribution_{scaling}.npz"
+    params_with_context = {
+        **params,
+        "map_kind": "svd_capacity_attribution",
+        "anatomical_depth_bands_mm": ANATOMICAL_DEPTH_BAND_META,
+        "capacity_total_bits_per_sample": float(np.sum(mode_bits)),
+        "attribution_total_bits_per_sample": float(np.sum(capacity_bits)),
+        "capacity_total_bits_per_second": float(
+            np.sum(mode_bits) / TIME_RESOLUTION_S.get(name, 1.0)
+        ),
+        "time_resolution_s": TIME_RESOLUTION_S.get(name),
+    }
+    payload = dict(
+        positions_mm=positions,
+        depth_mm=d,
+        capacity_bits_per_sample=capacity_bits,
+        info_bits_per_sample=capacity_bits,
+        singular_values=singular_values,
+        mode_bits_per_sample=mode_bits,
+        depth_bin_centers_mm=profile["bin_centers_mm"],
+        depth_mean_bits=profile["mean_bits"],
+        depth_median_bits=profile["median_bits"],
+        depth_p90_bits=profile["p90_bits"],
+        depth_bin_count=profile["count"],
+        depth_bin_width_mm=depth_bin_width_mm,
+        params_json=json.dumps(params_with_context, sort_keys=True),
+    )
+    np.savez(out_path, **payload)
+    if scaling == DEFAULT_SCALING:
+        np.savez(OUT_DIR / f"{name}_capacity_attribution.npz", **payload)
     return out_path
 
 
@@ -700,6 +1121,174 @@ def run_meg(
             **scaling_params,
         },
         "posterior_cov_det",
+        depth_bin_width_mm,
+    )
+
+
+def run_meg_capacity_attribution(
+    name: str,
+    n_sensors: int,
+    grid_spacing_mm: float,
+    offset_mm: float,
+    depth_bin_width_mm: float,
+    scaling: str,
+) -> Path:
+    model = get_noise_model(name)
+    physical_noise = compute_detector_noise_std(name, n_sensors=n_sensors, tier="today")
+    A_raw, positions = compute_meg_forward_matrix(n_sensors, grid_spacing_mm, offset_mm)
+    A = A_raw * model.source_amplitude
+    noise, scaling_params = choose_noise(A, name, n_sensors, physical_noise, scaling)
+    capacity_bits, singular_values, mode_bits = capacity_attribution_vector3(
+        A,
+        noise,
+        len(positions),
+    )
+    return save_capacity_attribution_result(
+        name,
+        positions,
+        capacity_bits,
+        singular_values,
+        mode_bits,
+        {
+            "modality": name,
+            "n_sensors": n_sensors,
+            "forward_matrix_shape": list(A.shape),
+            "grid_spacing_mm": grid_spacing_mm,
+            "sensor_offset_mm": offset_mm,
+            "table_default_reference": TABLE_DEFAULTS[name]["reference"],
+            "detector_noise_today": physical_noise,
+            "source_amplitude": model.source_amplitude,
+            "model": (
+                "Sarvas MEG; SVD mode capacity attributed to 3-orientation "
+                "voxels by right-singular-vector energy"
+            ),
+            **scaling_params,
+        },
+        depth_bin_width_mm,
+    )
+
+
+def run_eeg_openmeeg(
+    n_sensors: int,
+    depth_bin_width_mm: float,
+    scaling: str,
+) -> Path:
+    defaults = TABLE_DEFAULTS["eeg_openmeeg"]
+    model = get_noise_model("eeg_openmeeg")
+    if n_sensors != defaults["n_sensors"]:
+        raise ValueError(
+            "The saved OpenMEEG EEG leadfield has "
+            f"{defaults['n_sensors']} sensors; got --eeg-sensors={n_sensors}."
+        )
+    physical_noise = compute_detector_noise_std(
+        "eeg_openmeeg",
+        n_sensors=n_sensors,
+        tier="today",
+    )
+    A_raw, positions = compute_eeg_openmeeg_forward_matrix(
+        defaults["leadfield_path"],
+        defaults["dipoles_path"],
+    )
+    A = A_raw * model.source_amplitude
+    noise, scaling_params = choose_noise(
+        A,
+        "eeg_openmeeg",
+        n_sensors,
+        physical_noise,
+        scaling,
+    )
+    posterior_det, info_bits = posterior_info_vector3(A, noise, len(positions))
+    return save_result(
+        "eeg_openmeeg",
+        positions,
+        info_bits,
+        posterior_det,
+        {
+            "modality": "eeg_openmeeg",
+            "n_sensors": n_sensors,
+            "forward_matrix_shape": list(A.shape),
+            "n_source_locations": int(len(positions)),
+            "n_dipole_orientations_per_location": 3,
+            "grid_spacing_mm": defaults["grid_spacing_mm"],
+            "mesh_resolution_mm": defaults["mesh_resolution_mm"],
+            "mesh_generator": "legacy latitude/longitude sphere mesh",
+            "leadfield_path": defaults["leadfield_path"],
+            "dipoles_path": defaults["dipoles_path"],
+            "table_default_reference": defaults["reference"],
+            "detector_noise_today": physical_noise,
+            "source_amplitude": model.source_amplitude,
+            "source_amplitude_units": model.source_amplitude_units,
+            "model": "OpenMEEG BEM EEG leadfield, 3 dipole orientations per voxel",
+            **reference_svd_metadata(A_raw, defaults["reference"]),
+            **scaling_params,
+        },
+        "posterior_cov_det",
+        depth_bin_width_mm,
+    )
+
+
+def run_eeg_openmeeg_capacity_attribution(
+    n_sensors: int,
+    depth_bin_width_mm: float,
+    scaling: str,
+) -> Path:
+    defaults = TABLE_DEFAULTS["eeg_openmeeg"]
+    model = get_noise_model("eeg_openmeeg")
+    if n_sensors != defaults["n_sensors"]:
+        raise ValueError(
+            "The saved OpenMEEG EEG leadfield has "
+            f"{defaults['n_sensors']} sensors; got --eeg-sensors={n_sensors}."
+        )
+    physical_noise = compute_detector_noise_std(
+        "eeg_openmeeg",
+        n_sensors=n_sensors,
+        tier="today",
+    )
+    A_raw, positions = compute_eeg_openmeeg_forward_matrix(
+        defaults["leadfield_path"],
+        defaults["dipoles_path"],
+    )
+    A = A_raw * model.source_amplitude
+    noise, scaling_params = choose_noise(
+        A,
+        "eeg_openmeeg",
+        n_sensors,
+        physical_noise,
+        scaling,
+    )
+    capacity_bits, singular_values, mode_bits = capacity_attribution_vector3(
+        A,
+        noise,
+        len(positions),
+    )
+    return save_capacity_attribution_result(
+        "eeg_openmeeg",
+        positions,
+        capacity_bits,
+        singular_values,
+        mode_bits,
+        {
+            "modality": "eeg_openmeeg",
+            "n_sensors": n_sensors,
+            "forward_matrix_shape": list(A.shape),
+            "n_source_locations": int(len(positions)),
+            "n_dipole_orientations_per_location": 3,
+            "grid_spacing_mm": defaults["grid_spacing_mm"],
+            "mesh_resolution_mm": defaults["mesh_resolution_mm"],
+            "mesh_generator": "legacy latitude/longitude sphere mesh",
+            "leadfield_path": defaults["leadfield_path"],
+            "dipoles_path": defaults["dipoles_path"],
+            "table_default_reference": defaults["reference"],
+            "detector_noise_today": physical_noise,
+            "source_amplitude": model.source_amplitude,
+            "source_amplitude_units": model.source_amplitude_units,
+            "model": (
+                "OpenMEEG BEM EEG; SVD mode capacity attributed to "
+                "3-orientation voxels by right-singular-vector energy"
+            ),
+            **reference_svd_metadata(A_raw, defaults["reference"]),
+            **scaling_params,
+        },
         depth_bin_width_mm,
     )
 
@@ -772,10 +1361,10 @@ def run_fnirs(
         )
     )
     modality.setup_geometry()
-    A_raw = as_numpy(modality.compute_forward_model())
+    A_transfer = as_numpy(modality.compute_forward_model())
     positions = modality.grid_points
     voxel_volume_mm3 = grid_spacing_mm**3
-    A = np.asarray(A_raw, dtype=np.float64) * model.source_amplitude * voxel_volume_mm3
+    A = np.asarray(A_transfer, dtype=np.float64) * model.source_amplitude
     noise, scaling_params = choose_noise(
         A,
         "fnirs_analytical_cw",
@@ -800,6 +1389,8 @@ def run_fnirs(
             "detector_noise_today": physical_noise,
             "source_amplitude": model.source_amplitude,
             "voxel_volume_mm3": voxel_volume_mm3,
+            "transfer_function_units": "mm^-1",
+            "transfer_function_convention": "voxel-integrated before absorption scaling",
             "model": (
                 "CW fNIRS analytical diffusion sensitivity; scalar absorption "
                 "contrast integrated over each voxel"
@@ -807,6 +1398,68 @@ def run_fnirs(
             **scaling_params,
         },
         "posterior_variance",
+        depth_bin_width_mm,
+    )
+
+
+def run_fnirs_capacity_attribution(
+    n_sensors: int,
+    grid_spacing_mm: float,
+    max_dist_mm: float,
+    depth_bin_width_mm: float,
+    scaling: str,
+) -> Path:
+    model = get_noise_model("fnirs_analytical_cw")
+    physical_noise = compute_detector_noise_std(
+        "fnirs_analytical_cw",
+        n_sensors=n_sensors,
+        tier="today",
+    )
+    modality = fNIRSAnalytical(
+        Parameters(
+            num_sensors=n_sensors,
+            grid_resolution_mm=grid_spacing_mm,
+            max_dist=max_dist_mm,
+        )
+    )
+    modality.setup_geometry()
+    A_transfer = as_numpy(modality.compute_forward_model())
+    positions = modality.grid_points
+    voxel_volume_mm3 = grid_spacing_mm**3
+    A = np.asarray(A_transfer, dtype=np.float64) * model.source_amplitude
+    noise, scaling_params = choose_noise(
+        A,
+        "fnirs_analytical_cw",
+        n_sensors,
+        physical_noise,
+        scaling,
+    )
+    capacity_bits, singular_values, mode_bits = capacity_attribution_scalar(A, noise)
+    return save_capacity_attribution_result(
+        "fnirs_analytical_cw",
+        positions,
+        capacity_bits,
+        singular_values,
+        mode_bits,
+        {
+            "modality": "fnirs_analytical_cw",
+            "n_sensors": n_sensors,
+            "forward_matrix_shape": list(A.shape),
+            "n_unique_source_detector_pairs": int(A.shape[0]),
+            "grid_spacing_mm": grid_spacing_mm,
+            "max_dist_mm": max_dist_mm,
+            "table_default_reference": TABLE_DEFAULTS["fnirs_analytical_cw"]["reference"],
+            "detector_noise_today": physical_noise,
+            "source_amplitude": model.source_amplitude,
+            "voxel_volume_mm3": voxel_volume_mm3,
+            "transfer_function_units": "mm^-1",
+            "transfer_function_convention": "voxel-integrated before absorption scaling",
+            "model": (
+                "CW fNIRS analytical diffusion sensitivity; SVD mode capacity "
+                "attributed to scalar absorption voxels by right-singular-vector energy"
+            ),
+            **scaling_params,
+        },
         depth_bin_width_mm,
     )
 
@@ -834,10 +1487,10 @@ def run_td_fnirs(
         )
     )
     modality.setup_geometry()
-    A_raw = as_numpy(modality.compute_forward_model())
+    A_transfer = as_numpy(modality.compute_forward_model())
     positions = modality.grid_points
     voxel_volume_mm3 = grid_spacing_mm**3
-    A = np.asarray(A_raw, dtype=np.float64) * model.source_amplitude * voxel_volume_mm3
+    A = np.asarray(A_transfer, dtype=np.float64) * model.source_amplitude
     noise, scaling_params = choose_noise(
         A,
         "td_fnirs_analytical",
@@ -865,6 +1518,8 @@ def run_td_fnirs(
             "detector_noise_today": physical_noise,
             "source_amplitude": model.source_amplitude,
             "voxel_volume_mm3": voxel_volume_mm3,
+            "transfer_function_units": "mm^-1",
+            "transfer_function_convention": "voxel-integrated before absorption scaling",
             "model": (
                 "TD-fNIRS analytical semi-infinite diffusion sensitivity; scalar "
                 "absorption contrast integrated over each voxel"
@@ -882,8 +1537,8 @@ def main() -> None:
         "--modalities",
         default="all",
         help=(
-            "Comma-separated subset to compute: eeg, meg_opm, meg_squid, "
-            "fnirs_cw, td_fnirs, or all."
+            "Comma-separated subset to compute: eeg/eeg_openmeeg, "
+            "eeg_homogeneous, meg_opm, meg_squid, fnirs_cw, td_fnirs, or all."
         ),
     )
     parser.add_argument(
@@ -895,12 +1550,13 @@ def main() -> None:
     parser.add_argument(
         "--eeg-sensors",
         type=int,
-        default=TABLE_DEFAULTS["eeg_homogeneous"]["n_sensors"],
+        default=TABLE_DEFAULTS["eeg_openmeeg"]["n_sensors"],
     )
     parser.add_argument(
         "--eeg-grid-spacing-mm",
         type=float,
         default=TABLE_DEFAULTS["eeg_homogeneous"]["grid_spacing_mm"],
+        help="Only affects eeg_homogeneous; eeg_openmeeg uses the saved BEM grid.",
     )
     parser.add_argument(
         "--meg-sensors",
@@ -963,8 +1619,18 @@ def main() -> None:
         choices=SCALING_CHOICES,
         default=DEFAULT_SCALING,
         help=(
-            "empirical matches the web bitrate normalization; physical uses "
-            "raw source-amplitude and detector-noise units"
+            "physical uses raw source-amplitude and detector-noise units; "
+            "empirical normalizes the full forward matrix to observed SNR"
+        ),
+    )
+    parser.add_argument(
+        "--map-kind",
+        choices=MAP_KIND_CHOICES,
+        default="posterior",
+        help=(
+            "posterior computes marginal voxel posterior information; capacity "
+            "attributes SVD mode capacity to voxels so depth-bin totals sum to "
+            "the joint SVD capacity; both computes both families"
         ),
     )
     args = parser.parse_args()
@@ -973,19 +1639,29 @@ def main() -> None:
 
     requested = [item.strip() for item in args.modalities.split(",") if item.strip()]
     selected = []
+    requested_all = False
     for item in requested:
         alias = MODALITY_ALIASES.get(item)
         if alias is None:
             raise ValueError(f"Unknown modality {item!r}; expected one of {sorted(MODALITY_ALIASES)}")
         if alias == "all":
-            selected = list(MODALITY_ORDER)
+            selected = list(DEFAULT_MODALITIES)
+            requested_all = True
             break
         selected.append(alias)
     selected = [name for name in MODALITY_ORDER if name in set(selected)]
 
-    outputs = []
-    if "eeg_homogeneous" in selected:
-        outputs.append(
+    posterior_outputs = []
+    if args.map_kind in ("posterior", "both") and "eeg_openmeeg" in selected:
+        posterior_outputs.append(
+            run_eeg_openmeeg(
+                args.eeg_sensors,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
+        )
+    if args.map_kind in ("posterior", "both") and "eeg_homogeneous" in selected:
+        posterior_outputs.append(
             run_eeg(
                 args.eeg_sensors,
                 eeg_grid_spacing_mm,
@@ -993,8 +1669,8 @@ def main() -> None:
                 args.scaling,
             )
         )
-    if "meg_opm" in selected:
-        outputs.append(
+    if args.map_kind in ("posterior", "both") and "meg_opm" in selected:
+        posterior_outputs.append(
             run_meg(
                 "meg_opm",
                 args.meg_sensors,
@@ -1004,8 +1680,8 @@ def main() -> None:
                 args.scaling,
             )
         )
-    if "meg_squid" in selected:
-        outputs.append(
+    if args.map_kind in ("posterior", "both") and "meg_squid" in selected:
+        posterior_outputs.append(
             run_meg(
                 "meg_squid",
                 args.meg_sensors,
@@ -1015,8 +1691,8 @@ def main() -> None:
                 args.scaling,
             )
         )
-    if "fnirs_analytical_cw" in selected:
-        outputs.append(
+    if args.map_kind in ("posterior", "both") and "fnirs_analytical_cw" in selected:
+        posterior_outputs.append(
             run_fnirs(
                 args.fnirs_sensors,
                 args.fnirs_grid_spacing_mm,
@@ -1025,8 +1701,8 @@ def main() -> None:
                 args.scaling,
             )
         )
-    if "td_fnirs_analytical" in selected:
-        outputs.append(
+    if args.map_kind in ("posterior", "both") and "td_fnirs_analytical" in selected:
+        posterior_outputs.append(
             run_td_fnirs(
                 args.td_fnirs_sensors,
                 args.td_fnirs_grid_spacing_mm,
@@ -1036,9 +1712,68 @@ def main() -> None:
                 args.scaling,
             )
         )
-    plot_combined_depth_profiles(outputs, args.scaling)
+    if posterior_outputs:
+        plot_combined_depth_profiles(posterior_outputs, args.scaling)
+
+    capacity_selected = list(selected)
+    if requested_all:
+        capacity_selected = list(CAPACITY_ATTRIBUTION_DEFAULT_MODALITIES)
+    elif (
+        args.map_kind in ("capacity", "both")
+        and "td_fnirs_analytical" in capacity_selected
+    ):
+        raise NotImplementedError(
+            "Exact TD-fNIRS capacity attribution requires a large dense right-SVD "
+            "that is disabled in the local default path. Use CW-fNIRS or run TD "
+            "on a larger compute host."
+        )
+
+    capacity_outputs = []
+    if args.map_kind in ("capacity", "both") and "eeg_openmeeg" in capacity_selected:
+        capacity_outputs.append(
+            run_eeg_openmeeg_capacity_attribution(
+                args.eeg_sensors,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
+        )
+    if args.map_kind in ("capacity", "both") and "meg_opm" in capacity_selected:
+        capacity_outputs.append(
+            run_meg_capacity_attribution(
+                "meg_opm",
+                args.meg_sensors,
+                meg_grid_spacing_mm,
+                args.meg_opm_offset_mm,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
+        )
+    if args.map_kind in ("capacity", "both") and "meg_squid" in capacity_selected:
+        capacity_outputs.append(
+            run_meg_capacity_attribution(
+                "meg_squid",
+                args.meg_sensors,
+                meg_grid_spacing_mm,
+                args.meg_squid_offset_mm,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
+        )
+    if args.map_kind in ("capacity", "both") and "fnirs_analytical_cw" in capacity_selected:
+        capacity_outputs.append(
+            run_fnirs_capacity_attribution(
+                args.fnirs_sensors,
+                args.fnirs_grid_spacing_mm,
+                args.fnirs_max_dist_mm,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
+        )
+    if capacity_outputs:
+        plot_combined_capacity_attribution_profiles(capacity_outputs, args.scaling)
+
     print("Wrote:")
-    for path in outputs:
+    for path in posterior_outputs + capacity_outputs:
         print(f"  {path}")
 
 

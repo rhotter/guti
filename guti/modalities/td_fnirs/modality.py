@@ -94,8 +94,11 @@ class TDfNIRSAnalytical(ImagingModality):
         -------
         np.ndarray
             Sensitivity matrix of shape (n_valid_pairs * n_time_gates, n_grid_points)
-            where each element J[i,j] is the sensitivity of measurement i
-            to absorption changes at grid point j.
+            where each element J[i,j] is the voxel-integrated transfer function
+            from absorption change at grid point j to measurement i. The
+            underlying analytical sensitivity is a density sampled in mm
+            coordinates; multiplying by voxel volume makes the returned
+            transfer function have units of mm^-1.
 
             The rows are organized as:
             [pair_0_gate_0, pair_0_gate_1, ..., pair_0_gate_N,
@@ -149,8 +152,12 @@ class TDfNIRSAnalytical(ImagingModality):
         # So transpose to (n_pairs, n_gates, n_points) then reshape
         stacked = stacked.permute(1, 0, 2)  # (n_pairs, n_gates, n_points)
         result = stacked.reshape(n_pairs * n_gates, n_points)
+        voxel_volume_mm3 = float(self.params.grid_resolution_mm) ** 3
+        self.params.forward_model_convention = "voxel_integrated_transfer"
+        self.params.forward_model_units = "mm^-1"
+        self.params.voxel_volume_mm3 = voxel_volume_mm3
 
-        return result.cpu().numpy()
+        return (result * voxel_volume_mm3).cpu().numpy()
 
 
 if __name__ == "__main__":

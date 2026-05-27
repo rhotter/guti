@@ -250,6 +250,54 @@ _US_REFLECTIVITY = 0.01  # dimensionless
 # fNIRS absorption change
 _FNIRS_DELTA_MUA = 0.002  # mm⁻¹
 
+# fMRI reconstructed-BOLD model.
+#
+# We model the measurement as fractional BOLD signal.  A typical task-evoked
+# BOLD contrast is ~1%, and temporal SNR for whole-brain 3 mm voxels at 3T is
+# often O(50-100).  The "fundamental" tier here should be read as a high-quality
+# physiological-noise-limited reference, not as a thermodynamic MRI limit.
+_FMRI_REF_VOXEL_SIZE_MM = 3.0
+_FMRI_REF_TR_S = 2.0
+_FMRI_BOLD_CONTRAST = 0.01
+_FMRI_TODAY_TSNR = 80.0
+_FMRI_HIGH_QUALITY_TSNR = 200.0
+_FMRI_TODAY_BOLD_SNR = _FMRI_BOLD_CONTRAST * _FMRI_TODAY_TSNR
+_FMRI_HIGH_QUALITY_BOLD_SNR = _FMRI_BOLD_CONTRAST * _FMRI_HIGH_QUALITY_TSNR
+_FMRI_TODAY_REL_NOISE = _FMRI_BOLD_CONTRAST / _FMRI_TODAY_BOLD_SNR
+_FMRI_HIGH_QUALITY_REL_NOISE = _FMRI_BOLD_CONTRAST / _FMRI_HIGH_QUALITY_BOLD_SNR
+
+
+def _fmri_relative_noise(
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
+    tier: str = "today",
+) -> float:
+    """Relative BOLD noise for a voxel and TR.
+
+    If ``bold_snr`` is supplied, it directly specifies response SNR:
+    ``bold_contrast / noise``.  Otherwise we use a tSNR-derived fallback that
+    scales with voxel volume and sqrt(TR).
+    """
+    contrast = bold_contrast if bold_contrast is not None else _FMRI_BOLD_CONTRAST
+    if bold_snr is not None:
+        return contrast / bold_snr
+
+    if tier == "fundamental":
+        return _FMRI_HIGH_QUALITY_REL_NOISE
+
+    voxel = voxel_size_mm if voxel_size_mm is not None else _FMRI_REF_VOXEL_SIZE_MM
+    tr = tr_s if tr_s is not None else _FMRI_REF_TR_S
+
+    thermal_ref = math.sqrt(
+        max(_FMRI_TODAY_REL_NOISE**2 - _FMRI_HIGH_QUALITY_REL_NOISE**2, 0.0)
+    )
+    volume_factor = (_FMRI_REF_VOXEL_SIZE_MM / voxel) ** 3
+    tr_factor = math.sqrt(_FMRI_REF_TR_S / tr)
+    thermal = thermal_ref * volume_factor * tr_factor
+    return math.sqrt(thermal**2 + _FMRI_HIGH_QUALITY_REL_NOISE**2)
+
 
 NOISE_MODELS = {
     "eeg_openmeeg": NoiseModel(
@@ -363,6 +411,27 @@ NOISE_MODELS = {
             "Fundamental: ANSI max power ~35 mW at 830 nm."
         ),
     ),
+    "fmri_bold": NoiseModel(
+        canonical_name="fmri_bold",
+        noise_source="Thermal/reconstruction noise plus physiological BOLD fluctuations",
+        measurement_units="fractional BOLD signal",
+        reference_sensor_count=40_000,
+        sensor_count_noise_exponent=0.0,
+        reference_bandwidth_hz=1.0 / _FMRI_REF_TR_S,
+        today_best_noise=_FMRI_TODAY_REL_NOISE,
+        physical_floor_noise=_FMRI_HIGH_QUALITY_REL_NOISE,
+        source_amplitude=_FMRI_BOLD_CONTRAST,
+        source_amplitude_units="fractional BOLD contrast",
+        typical_signal_amplitude=0.0,
+        reference_total_snr=_FMRI_TODAY_BOLD_SNR,
+        notes=(
+            "Reconstructed-BOLD model.  The capacity parameter is BOLD response "
+            "SNR, not raw time-series tSNR.  The default fallback derives "
+            "response SNR=0.8 from 1% BOLD contrast and tSNR=80 for 3 mm voxels "
+            "at TR=2 s; high-quality fallback response SNR=2.0.  This is not a "
+            "Bloch-equation scanner simulator."
+        ),
+    ),
     "us_analytical": NoiseModel(
         canonical_name="us_analytical",
         noise_source="Acoustic thermal (Mellen) + electronic Johnson noise",
@@ -407,6 +476,9 @@ def canonicalize_modality_name(modality_name: str) -> str:
     if modality_name.startswith("fnirs_analytical"):
         return "fnirs_analytical_cw"
 
+    if modality_name.startswith("fmri"):
+        return "fmri_bold"
+
     raise KeyError(f"No noise model registered for modality '{modality_name}'")
 
 
@@ -424,6 +496,10 @@ def compute_detector_noise_std(
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
     Noise std per sensor in SI measurement units, scaled from reference
@@ -446,6 +522,15 @@ def compute_detector_noise_std(
         freq = frequency_hz if frequency_hz is not None else _US_DEFAULT_CENTER_FREQ
         return _us_total_noise_fwd(freq, n_sensors=n)
 
+    if canon == "fmri_bold":
+        return _fmri_relative_noise(
+            voxel_size_mm=voxel_size_mm,
+            tr_s=tr_s,
+            bold_contrast=bold_contrast,
+            bold_snr=bold_snr,
+            tier=tier,
+        )
+
     base_noise = (
         model.today_best_noise if tier == "today" else model.physical_floor_noise
     )
@@ -465,6 +550,10 @@ def compute_noise_effective(
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
     Effective noise in forward-model units: detector_noise / source_amplitude.
@@ -483,9 +572,44 @@ def compute_noise_effective(
     model = NOISE_MODELS[canon]
     detector_noise = compute_detector_noise_std(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
+        tier=tier, frequency_hz=frequency_hz, voxel_size_mm=voxel_size_mm, tr_s=tr_s,
+        bold_contrast=bold_contrast, bold_snr=bold_snr,
     )
-    return detector_noise / model.source_amplitude
+    source_amplitude = (
+        bold_contrast
+        if canon == "fmri_bold" and bold_contrast is not None
+        else model.source_amplitude
+    )
+    return detector_noise / source_amplitude
+
+
+def capacity_forward_gain_scale(
+    modality_name: str,
+    params=None,
+    voxel_size_mm: float | None = None,
+) -> float:
+    """Scale raw saved singular values into capacity forward-model units.
+
+    Saved fNIRS transfer matrices are voxel-integrated before SVD, so no hidden
+    voxel-volume correction is applied in the SNR/capacity path.  This helper is
+    kept as a single hook for future modalities that may need a convention
+    conversion at export time.
+    """
+    return 1.0
+
+
+def scale_singular_values_for_capacity(
+    s: np.ndarray,
+    modality_name: str,
+    params=None,
+    voxel_size_mm: float | None = None,
+) -> np.ndarray:
+    """Apply modality-specific gain scaling before a capacity calculation."""
+    return np.asarray(s) * capacity_forward_gain_scale(
+        modality_name,
+        params=params,
+        voxel_size_mm=voxel_size_mm,
+    )
 
 
 def compute_empirical_snr(
@@ -494,6 +618,10 @@ def compute_empirical_snr(
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
     SNR derived from empirically observed signal amplitudes.
@@ -508,7 +636,8 @@ def compute_empirical_snr(
         raise ValueError(f"No typical_signal_amplitude set for '{modality_name}'")
     detector_noise = compute_detector_noise_std(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
+        tier=tier, frequency_hz=frequency_hz, voxel_size_mm=voxel_size_mm, tr_s=tr_s,
+        bold_contrast=bold_contrast, bold_snr=bold_snr,
     )
     return model.typical_signal_amplitude / detector_noise
 
@@ -520,6 +649,10 @@ def compute_noise_empirical(
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
     Noise floor in SVD units anchored to empirically observed signal amplitudes.
@@ -533,7 +666,8 @@ def compute_noise_empirical(
     """
     snr = compute_empirical_snr(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
+        tier=tier, frequency_hz=frequency_hz, voxel_size_mm=voxel_size_mm, tr_s=tr_s,
+        bold_contrast=bold_contrast, bold_snr=bold_snr,
     )
     return noise_floor_from_total_snr(s, snr)
 
