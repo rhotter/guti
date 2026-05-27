@@ -1,11 +1,18 @@
 import unittest
 
 import numpy as np
+import torch
 
 from compute_information_maps import (
     empirical_noise_for_matrix,
     posterior_info_scalar,
     posterior_info_vector3,
+)
+from guti.modalities.fnirs_analytical.utils import (
+    get_valid_source_detector_pairs as get_cw_pairs,
+)
+from guti.modalities.td_fnirs.utils import (
+    get_valid_source_detector_pairs as get_td_pairs,
 )
 
 
@@ -47,6 +54,27 @@ class InformationMapMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(meta_a["empirical_snr"], meta_b["empirical_snr"])
         np.testing.assert_allclose(A / noise_a, (37.0 * A) / noise_b, atol=1e-12)
+
+    def test_fnirs_helpers_return_unique_source_detector_pairs(self):
+        sensors = torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+            ]
+        )
+
+        cw_sources, cw_detectors = get_cw_pairs(sensors, max_dist=1.5)
+        self.assertEqual(cw_sources.shape[0], 2)
+        self.assertEqual(cw_detectors.shape[0], 2)
+
+        td_sources, _, td_detectors, _ = get_td_pairs(
+            sensors,
+            max_dist=1.5,
+            head_center=torch.tensor([0.0, 0.0, -1.0]),
+        )
+        self.assertEqual(td_sources.shape[0], 2)
+        self.assertEqual(td_detectors.shape[0], 2)
 
 
 if __name__ == "__main__":

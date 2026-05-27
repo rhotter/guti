@@ -39,6 +39,7 @@ from guti.core import (
     get_sensor_positions,
 )
 from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
+from guti.modalities.td_fnirs.modality import TDfNIRSAnalytical
 from guti.noise_models import (
     compute_detector_noise_std,
     compute_empirical_snr,
@@ -58,12 +59,14 @@ COMPARISON_LABELS = {
     "meg_opm": "MEG OPM",
     "meg_squid": "MEG SQUID",
     "fnirs_analytical_cw": "fNIRS CW",
+    "td_fnirs_analytical": "TD-fNIRS",
 }
 MODALITY_COLORS = {
     "EEG homogeneous": "#2563eb",
     "MEG OPM": "#ea580c",
     "MEG SQUID": "#16a34a",
     "fNIRS CW": "#dc2626",
+    "TD-fNIRS": "#9333ea",
 }
 ANATOMICAL_DEPTH_BANDS = [
     {
@@ -606,6 +609,70 @@ def run_fnirs(
     )
 
 
+def run_td_fnirs(
+    n_sensors: int,
+    grid_spacing_mm: float,
+    max_dist_mm: float,
+    n_time_gates: int,
+    depth_bin_width_mm: float,
+    scaling: str,
+) -> Path:
+    model = get_noise_model("td_fnirs_analytical")
+    physical_noise = compute_detector_noise_std(
+        "td_fnirs_analytical",
+        n_sensors=n_sensors,
+        tier="today",
+    )
+    modality = TDfNIRSAnalytical(
+        Parameters(
+            num_sensors=n_sensors,
+            grid_resolution_mm=grid_spacing_mm,
+            max_dist=max_dist_mm,
+            n_time_gates=n_time_gates,
+        )
+    )
+    modality.setup_geometry()
+    A_raw = as_numpy(modality.compute_forward_model())
+    positions = modality.grid_points
+    voxel_volume_mm3 = grid_spacing_mm**3
+    A = np.asarray(A_raw, dtype=np.float64) * model.source_amplitude * voxel_volume_mm3
+    noise, scaling_params = choose_noise(
+        A,
+        "td_fnirs_analytical",
+        n_sensors,
+        physical_noise,
+        scaling,
+    )
+    posterior_var, info_bits = posterior_info_scalar(A, noise)
+    n_pairs = int(A.shape[0] // max(n_time_gates, 1))
+    return save_result(
+        "td_fnirs_analytical",
+        positions,
+        info_bits,
+        posterior_var,
+        {
+            "modality": "td_fnirs_analytical",
+            "n_sensors": n_sensors,
+            "forward_matrix_shape": list(A.shape),
+            "n_unique_source_detector_pairs": n_pairs,
+            "n_time_gates": n_time_gates,
+            "time_gates_ns": list(map(float, modality.time_gates_ns)),
+            "grid_spacing_mm": grid_spacing_mm,
+            "max_dist_mm": max_dist_mm,
+            "detector_noise_today": physical_noise,
+            "source_amplitude": model.source_amplitude,
+            "voxel_volume_mm3": voxel_volume_mm3,
+            "model": (
+                "TD-fNIRS analytical semi-infinite diffusion sensitivity; scalar "
+                "absorption contrast integrated over each voxel"
+            ),
+            **scaling_params,
+        },
+        "posterior_variance",
+        depth_bin_width_mm,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--grid-spacing-mm", type=float, default=10.0)
@@ -614,6 +681,7 @@ def main() -> None:
     parser.add_argument("--fnirs-sensors", type=int, default=100)
     parser.add_argument("--fnirs-grid-spacing-mm", type=float, default=6.0)
     parser.add_argument("--fnirs-max-dist-mm", type=float, default=50.0)
+    parser.add_argument("--td-fnirs-gates", type=int, default=6)
     parser.add_argument("--depth-bin-width-mm", type=float, default=2.0)
     parser.add_argument(
         "--scaling",
@@ -660,6 +728,16 @@ def main() -> None:
             args.fnirs_sensors,
             args.fnirs_grid_spacing_mm,
             args.fnirs_max_dist_mm,
+            args.depth_bin_width_mm,
+            args.scaling,
+        )
+    )
+    outputs.append(
+        run_td_fnirs(
+            args.fnirs_sensors,
+            args.fnirs_grid_spacing_mm,
+            args.fnirs_max_dist_mm,
+            args.td_fnirs_gates,
             args.depth_bin_width_mm,
             args.scaling,
         )
