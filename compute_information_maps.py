@@ -442,6 +442,23 @@ def summarize_by_depth(depth: np.ndarray, info_bits: np.ndarray, bin_width_mm: f
     }
 
 
+def normalize_to_first_in_brain_value(
+    x: np.ndarray,
+    values: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Normalize a depth profile to the first finite positive in-brain value."""
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(values, dtype=np.float64)
+    valid = np.isfinite(y) & (y > 0) & (x >= 0)
+    if not np.any(valid):
+        valid = np.isfinite(y) & (y > 0)
+    if not np.any(valid):
+        return np.full_like(y, np.nan, dtype=np.float64), np.nan
+
+    reference = float(y[np.flatnonzero(valid)[0]])
+    return y / reference, reference
+
+
 def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
     x = profile["bin_centers_mm"]
     series = [
@@ -545,47 +562,72 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
             )
         )
 
-    for scale in ("linear", "log"):
-        fig, ax = plt.subplots(figsize=(8.8, 5.2))
-        add_anatomy_depth_bands(ax)
-        for label, x, values in loaded:
-            y = values.copy()
-            if scale == "log":
-                y = np.where(y > 0, y, np.nan)
-            ax.plot(
-                x,
-                y,
-                marker="o",
-                markersize=3.8,
-                linewidth=2.0,
-                label=label,
-                color=MODALITY_COLORS.get(label),
-            )
+    def plot_combined(normalized: bool) -> None:
+        for scale in ("linear", "log"):
+            fig, ax = plt.subplots(figsize=(8.8, 5.2))
+            add_anatomy_depth_bands(ax)
+            for label, x, values in loaded:
+                y = values.copy()
+                if normalized:
+                    y, _ = normalize_to_first_in_brain_value(x, y)
+                if scale == "log":
+                    y = np.where(y > 0, y, np.nan)
+                ax.plot(
+                    x,
+                    y,
+                    marker="o",
+                    markersize=3.8,
+                    linewidth=2.0,
+                    label=label,
+                    color=MODALITY_COLORS.get(label),
+                )
 
-        if scale == "log":
-            ax.set_yscale("log")
-            ax.set_ylabel("Mean information (bits/sample/voxel, log scale)")
-        else:
-            ax.set_ylabel("Mean information (bits/sample/voxel)")
+            if normalized:
+                if scale == "log":
+                    ax.set_yscale("log")
+                    ax.set_ylabel("Relative mean information (first bin = 1, log scale)")
+                else:
+                    ax.set_ylabel("Relative mean information (first bin = 1)")
+                title = "Relative posterior information by radial depth"
+                suffix = "normalized"
+            else:
+                if scale == "log":
+                    ax.set_yscale("log")
+                    ax.set_ylabel("Mean information (bits/sample/voxel, log scale)")
+                else:
+                    ax.set_ylabel("Mean information (bits/sample/voxel)")
+                title = "Posterior information by radial depth"
+                suffix = None
 
-        ax.set_xlabel("Radial position relative to brain surface (mm)")
-        ax.set_title(f"Posterior information by radial depth ({scaling} scaling)", pad=14)
-        ax.set_xlim(OUTER_SCALP_DEPTH_MM, BRAIN_RADIUS)
-        ax.grid(True, alpha=0.3, which="both")
-        add_plot_legends(ax)
-        fig.tight_layout()
-        fig.savefig(
-            OUT_DIR / f"all_modalities_depth_mean_{scaling}_{scale}.png",
-            dpi=180,
-            bbox_inches="tight",
-        )
-        if scaling == DEFAULT_SCALING:
+            ax.set_xlabel("Radial position relative to brain surface (mm)")
+            ax.set_title(f"{title} ({scaling} scaling)", pad=14)
+            ax.set_xlim(OUTER_SCALP_DEPTH_MM, BRAIN_RADIUS)
+            ax.grid(True, alpha=0.3, which="both")
+            add_plot_legends(ax)
+            fig.tight_layout()
+            filename_parts = ["all_modalities_depth_mean"]
+            if suffix is not None:
+                filename_parts.append(suffix)
+            filename_parts.extend([scaling, scale])
             fig.savefig(
-                OUT_DIR / f"all_modalities_depth_mean_{scale}.png",
+                OUT_DIR / f"{'_'.join(filename_parts)}.png",
                 dpi=180,
                 bbox_inches="tight",
             )
-        plt.close(fig)
+            if scaling == DEFAULT_SCALING:
+                alias_parts = ["all_modalities_depth_mean"]
+                if suffix is not None:
+                    alias_parts.append(suffix)
+                alias_parts.append(scale)
+                fig.savefig(
+                    OUT_DIR / f"{'_'.join(alias_parts)}.png",
+                    dpi=180,
+                    bbox_inches="tight",
+                )
+            plt.close(fig)
+
+    plot_combined(normalized=False)
+    plot_combined(normalized=True)
 
 
 def save_result(

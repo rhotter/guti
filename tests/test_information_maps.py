@@ -6,6 +6,7 @@ import torch
 from compute_information_maps import (
     compute_meg_forward_matrix,
     empirical_noise_for_matrix,
+    normalize_to_first_in_brain_value,
     posterior_info_scalar,
     posterior_info_vector3,
 )
@@ -68,6 +69,15 @@ class InformationMapMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(meta_a["empirical_snr"], meta_b["empirical_snr"])
         np.testing.assert_allclose(A / noise_a, (37.0 * A) / noise_b, atol=1e-12)
+
+    def test_normalize_to_first_in_brain_value_uses_first_positive_depth(self):
+        x = np.array([-1.0, 1.0, 3.0, 5.0])
+        y = np.array([10.0, 2.0, 1.0, 0.5])
+
+        normalized, reference = normalize_to_first_in_brain_value(x, y)
+
+        self.assertEqual(reference, 2.0)
+        np.testing.assert_allclose(normalized, [5.0, 1.0, 0.5, 0.25])
 
     def test_vectorized_meg_forward_matches_sarvas_blocks(self):
         n_sensors = 2
