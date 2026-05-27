@@ -30,7 +30,14 @@ from matplotlib.patches import Patch, Rectangle
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
-from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
+from guti.core import (
+    BRAIN_RADIUS,
+    CSF_RADIUS,
+    SCALP_RADIUS,
+    SKULL_RADIUS,
+    get_grid_positions,
+    get_sensor_positions,
+)
 from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
 from guti.noise_models import (
     compute_detector_noise_std,
@@ -43,6 +50,7 @@ from recompute_meg_variants import compute_forward_matrix as compute_meg_forward
 
 OUT_DIR = Path("results/information_maps")
 HEAD_CENTER = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
+OUTER_SCALP_DEPTH_MM = BRAIN_RADIUS - SCALP_RADIUS
 SCALING_CHOICES = ("empirical", "physical")
 DEFAULT_SCALING = "empirical"
 COMPARISON_LABELS = {
@@ -58,6 +66,24 @@ MODALITY_COLORS = {
     "fNIRS CW": "#dc2626",
 }
 ANATOMICAL_DEPTH_BANDS = [
+    {
+        "label": "scalp / skin",
+        "start_mm": float(BRAIN_RADIUS - SCALP_RADIUS),
+        "end_mm": float(BRAIN_RADIUS - SKULL_RADIUS),
+        "color": "#f5d7b5",
+    },
+    {
+        "label": "skull",
+        "start_mm": float(BRAIN_RADIUS - SKULL_RADIUS),
+        "end_mm": float(BRAIN_RADIUS - CSF_RADIUS),
+        "color": "#d7c2a6",
+    },
+    {
+        "label": "CSF / meninges",
+        "start_mm": float(BRAIN_RADIUS - CSF_RADIUS),
+        "end_mm": 0.0,
+        "color": "#b7d7ea",
+    },
     {
         "label": "cortex",
         "start_mm": 0.0,
@@ -278,9 +304,9 @@ def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
         else:
             ax.set_ylabel("Information (bits/sample/voxel)")
 
-        ax.set_xlabel("Depth from brain surface (mm)")
+        ax.set_xlabel("Radial position relative to brain surface (mm; negative = outside brain)")
         ax.set_title(f"{name}: information by radial depth", pad=34)
-        ax.set_xlim(0, BRAIN_RADIUS)
+        ax.set_xlim(OUTER_SCALP_DEPTH_MM, BRAIN_RADIUS)
         ax.grid(True, alpha=0.3, which="both")
         add_plot_legends(ax)
         fig.tight_layout()
@@ -326,25 +352,27 @@ def add_anatomy_depth_bands(ax) -> None:
             )
         )
 
-        label = f"{band['label']}\n{start:g}-{end:g} mm"
-        ax.text(
-            start + width / 2,
-            1.045,
-            label,
-            transform=xaxis_transform,
-            ha="center",
-            va="center",
-            rotation=90 if width < 8 else 0,
-            fontsize=8.0 if width < 8 else 8.7,
-            color="#111827",
-            clip_on=False,
-            zorder=6,
-        )
+        if width >= 5:
+            label = f"{band['label']}\n{start:g}-{end:g} mm"
+            ax.text(
+                start + width / 2,
+                1.045,
+                label,
+                transform=xaxis_transform,
+                ha="center",
+                va="center",
+                rotation=90 if width < 8 else 0,
+                fontsize=8.0 if width < 8 else 8.7,
+                color="#111827",
+                clip_on=False,
+                zorder=6,
+            )
 
+    ax.axvline(0, color="#111827", linewidth=1.3, alpha=0.75, zorder=1)
     ax.text(
         1.0,
-        -0.34,
-        "Anatomical bands are approximate radial-depth regions, not segmented anatomy.",
+        -0.38,
+        "Negative depths are outside brain. Bands are approximate spherical head layers, not segmented anatomy.",
         transform=ax.transAxes,
         ha="right",
         va="top",
@@ -367,7 +395,7 @@ def add_plot_legends(ax) -> None:
         bbox_to_anchor=(0.5, -0.18),
         ncol=3,
         frameon=False,
-        fontsize=8.5,
+        fontsize=8.0,
         columnspacing=1.2,
         handlelength=1.6,
     )
@@ -411,9 +439,9 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
         else:
             ax.set_ylabel("Mean information (bits/sample/voxel)")
 
-        ax.set_xlabel("Depth from brain surface (mm)")
+        ax.set_xlabel("Radial position relative to brain surface (mm; negative = outside brain)")
         ax.set_title(f"Posterior information by radial depth ({scaling} scaling)", pad=34)
-        ax.set_xlim(0, BRAIN_RADIUS)
+        ax.set_xlim(OUTER_SCALP_DEPTH_MM, BRAIN_RADIUS)
         ax.grid(True, alpha=0.3, which="both")
         add_plot_legends(ax)
         fig.tight_layout()
