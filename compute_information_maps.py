@@ -120,7 +120,7 @@ def posterior_info_vector3(
     return posterior_det, info_bits
 
 
-def summarize_by_depth(depth: np.ndarray, info_bits: np.ndarray, bin_width_mm: float = 5.0):
+def summarize_by_depth(depth: np.ndarray, info_bits: np.ndarray, bin_width_mm: float):
     bins = np.arange(0, BRAIN_RADIUS + bin_width_mm, bin_width_mm)
     centers = 0.5 * (bins[:-1] + bins[1:])
     mean = np.full_like(centers, np.nan, dtype=np.float64)
@@ -144,6 +144,39 @@ def summarize_by_depth(depth: np.ndarray, info_bits: np.ndarray, bin_width_mm: f
     }
 
 
+def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
+    x = profile["bin_centers_mm"]
+    series = [
+        ("mean", profile["mean_bits"]),
+        ("median", profile["median_bits"]),
+        ("p90", profile["p90_bits"]),
+    ]
+
+    for scale in ("linear", "log"):
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for label, values in series:
+            y = values.copy()
+            if scale == "log":
+                y = np.where(y > 0, y, np.nan)
+            ax.plot(x, y, marker="o", markersize=3, linewidth=1.4, label=label)
+
+        if scale == "log":
+            ax.set_yscale("log")
+            ax.set_ylabel("Information (bits/sample/voxel, log scale)")
+        else:
+            ax.set_ylabel("Information (bits/sample/voxel)")
+
+        ax.set_xlabel("Depth from brain surface (mm)")
+        ax.set_title(name)
+        ax.grid(True, alpha=0.3, which="both")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(OUT_DIR / f"{name}_depth_profile_{scale}.png", dpi=180)
+        if scale == "linear":
+            fig.savefig(OUT_DIR / f"{name}_depth_profile.png", dpi=180)
+        plt.close(fig)
+
+
 def save_result(
     name: str,
     positions: np.ndarray,
@@ -151,10 +184,11 @@ def save_result(
     posterior_measure: np.ndarray,
     params: dict,
     posterior_measure_name: str,
+    depth_bin_width_mm: float,
 ) -> Path:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     d = depth_mm(positions)
-    profile = summarize_by_depth(d, info_bits)
+    profile = summarize_by_depth(d, info_bits, depth_bin_width_mm)
     out_path = OUT_DIR / f"{name}_posterior_info.npz"
     np.savez(
         out_path,
@@ -167,26 +201,22 @@ def save_result(
         depth_median_bits=profile["median_bits"],
         depth_p90_bits=profile["p90_bits"],
         depth_bin_count=profile["count"],
+        depth_bin_width_mm=depth_bin_width_mm,
         params_json=json.dumps(params, sort_keys=True),
     )
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(profile["bin_centers_mm"], profile["mean_bits"], label="mean")
-    ax.plot(profile["bin_centers_mm"], profile["median_bits"], label="median")
-    ax.plot(profile["bin_centers_mm"], profile["p90_bits"], label="p90")
-    ax.set_xlabel("Depth from brain surface (mm)")
-    ax.set_ylabel("Information (bits/sample/voxel)")
-    ax.set_title(name)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(OUT_DIR / f"{name}_depth_profile.png", dpi=180)
-    plt.close(fig)
+    plot_depth_profile(name, profile)
 
     return out_path
 
 
-def run_meg(name: str, n_sensors: int, grid_spacing_mm: float, offset_mm: float) -> Path:
+def run_meg(
+    name: str,
+    n_sensors: int,
+    grid_spacing_mm: float,
+    offset_mm: float,
+    depth_bin_width_mm: float,
+) -> Path:
     model = get_noise_model(name)
     noise = compute_detector_noise_std(name, n_sensors=n_sensors, tier="today")
     A_raw = compute_meg_forward_matrix(n_sensors, grid_spacing_mm, offset_mm)
@@ -208,10 +238,11 @@ def run_meg(name: str, n_sensors: int, grid_spacing_mm: float, offset_mm: float)
             "model": "Sarvas MEG, 3 dipole orientations per voxel",
         },
         "posterior_cov_det",
+        depth_bin_width_mm,
     )
 
 
-def run_eeg(n_sensors: int, grid_spacing_mm: float) -> Path:
+def run_eeg(n_sensors: int, grid_spacing_mm: float, depth_bin_width_mm: float) -> Path:
     noise = compute_detector_noise_std("eeg_openmeeg", n_sensors=n_sensors, tier="today")
     source_amplitude_a_m = 10e-9
     A_raw, positions = compute_eeg_forward_matrix(n_sensors, grid_spacing_mm)
@@ -231,10 +262,16 @@ def run_eeg(n_sensors: int, grid_spacing_mm: float) -> Path:
             "model": "homogeneous quasi-static dipole potential, prototype map",
         },
         "posterior_cov_det",
+        depth_bin_width_mm,
     )
 
 
-def run_fnirs(n_sensors: int, grid_spacing_mm: float, max_dist_mm: float) -> Path:
+def run_fnirs(
+    n_sensors: int,
+    grid_spacing_mm: float,
+    max_dist_mm: float,
+    depth_bin_width_mm: float,
+) -> Path:
     model = get_noise_model("fnirs_analytical_cw")
     noise = compute_detector_noise_std(
         "fnirs_analytical_cw",
@@ -268,6 +305,7 @@ def run_fnirs(n_sensors: int, grid_spacing_mm: float, max_dist_mm: float) -> Pat
             "model": "CW fNIRS analytical diffusion sensitivity, scalar absorption per voxel",
         },
         "posterior_variance",
+        depth_bin_width_mm,
     )
 
 
@@ -279,17 +317,35 @@ def main() -> None:
     parser.add_argument("--fnirs-sensors", type=int, default=100)
     parser.add_argument("--fnirs-grid-spacing-mm", type=float, default=6.0)
     parser.add_argument("--fnirs-max-dist-mm", type=float, default=50.0)
+    parser.add_argument("--depth-bin-width-mm", type=float, default=2.0)
     args = parser.parse_args()
 
     outputs = []
-    outputs.append(run_eeg(args.eeg_sensors, args.grid_spacing_mm))
-    outputs.append(run_meg("meg_opm", args.meg_sensors, args.grid_spacing_mm, 7.0))
-    outputs.append(run_meg("meg_squid", args.meg_sensors, args.grid_spacing_mm, 25.0))
+    outputs.append(run_eeg(args.eeg_sensors, args.grid_spacing_mm, args.depth_bin_width_mm))
+    outputs.append(
+        run_meg(
+            "meg_opm",
+            args.meg_sensors,
+            args.grid_spacing_mm,
+            7.0,
+            args.depth_bin_width_mm,
+        )
+    )
+    outputs.append(
+        run_meg(
+            "meg_squid",
+            args.meg_sensors,
+            args.grid_spacing_mm,
+            25.0,
+            args.depth_bin_width_mm,
+        )
+    )
     outputs.append(
         run_fnirs(
             args.fnirs_sensors,
             args.fnirs_grid_spacing_mm,
             args.fnirs_max_dist_mm,
+            args.depth_bin_width_mm,
         )
     )
     print("Wrote:")
