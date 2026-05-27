@@ -156,7 +156,7 @@ def get_valid_source_detector_pairs(
     sensor_positions_mm: torch.Tensor, max_dist: float
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Get all valid source-detector pairs that satisfy distance criteria using PyTorch.
+    Get unique source-detector pairs that satisfy distance criteria using PyTorch.
 
     Parameters
     ----------
@@ -168,17 +168,18 @@ def get_valid_source_detector_pairs(
     Returns
     -------
     sources : torch.Tensor
-        Source positions for valid pairs. Shape (n_pairs, 3).
+        Source positions for valid unordered pairs. Shape (n_pairs, 3).
     detectors : torch.Tensor
-        Detector positions for valid pairs. Shape (n_pairs, 3).
+        Detector positions for valid unordered pairs. Shape (n_pairs, 3).
     """
     # Calculate pairwise distances
     d_mat = torch.norm(
         sensor_positions_mm[:, None, :] - sensor_positions_mm[None, :, :], dim=2
     )
 
-    # Find valid pairs (different sensors and within max distance)
-    mask = (d_mat <= max_dist) & (d_mat > 0)
+    # Find each reciprocal S-D pair once.  CW measurements are reciprocal in
+    # this model, so including both (i, j) and (j, i) double-counts channels.
+    mask = torch.triu((d_mat <= max_dist) & (d_mat > 0), diagonal=1)
     src_idx, det_idx = torch.nonzero(mask, as_tuple=True)
 
     sources = sensor_positions_mm[src_idx]
