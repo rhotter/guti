@@ -4,16 +4,19 @@ import numpy as np
 import torch
 
 from compute_information_maps import (
+    compute_meg_forward_matrix,
     empirical_noise_for_matrix,
     posterior_info_scalar,
     posterior_info_vector3,
 )
+from guti.core import get_sensor_positions
 from guti.modalities.fnirs_analytical.utils import (
     get_valid_source_detector_pairs as get_cw_pairs,
 )
 from guti.modalities.td_fnirs.utils import (
     get_valid_source_detector_pairs as get_td_pairs,
 )
+from recompute_meg_variants import sarvas_formula
 
 
 class InformationMapMathTests(unittest.TestCase):
@@ -24,6 +27,17 @@ class InformationMapMathTests(unittest.TestCase):
 
         posterior = np.linalg.inv(np.eye(A.shape[1]) + (A.T @ A) / noise**2)
         posterior_var, info = posterior_info_scalar(A, noise, chunk_cols=5)
+
+        np.testing.assert_allclose(posterior_var, np.diag(posterior), atol=1e-12)
+        np.testing.assert_allclose(info, -0.5 * np.log2(np.diag(posterior)), atol=1e-12)
+
+    def test_scalar_posterior_matches_direct_covariance_when_measurements_exceed_sources(self):
+        rng = np.random.default_rng(3)
+        A = rng.normal(size=(12, 5)) * 0.1
+        noise = 0.3
+
+        posterior = np.linalg.inv(np.eye(A.shape[1]) + (A.T @ A) / noise**2)
+        posterior_var, info = posterior_info_scalar(A, noise, chunk_cols=3)
 
         np.testing.assert_allclose(posterior_var, np.diag(posterior), atol=1e-12)
         np.testing.assert_allclose(info, -0.5 * np.log2(np.diag(posterior)), atol=1e-12)
@@ -54,6 +68,22 @@ class InformationMapMathTests(unittest.TestCase):
 
         self.assertAlmostEqual(meta_a["empirical_snr"], meta_b["empirical_snr"])
         np.testing.assert_allclose(A / noise_a, (37.0 * A) / noise_b, atol=1e-12)
+
+    def test_vectorized_meg_forward_matches_sarvas_blocks(self):
+        n_sensors = 2
+        offset_mm = 5.0
+        A, sources = compute_meg_forward_matrix(n_sensors, 80.0, offset_mm)
+        sensors = get_sensor_positions(n_sensors, offset=offset_mm)
+
+        for sensor_idx, sensor in enumerate(sensors):
+            for source_idx, source in enumerate(sources):
+                rows = slice(3 * sensor_idx, 3 * sensor_idx + 3)
+                cols = slice(3 * source_idx, 3 * source_idx + 3)
+                np.testing.assert_allclose(
+                    A[rows, cols],
+                    sarvas_formula(sensor, source),
+                    atol=1e-24,
+                )
 
     def test_fnirs_helpers_return_unique_source_detector_pairs(self):
         sensors = torch.tensor(

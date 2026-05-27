@@ -46,7 +46,6 @@ from guti.noise_models import (
     get_noise_model,
 )
 from guti.parameters import Parameters
-from recompute_meg_variants import compute_forward_matrix as compute_meg_forward_matrix
 
 
 OUT_DIR = Path("results/information_maps")
@@ -54,6 +53,58 @@ HEAD_CENTER = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
 OUTER_SCALP_DEPTH_MM = BRAIN_RADIUS - SCALP_RADIUS
 SCALING_CHOICES = ("empirical", "physical")
 DEFAULT_SCALING = "empirical"
+TABLE_DEFAULTS = {
+    "eeg_homogeneous": {
+        "n_sensors": 256,
+        "grid_spacing_mm": 5.0,
+        "reference": (
+            "Best EEG/OpenMEEG spectrum has no saved metadata; use the "
+            "256-sensor, 5 mm source spacing from the selected EEG sweep."
+        ),
+    },
+    "meg_opm": {
+        "n_sensors": 1000,
+        "grid_spacing_mm": 3.0,
+        "sensor_offset_mm": 5.0,
+        "reference": "results/meg_opm_svd_spectrum.npz",
+    },
+    "meg_squid": {
+        "n_sensors": 1000,
+        "grid_spacing_mm": 3.0,
+        "sensor_offset_mm": 25.0,
+        "reference": "results/meg_squid_svd_spectrum.npz",
+    },
+    "fnirs_analytical_cw": {
+        "n_sensors": 800,
+        "grid_spacing_mm": 6.0,
+        "max_dist_mm": 50.0,
+        "reference": "results/fnirs_analytical_cw_svd_spectrum.npz",
+    },
+    "td_fnirs_analytical": {
+        "n_sensors": 400,
+        "grid_spacing_mm": 4.0,
+        "max_dist_mm": 50.0,
+        "n_time_gates": 6,
+        "reference": "results/td_fnirs_analytical_svd_spectrum.npz",
+    },
+}
+MODALITY_ALIASES = {
+    "all": "all",
+    "eeg": "eeg_homogeneous",
+    "eeg_homogeneous": "eeg_homogeneous",
+    "meg_opm": "meg_opm",
+    "opm": "meg_opm",
+    "meg_squid": "meg_squid",
+    "squid": "meg_squid",
+    "fnirs": "fnirs_analytical_cw",
+    "fnirs_cw": "fnirs_analytical_cw",
+    "cw_fnirs": "fnirs_analytical_cw",
+    "fnirs_analytical_cw": "fnirs_analytical_cw",
+    "td_fnirs": "td_fnirs_analytical",
+    "td-fnirs": "td_fnirs_analytical",
+    "td_fnirs_analytical": "td_fnirs_analytical",
+}
+MODALITY_ORDER = tuple(TABLE_DEFAULTS)
 COMPARISON_LABELS = {
     "eeg_homogeneous": "EEG homogeneous",
     "meg_opm": "MEG OPM",
@@ -142,6 +193,92 @@ def compute_eeg_forward_matrix(
     return np.vstack(rows), sources
 
 
+def compute_meg_forward_matrix(
+    n_sensors: int,
+    grid_spacing_mm: float,
+    offset_mm: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized Sarvas MEG matrix, 3 field components x 3 dipole components."""
+    sensors = get_sensor_positions(n_sensors, offset=offset_mm)
+    sources = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
+    n_sources = len(sources)
+    A = np.empty((3 * n_sensors, 3 * n_sources), dtype=np.float64)
+    center = HEAD_CENTER
+    coeff = 1e-7
+
+    sources_m = (sources - center) * 1e-3
+    for i, sensor in enumerate(sensors):
+        r = (sensor - center) * 1e-3
+        a_vec = r[None, :] - sources_m
+        a = np.linalg.norm(a_vec, axis=1)
+        r_norm = np.linalg.norm(r)
+        valid = (a >= 1e-12) & (r_norm >= 1e-12)
+
+        M = np.zeros((n_sources, 3, 3), dtype=np.float64)
+        if np.any(valid):
+            r0 = sources_m[valid]
+            av = a_vec[valid]
+            aa = a[valid]
+            a_dot_r = av @ r
+            r0_dot_r = r0 @ r
+            F = aa * (aa * r_norm + r_norm**2 - r0_dot_r)
+            valid_f = np.abs(F) >= 1e-20
+            if np.any(valid_f):
+                r0 = r0[valid_f]
+                av = av[valid_f]
+                aa = aa[valid_f]
+                a_dot_r = a_dot_r[valid_f]
+                F = F[valid_f]
+                nabla_F = (
+                    (aa**2 / r_norm + a_dot_r / aa + 2 * aa + 2 * r_norm)[:, None]
+                    * r[None, :]
+                    - (aa + 2 * r_norm + a_dot_r / aa)[:, None] * r0
+                )
+                r0_cross = np.zeros((len(r0), 3, 3), dtype=np.float64)
+                r0_cross[:, 0, 1] = -r0[:, 2]
+                r0_cross[:, 0, 2] = r0[:, 1]
+                r0_cross[:, 1, 0] = r0[:, 2]
+                r0_cross[:, 1, 2] = -r0[:, 0]
+                r0_cross[:, 2, 0] = -r0[:, 1]
+                r0_cross[:, 2, 1] = r0[:, 0]
+                r0xr = np.cross(r0, r[None, :])
+                source_mats = (
+                    coeff
+                    * (
+                        -F[:, None, None] * r0_cross
+                        - nabla_F[:, :, None] * r0xr[:, None, :]
+                    )
+                    / (F[:, None, None] ** 2)
+                )
+                valid_indices = np.flatnonzero(valid)[valid_f]
+                M[valid_indices] = source_mats
+
+        A[3 * i : 3 * (i + 1)] = np.transpose(M, (1, 0, 2)).reshape(
+            3, 3 * n_sources
+        )
+    return A, sources
+
+
+def posterior_diag_from_precision(
+    precision: np.ndarray,
+    chunk_cols: int,
+) -> np.ndarray:
+    """Diagonal of inv(precision), computed in chunks after one Cholesky."""
+    n = precision.shape[0]
+    chol = cho_factor(precision, lower=True, check_finite=False)
+    diag = np.empty(n, dtype=np.float64)
+    eye_chunk = np.zeros((n, min(chunk_cols, n)), dtype=np.float64)
+    for start in range(0, n, chunk_cols):
+        stop = min(start + chunk_cols, n)
+        width = stop - start
+        rhs = eye_chunk[:, :width]
+        rhs.fill(0.0)
+        rhs[start + np.arange(width), np.arange(width)] = 1.0
+        solved = cho_solve(chol, rhs, check_finite=False)
+        diag[start:stop] = solved[np.arange(start, stop), np.arange(width)]
+    return diag
+
+
 def posterior_info_scalar(
     A: np.ndarray,
     noise: float,
@@ -150,6 +287,14 @@ def posterior_info_scalar(
     """Scalar voxel posterior variance and information in bits/sample."""
     A64 = np.asarray(A, dtype=np.float64)
     m, n = A64.shape
+    if n <= m:
+        precision = np.eye(n, dtype=np.float64)
+        precision += (A64.T @ A64) / noise**2
+        posterior_var = posterior_diag_from_precision(precision, chunk_cols)
+        posterior_var = np.clip(posterior_var, 1e-15, 1.0)
+        info_bits = -0.5 * np.log2(posterior_var)
+        return posterior_var, info_bits
+
     gram_y = A64 @ A64.T
     gram_y.flat[:: m + 1] += noise**2
     chol = cho_factor(gram_y, lower=True, check_finite=False)
@@ -170,6 +315,7 @@ def posterior_info_vector3(
     A: np.ndarray,
     noise: float,
     n_voxels: int,
+    chunk_voxels: int = 512,
 ) -> tuple[np.ndarray, np.ndarray]:
     """3D dipole posterior covariance determinant and information by voxel."""
     A64 = np.asarray(A, dtype=np.float64)
@@ -182,18 +328,30 @@ def posterior_info_vector3(
     info_bits = np.empty(n_voxels, dtype=np.float64)
     eye3 = np.eye(3)
 
-    for i in range(n_voxels):
-        cols = slice(3 * i, 3 * i + 3)
+    for start in range(0, n_voxels, chunk_voxels):
+        stop = min(start + chunk_voxels, n_voxels)
+        n_chunk = stop - start
+        cols = slice(3 * start, 3 * stop)
         block = A64[:, cols]
         solved = cho_solve(chol, block, check_finite=False)
-        posterior_block = eye3 - block.T @ solved
-        posterior_block = 0.5 * (posterior_block + posterior_block.T)
-        sign, logdet = np.linalg.slogdet(posterior_block)
-        if sign <= 0:
-            eig = np.linalg.eigvalsh(posterior_block)
-            logdet = np.sum(np.log(np.clip(eig, 1e-15, 1.0)))
-        posterior_det[i] = np.exp(logdet)
-        info_bits[i] = -0.5 * logdet / np.log(2.0)
+        block3 = block.reshape(m, n_chunk, 3)
+        solved3 = solved.reshape(m, n_chunk, 3)
+        posterior_blocks = eye3[None, :, :] - np.einsum(
+            "mvi,mvj->vij",
+            block3,
+            solved3,
+            optimize=True,
+        )
+        posterior_blocks = 0.5 * (
+            posterior_blocks + np.swapaxes(posterior_blocks, 1, 2)
+        )
+        sign, logdet = np.linalg.slogdet(posterior_blocks)
+        bad = sign <= 0
+        if np.any(bad):
+            eig = np.linalg.eigvalsh(posterior_blocks[bad])
+            logdet[bad] = np.sum(np.log(np.clip(eig, 1e-15, 1.0)), axis=1)
+        posterior_det[start:stop] = np.exp(logdet)
+        info_bits[start:stop] = -0.5 * logdet / np.log(2.0)
 
     return posterior_det, info_bits
 
@@ -477,8 +635,7 @@ def run_meg(
 ) -> Path:
     model = get_noise_model(name)
     physical_noise = compute_detector_noise_std(name, n_sensors=n_sensors, tier="today")
-    A_raw = compute_meg_forward_matrix(n_sensors, grid_spacing_mm, offset_mm)
-    positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
+    A_raw, positions = compute_meg_forward_matrix(n_sensors, grid_spacing_mm, offset_mm)
     A = A_raw * model.source_amplitude
     noise, scaling_params = choose_noise(A, name, n_sensors, physical_noise, scaling)
     posterior_det, info_bits = posterior_info_vector3(A, noise, len(positions))
@@ -493,6 +650,7 @@ def run_meg(
             "forward_matrix_shape": list(A.shape),
             "grid_spacing_mm": grid_spacing_mm,
             "sensor_offset_mm": offset_mm,
+            "table_default_reference": TABLE_DEFAULTS[name]["reference"],
             "detector_noise_today": physical_noise,
             "source_amplitude": model.source_amplitude,
             "model": "Sarvas MEG, 3 dipole orientations per voxel",
@@ -536,6 +694,7 @@ def run_eeg(
             "n_sensors": n_sensors,
             "forward_matrix_shape": list(A.shape),
             "grid_spacing_mm": grid_spacing_mm,
+            "table_default_reference": TABLE_DEFAULTS["eeg_homogeneous"]["reference"],
             "detector_noise_today": physical_noise,
             "source_amplitude_a_m": source_amplitude_a_m,
             "model": (
@@ -595,6 +754,7 @@ def run_fnirs(
             "n_unique_source_detector_pairs": int(A.shape[0]),
             "grid_spacing_mm": grid_spacing_mm,
             "max_dist_mm": max_dist_mm,
+            "table_default_reference": TABLE_DEFAULTS["fnirs_analytical_cw"]["reference"],
             "detector_noise_today": physical_noise,
             "source_amplitude": model.source_amplitude,
             "voxel_volume_mm3": voxel_volume_mm3,
@@ -659,6 +819,7 @@ def run_td_fnirs(
             "time_gates_ns": list(map(float, modality.time_gates_ns)),
             "grid_spacing_mm": grid_spacing_mm,
             "max_dist_mm": max_dist_mm,
+            "table_default_reference": TABLE_DEFAULTS["td_fnirs_analytical"]["reference"],
             "detector_noise_today": physical_noise,
             "source_amplitude": model.source_amplitude,
             "voxel_volume_mm3": voxel_volume_mm3,
@@ -675,13 +836,85 @@ def run_td_fnirs(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--grid-spacing-mm", type=float, default=10.0)
-    parser.add_argument("--eeg-sensors", type=int, default=256)
-    parser.add_argument("--meg-sensors", type=int, default=200)
-    parser.add_argument("--fnirs-sensors", type=int, default=100)
-    parser.add_argument("--fnirs-grid-spacing-mm", type=float, default=6.0)
-    parser.add_argument("--fnirs-max-dist-mm", type=float, default=50.0)
-    parser.add_argument("--td-fnirs-gates", type=int, default=6)
+    parser.add_argument(
+        "--modalities",
+        default="all",
+        help=(
+            "Comma-separated subset to compute: eeg, meg_opm, meg_squid, "
+            "fnirs_cw, td_fnirs, or all."
+        ),
+    )
+    parser.add_argument(
+        "--grid-spacing-mm",
+        type=float,
+        default=None,
+        help="Override both EEG and MEG source-grid spacing.",
+    )
+    parser.add_argument(
+        "--eeg-sensors",
+        type=int,
+        default=TABLE_DEFAULTS["eeg_homogeneous"]["n_sensors"],
+    )
+    parser.add_argument(
+        "--eeg-grid-spacing-mm",
+        type=float,
+        default=TABLE_DEFAULTS["eeg_homogeneous"]["grid_spacing_mm"],
+    )
+    parser.add_argument(
+        "--meg-sensors",
+        type=int,
+        default=TABLE_DEFAULTS["meg_opm"]["n_sensors"],
+    )
+    parser.add_argument(
+        "--meg-grid-spacing-mm",
+        type=float,
+        default=TABLE_DEFAULTS["meg_opm"]["grid_spacing_mm"],
+    )
+    parser.add_argument(
+        "--meg-opm-offset-mm",
+        type=float,
+        default=TABLE_DEFAULTS["meg_opm"]["sensor_offset_mm"],
+    )
+    parser.add_argument(
+        "--meg-squid-offset-mm",
+        type=float,
+        default=TABLE_DEFAULTS["meg_squid"]["sensor_offset_mm"],
+    )
+    parser.add_argument(
+        "--fnirs-sensors",
+        type=int,
+        default=TABLE_DEFAULTS["fnirs_analytical_cw"]["n_sensors"],
+    )
+    parser.add_argument(
+        "--fnirs-grid-spacing-mm",
+        type=float,
+        default=TABLE_DEFAULTS["fnirs_analytical_cw"]["grid_spacing_mm"],
+    )
+    parser.add_argument(
+        "--fnirs-max-dist-mm",
+        type=float,
+        default=TABLE_DEFAULTS["fnirs_analytical_cw"]["max_dist_mm"],
+    )
+    parser.add_argument(
+        "--td-fnirs-sensors",
+        type=int,
+        default=TABLE_DEFAULTS["td_fnirs_analytical"]["n_sensors"],
+    )
+    parser.add_argument(
+        "--td-fnirs-grid-spacing-mm",
+        type=float,
+        default=TABLE_DEFAULTS["td_fnirs_analytical"]["grid_spacing_mm"],
+    )
+    parser.add_argument(
+        "--td-fnirs-max-dist-mm",
+        type=float,
+        default=TABLE_DEFAULTS["td_fnirs_analytical"]["max_dist_mm"],
+    )
+    parser.add_argument(
+        "--td-fnirs-gates",
+        type=int,
+        default=TABLE_DEFAULTS["td_fnirs_analytical"]["n_time_gates"],
+    )
     parser.add_argument("--depth-bin-width-mm", type=float, default=2.0)
     parser.add_argument(
         "--scaling",
@@ -693,55 +926,74 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    eeg_grid_spacing_mm = args.grid_spacing_mm or args.eeg_grid_spacing_mm
+    meg_grid_spacing_mm = args.grid_spacing_mm or args.meg_grid_spacing_mm
+
+    requested = [item.strip() for item in args.modalities.split(",") if item.strip()]
+    selected = []
+    for item in requested:
+        alias = MODALITY_ALIASES.get(item)
+        if alias is None:
+            raise ValueError(f"Unknown modality {item!r}; expected one of {sorted(MODALITY_ALIASES)}")
+        if alias == "all":
+            selected = list(MODALITY_ORDER)
+            break
+        selected.append(alias)
+    selected = [name for name in MODALITY_ORDER if name in set(selected)]
 
     outputs = []
-    outputs.append(
-        run_eeg(
-            args.eeg_sensors,
-            args.grid_spacing_mm,
-            args.depth_bin_width_mm,
-            args.scaling,
+    if "eeg_homogeneous" in selected:
+        outputs.append(
+            run_eeg(
+                args.eeg_sensors,
+                eeg_grid_spacing_mm,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
         )
-    )
-    outputs.append(
-        run_meg(
-            "meg_opm",
-            args.meg_sensors,
-            args.grid_spacing_mm,
-            7.0,
-            args.depth_bin_width_mm,
-            args.scaling,
+    if "meg_opm" in selected:
+        outputs.append(
+            run_meg(
+                "meg_opm",
+                args.meg_sensors,
+                meg_grid_spacing_mm,
+                args.meg_opm_offset_mm,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
         )
-    )
-    outputs.append(
-        run_meg(
-            "meg_squid",
-            args.meg_sensors,
-            args.grid_spacing_mm,
-            25.0,
-            args.depth_bin_width_mm,
-            args.scaling,
+    if "meg_squid" in selected:
+        outputs.append(
+            run_meg(
+                "meg_squid",
+                args.meg_sensors,
+                meg_grid_spacing_mm,
+                args.meg_squid_offset_mm,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
         )
-    )
-    outputs.append(
-        run_fnirs(
-            args.fnirs_sensors,
-            args.fnirs_grid_spacing_mm,
-            args.fnirs_max_dist_mm,
-            args.depth_bin_width_mm,
-            args.scaling,
+    if "fnirs_analytical_cw" in selected:
+        outputs.append(
+            run_fnirs(
+                args.fnirs_sensors,
+                args.fnirs_grid_spacing_mm,
+                args.fnirs_max_dist_mm,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
         )
-    )
-    outputs.append(
-        run_td_fnirs(
-            args.fnirs_sensors,
-            args.fnirs_grid_spacing_mm,
-            args.fnirs_max_dist_mm,
-            args.td_fnirs_gates,
-            args.depth_bin_width_mm,
-            args.scaling,
+    if "td_fnirs_analytical" in selected:
+        outputs.append(
+            run_td_fnirs(
+                args.td_fnirs_sensors,
+                args.td_fnirs_grid_spacing_mm,
+                args.td_fnirs_max_dist_mm,
+                args.td_fnirs_gates,
+                args.depth_bin_width_mm,
+                args.scaling,
+            )
         )
-    )
     plot_combined_depth_profiles(outputs, args.scaling)
     print("Wrote:")
     for path in outputs:
