@@ -26,6 +26,7 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
@@ -50,6 +51,36 @@ COMPARISON_LABELS = {
     "meg_squid": "MEG SQUID",
     "fnirs_analytical_cw": "fNIRS CW",
 }
+MODALITY_COLORS = {
+    "EEG homogeneous": "#2563eb",
+    "MEG OPM": "#ea580c",
+    "MEG SQUID": "#16a34a",
+    "fNIRS CW": "#dc2626",
+}
+ANATOMICAL_DEPTH_BANDS = [
+    {
+        "label": "cortex",
+        "start_mm": 0.0,
+        "end_mm": 3.0,
+        "color": "#f2c88f",
+    },
+    {
+        "label": "white matter / subcortical",
+        "start_mm": 3.0,
+        "end_mm": 25.0,
+        "color": "#cde8d2",
+    },
+    {
+        "label": "deep brain",
+        "start_mm": 25.0,
+        "end_mm": float(BRAIN_RADIUS),
+        "color": "#d9e2f3",
+    },
+]
+ANATOMICAL_DEPTH_BAND_META = [
+    {k: band[k] for k in ("label", "start_mm", "end_mm")}
+    for band in ANATOMICAL_DEPTH_BANDS
+]
 
 
 def depth_mm(positions: np.ndarray) -> np.ndarray:
@@ -233,12 +264,13 @@ def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
     ]
 
     for scale in ("linear", "log"):
-        fig, ax = plt.subplots(figsize=(7, 4))
+        fig, ax = plt.subplots(figsize=(8.0, 4.8))
+        add_anatomy_depth_bands(ax)
         for label, values in series:
             y = values.copy()
             if scale == "log":
                 y = np.where(y > 0, y, np.nan)
-            ax.plot(x, y, marker="o", markersize=3, linewidth=1.4, label=label)
+            ax.plot(x, y, marker="o", markersize=3.5, linewidth=1.8, label=label)
 
         if scale == "log":
             ax.set_yscale("log")
@@ -247,14 +279,67 @@ def plot_depth_profile(name: str, profile: dict[str, np.ndarray]) -> None:
             ax.set_ylabel("Information (bits/sample/voxel)")
 
         ax.set_xlabel("Depth from brain surface (mm)")
-        ax.set_title(name)
+        ax.set_title(f"{name}: information by radial depth", pad=14)
+        ax.set_xlim(0, BRAIN_RADIUS)
         ax.grid(True, alpha=0.3, which="both")
-        ax.legend()
+        add_plot_legends(ax)
         fig.tight_layout()
-        fig.savefig(OUT_DIR / f"{name}_depth_profile_{scale}.png", dpi=180)
+        fig.savefig(OUT_DIR / f"{name}_depth_profile_{scale}.png", dpi=180, bbox_inches="tight")
         if scale == "linear":
-            fig.savefig(OUT_DIR / f"{name}_depth_profile.png", dpi=180)
+            fig.savefig(OUT_DIR / f"{name}_depth_profile.png", dpi=180, bbox_inches="tight")
         plt.close(fig)
+
+
+def anatomy_band_handles() -> list[Patch]:
+    return [
+        Patch(
+            facecolor=band["color"],
+            edgecolor="none",
+            alpha=0.35,
+            label=f"{band['label']} ({band['start_mm']:g}-{band['end_mm']:g} mm)",
+        )
+        for band in ANATOMICAL_DEPTH_BANDS
+    ]
+
+
+def add_anatomy_depth_bands(ax) -> None:
+    """Add approximate radial-depth anatomy bands behind the data."""
+    for band in ANATOMICAL_DEPTH_BANDS:
+        start = band["start_mm"]
+        end = band["end_mm"]
+        ax.axvspan(start, end, color=band["color"], alpha=0.25, lw=0, zorder=0)
+        ax.axvline(end, color="#6b7280", linewidth=0.8, alpha=0.35, zorder=1)
+
+    ax.text(
+        1.0,
+        -0.32,
+        "Anatomical bands are approximate radial-depth regions, not segmented anatomy.",
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8.5,
+        color="#6b7280",
+    )
+
+
+def add_plot_legends(ax) -> None:
+    data_legend = ax.legend(
+        loc="upper right",
+        frameon=True,
+        facecolor="white",
+        edgecolor="#d1d5db",
+    )
+    ax.add_artist(data_legend)
+    ax.legend(
+        handles=anatomy_band_handles(),
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.18),
+        ncol=3,
+        frameon=False,
+        fontsize=8.5,
+        columnspacing=1.2,
+        handlelength=1.6,
+    )
 
 
 def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
@@ -273,12 +358,21 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
         )
 
     for scale in ("linear", "log"):
-        fig, ax = plt.subplots(figsize=(7.6, 4.4))
+        fig, ax = plt.subplots(figsize=(8.8, 5.2))
+        add_anatomy_depth_bands(ax)
         for label, x, values in loaded:
             y = values.copy()
             if scale == "log":
                 y = np.where(y > 0, y, np.nan)
-            ax.plot(x, y, marker="o", markersize=3, linewidth=1.5, label=label)
+            ax.plot(
+                x,
+                y,
+                marker="o",
+                markersize=3.8,
+                linewidth=2.0,
+                label=label,
+                color=MODALITY_COLORS.get(label),
+            )
 
         if scale == "log":
             ax.set_yscale("log")
@@ -287,13 +381,22 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
             ax.set_ylabel("Mean information (bits/sample/voxel)")
 
         ax.set_xlabel("Depth from brain surface (mm)")
-        ax.set_title(f"Posterior information by depth ({scaling} scaling)")
+        ax.set_title(f"Posterior information by radial depth ({scaling} scaling)", pad=14)
+        ax.set_xlim(0, BRAIN_RADIUS)
         ax.grid(True, alpha=0.3, which="both")
-        ax.legend()
+        add_plot_legends(ax)
         fig.tight_layout()
-        fig.savefig(OUT_DIR / f"all_modalities_depth_mean_{scaling}_{scale}.png", dpi=180)
+        fig.savefig(
+            OUT_DIR / f"all_modalities_depth_mean_{scaling}_{scale}.png",
+            dpi=180,
+            bbox_inches="tight",
+        )
         if scaling == DEFAULT_SCALING:
-            fig.savefig(OUT_DIR / f"all_modalities_depth_mean_{scale}.png", dpi=180)
+            fig.savefig(
+                OUT_DIR / f"all_modalities_depth_mean_{scale}.png",
+                dpi=180,
+                bbox_inches="tight",
+            )
         plt.close(fig)
 
 
@@ -310,6 +413,10 @@ def save_result(
     d = depth_mm(positions)
     profile = summarize_by_depth(d, info_bits, depth_bin_width_mm)
     out_path = OUT_DIR / f"{name}_posterior_info.npz"
+    params_with_context = {
+        **params,
+        "anatomical_depth_bands_mm": ANATOMICAL_DEPTH_BAND_META,
+    }
     np.savez(
         out_path,
         positions_mm=positions,
@@ -322,7 +429,7 @@ def save_result(
         depth_p90_bits=profile["p90_bits"],
         depth_bin_count=profile["count"],
         depth_bin_width_mm=depth_bin_width_mm,
-        params_json=json.dumps(params, sort_keys=True),
+        params_json=json.dumps(params_with_context, sort_keys=True),
     )
 
     plot_depth_profile(name, profile)
