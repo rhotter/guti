@@ -5,8 +5,22 @@
     "num_sensors",
     "source_spacing_mm"
   ],
+  "default_bitrate_mode": "physical_detector_floor",
+  "bitrate_modes": {
+    "physical_detector_floor": {
+      "label": "Physical detector floor",
+      "description": "Uses detector_noise/source_amplitude and preserves raw forward gain."
+    },
+    "empirical_observed_snr": {
+      "label": "Empirical observed SNR",
+      "description": "Uses Frobenius(SVD)/observed_SNR and normalizes away raw forward gain."
+    }
+  },
   "noise_label_today": "1.50e-13 T",
   "noise_label_fundamental": "5.00e-15 T",
+  "noise_units": "T",
+  "source_amplitude": 1e-08,
+  "source_amplitude_units": "A\u00b7m",
   "typical_signal": 1e-13,
   "variants": [
     {
@@ -397,8 +411,18 @@
         7.29453127078523e-09
       ],
       "first_sv": 0.012017802603285797,
-      "bitrate_today": 31.677059183111357,
-      "bitrate_fundamental": 7066.821142439492,
+      "bitrate_today": 154720.7122162702,
+      "bitrate_fundamental": 497672.03660084977,
+      "bitrate_physical_today": 154720.7122162702,
+      "bitrate_physical_fundamental": 497672.03660084977,
+      "bitrate_empirical_today": 31.677059183111357,
+      "bitrate_empirical_fundamental": 7066.821142439492,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.052676462221567744,
+      "noise_empirical_fundamental": 0.0017558820740522587,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -803,8 +827,18 @@
         4.2641793065751454e-20
       ],
       "first_sv": 0.005010486224397923,
-      "bitrate_today": 31.66954091611549,
-      "bitrate_fundamental": 6959.558534728636,
+      "bitrate_today": 96447.15915299121,
+      "bitrate_fundamental": 313927.46686409484,
+      "bitrate_physical_today": 96447.15915299121,
+      "bitrate_physical_fundamental": 313927.46686409484,
+      "bitrate_empirical_today": 31.66954091611549,
+      "bitrate_empirical_fundamental": 6959.558534728636,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.02180298337103214,
+      "noise_empirical_fundamental": 0.0007267661123677382,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -1181,8 +1215,18 @@
         2.137211158279752e-36
       ],
       "first_sv": 0.002334074187540598,
-      "bitrate_today": 31.67669477330799,
-      "bitrate_fundamental": 6941.357894822721,
+      "bitrate_today": 59810.5270551531,
+      "bitrate_fundamental": 192002.01234498396,
+      "bitrate_physical_today": 59810.5270551531,
+      "bitrate_physical_fundamental": 192002.01234498396,
+      "bitrate_empirical_today": 31.67669477330799,
+      "bitrate_empirical_fundamental": 6941.357894822721,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.010393219406871204,
+      "noise_empirical_fundamental": 0.00034644064689570687,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -1529,8 +1573,18 @@
         2.212626310538765e-12
       ],
       "first_sv": 0.0014761532914994184,
-      "bitrate_today": 31.676704763029207,
-      "bitrate_fundamental": 6940.372930909804,
+      "bitrate_today": 47814.64288768251,
+      "bitrate_fundamental": 168840.0150469998,
+      "bitrate_physical_today": 47814.64288768251,
+      "bitrate_physical_fundamental": 168840.0150469998,
+      "bitrate_empirical_today": 31.676704763029207,
+      "bitrate_empirical_fundamental": 6940.372930909804,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.006573533739499509,
+      "noise_empirical_fundamental": 0.00021911779131665037,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -1861,8 +1915,18 @@
         0.0
       ],
       "first_sv": 0.0014678929498772623,
-      "bitrate_today": 31.638611145704253,
-      "bitrate_fundamental": 6408.0343706362655,
+      "bitrate_today": 37584.483468823666,
+      "bitrate_fundamental": 117482.04436070789,
+      "bitrate_physical_today": 37584.483468823666,
+      "bitrate_physical_fundamental": 117482.04436070789,
+      "bitrate_empirical_today": 31.638611145704253,
+      "bitrate_empirical_fundamental": 6408.0343706362655,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.006278591734699824,
+      "noise_empirical_fundamental": 0.00020928639115666084,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -2477,8 +2541,18 @@
         1.200965412167924e-07
       ],
       "first_sv": 0.0010439989713449148,
-      "bitrate_today": 31.67657180551671,
-      "bitrate_fundamental": 6932.851627676932,
+      "bitrate_today": 39399.85175004382,
+      "bitrate_fundamental": 145947.79300282695,
+      "bitrate_physical_today": 39399.85175004382,
+      "bitrate_physical_fundamental": 145947.79300282695,
+      "bitrate_empirical_today": 31.67657180551671,
+      "bitrate_empirical_fundamental": 6932.851627676932,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.004648144334908681,
+      "noise_empirical_fundamental": 0.0001549381444969561,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -2825,8 +2899,18 @@
         1.2549805689543028e-06
       ],
       "first_sv": 0.007600714426946606,
-      "bitrate_today": 31.677017328291228,
-      "bitrate_fundamental": 7065.196994730844,
+      "bitrate_today": 124711.97074798486,
+      "bitrate_fundamental": 378023.6924571907,
+      "bitrate_physical_today": 124711.97074798486,
+      "bitrate_physical_fundamental": 378023.6924571907,
+      "bitrate_empirical_today": 31.677017328291228,
+      "bitrate_empirical_fundamental": 7065.196994730844,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.03331499755084899,
+      "noise_empirical_fundamental": 0.0011104999183616333,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -3141,8 +3225,18 @@
         7.361339594389038e-39
       ],
       "first_sv": 0.0002810411774417438,
-      "bitrate_today": 31.61714377383757,
-      "bitrate_fundamental": 5442.383382795057,
+      "bitrate_today": 11159.769776480802,
+      "bitrate_fundamental": 43943.875032867654,
+      "bitrate_physical_today": 11159.769776480802,
+      "bitrate_physical_fundamental": 43943.875032867654,
+      "bitrate_empirical_today": 31.61714377383757,
+      "bitrate_empirical_fundamental": 5442.383382795057,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.001205675825614084,
+      "noise_empirical_fundamental": 4.018919418713615e-05,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -3457,8 +3551,18 @@
         1.4392906958542928e-05
       ],
       "first_sv": 0.001340335536564279,
-      "bitrate_today": 31.668838457525734,
-      "bitrate_fundamental": 6891.217532324191,
+      "bitrate_today": 42620.269892373144,
+      "bitrate_fundamental": 115198.93664703645,
+      "bitrate_physical_today": 42620.269892373144,
+      "bitrate_physical_fundamental": 115198.93664703645,
+      "bitrate_empirical_today": 31.668838457525734,
+      "bitrate_empirical_fundamental": 6891.217532324191,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.005829023038300758,
+      "noise_empirical_fundamental": 0.00019430076794335865,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -3773,8 +3877,18 @@
         1.689482697008088e-23
       ],
       "first_sv": 0.0008911267005037282,
-      "bitrate_today": 31.619481180776383,
-      "bitrate_fundamental": 5479.161170215868,
+      "bitrate_today": 20634.309916890215,
+      "bitrate_fundamental": 58978.39514378304,
+      "bitrate_physical_today": 20634.309916890215,
+      "bitrate_physical_fundamental": 58978.39514378304,
+      "bitrate_empirical_today": 31.619481180776383,
+      "bitrate_empirical_fundamental": 5479.161170215868,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.0038185361332120555,
+      "noise_empirical_fundamental": 0.0001272845377737352,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -4105,8 +4219,18 @@
         0.0
       ],
       "first_sv": 0.0009284100831271705,
-      "bitrate_today": 31.638899219604312,
-      "bitrate_fundamental": 6409.416106488706,
+      "bitrate_today": 29965.27822329939,
+      "bitrate_fundamental": 104307.14183126042,
+      "bitrate_physical_today": 29965.27822329939,
+      "bitrate_physical_fundamental": 104307.14183126042,
+      "bitrate_empirical_today": 31.638899219604312,
+      "bitrate_empirical_fundamental": 6409.416106488706,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.003971997035625151,
+      "noise_empirical_fundamental": 0.00013239990118750505,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -4421,8 +4545,18 @@
         1.9554044886983803e-23
       ],
       "first_sv": 0.0005635907056716955,
-      "bitrate_today": 31.619378454737696,
-      "bitrate_fundamental": 5477.944042879303,
+      "bitrate_today": 16620.34533602279,
+      "bitrate_fundamental": 53075.159199959526,
+      "bitrate_physical_today": 16620.34533602279,
+      "bitrate_physical_fundamental": 53075.159199959526,
+      "bitrate_empirical_today": 31.619378454737696,
+      "bitrate_empirical_fundamental": 5477.944042879303,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.002415065326437578,
+      "noise_empirical_fundamental": 8.050217754791929e-05,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -4769,8 +4903,18 @@
         4.106173411150684e-08
       ],
       "first_sv": 0.002678214552474571,
-      "bitrate_today": 31.669505063491076,
-      "bitrate_fundamental": 6958.3003891934595,
+      "bitrate_today": 71381.95652387105,
+      "bitrate_fundamental": 254030.9149826922,
+      "bitrate_physical_today": 71381.95652387105,
+      "bitrate_physical_fundamental": 254030.9149826922,
+      "bitrate_empirical_today": 31.669505063491076,
+      "bitrate_empirical_fundamental": 6958.3003891934595,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.011654022272585867,
+      "noise_empirical_fundamental": 0.00038846740908619567,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -5385,8 +5529,18 @@
         1.0293721620719523e-12
       ],
       "first_sv": 0.0006567270529652717,
-      "bitrate_today": 31.639257484602823,
-      "bitrate_fundamental": 6406.7847017036565,
+      "bitrate_today": 24731.017928107492,
+      "bitrate_fundamental": 93727.21952913475,
+      "bitrate_physical_today": 24731.017928107492,
+      "bitrate_physical_fundamental": 93727.21952913475,
+      "bitrate_empirical_today": 31.639257484602823,
+      "bitrate_empirical_fundamental": 6406.7847017036565,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.0028098131045260137,
+      "noise_empirical_fundamental": 9.366043681753383e-05,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -5785,8 +5939,18 @@
         1.7441219874147146e-09
       ],
       "first_sv": 0.013164845063382911,
-      "bitrate_today": 31.67706260368741,
-      "bitrate_fundamental": 7066.926491136441,
+      "bitrate_today": 160839.86061798598,
+      "bitrate_fundamental": 513299.46623099595,
+      "bitrate_physical_today": 160839.86061798598,
+      "bitrate_physical_fundamental": 513299.46623099595,
+      "bitrate_empirical_today": 31.67706260368741,
+      "bitrate_empirical_fundamental": 7066.926491136441,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.05770427381261592,
+      "noise_empirical_fundamental": 0.0019234757937538645,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -6101,8 +6265,18 @@
         4.900397995631202e-06
       ],
       "first_sv": 0.0007380692256383075,
-      "bitrate_today": 31.67559293448447,
-      "bitrate_fundamental": 6864.721659064374,
+      "bitrate_today": 30573.89412802229,
+      "bitrate_fundamental": 100251.667180457,
+      "bitrate_physical_today": 30573.89412802229,
+      "bitrate_physical_fundamental": 100251.667180457,
+      "bitrate_empirical_today": 31.67559293448447,
+      "bitrate_empirical_fundamental": 6864.721659064374,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.0032865920343812484,
+      "noise_empirical_fundamental": 0.0001095530678127083,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -6417,8 +6591,18 @@
         5.298631949854745e-05
       ],
       "first_sv": 0.003801608535494718,
-      "bitrate_today": 31.675850978636028,
-      "bitrate_fundamental": 6980.921804469512,
+      "bitrate_today": 65509.79439711516,
+      "bitrate_fundamental": 139001.4929217998,
+      "bitrate_physical_today": 65509.79439711516,
+      "bitrate_physical_fundamental": 139001.4929217998,
+      "bitrate_empirical_today": 31.675850978636028,
+      "bitrate_empirical_fundamental": 6980.921804469512,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.016656998955199127,
+      "noise_empirical_fundamental": 0.0005552332985066377,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -6749,8 +6933,18 @@
         0.0
       ],
       "first_sv": 0.0017368297827614382,
-      "bitrate_today": 31.638555219666227,
-      "bitrate_fundamental": 6407.594373597933,
+      "bitrate_today": 40593.29020619192,
+      "bitrate_fundamental": 122420.18278672588,
+      "bitrate_physical_today": 40593.29020619192,
+      "bitrate_physical_fundamental": 122420.18278672588,
+      "bitrate_empirical_today": 31.638555219666227,
+      "bitrate_empirical_fundamental": 6407.594373597933,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.0074285473464410735,
+      "noise_empirical_fundamental": 0.0002476182448813692,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -7065,8 +7259,18 @@
         2.7088001493802925e-23
       ],
       "first_sv": 0.001054408547377616,
-      "bitrate_today": 31.61951456596101,
-      "bitrate_fundamental": 5479.441447741408,
+      "bitrate_today": 22191.21417691239,
+      "bitrate_fundamental": 61182.327996650056,
+      "bitrate_physical_today": 22191.21417691239,
+      "bitrate_physical_fundamental": 61182.327996650056,
+      "bitrate_empirical_today": 31.61951456596101,
+      "bitrate_empirical_fundamental": 5479.441447741408,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.004518197615111903,
+      "noise_empirical_fundamental": 0.00015060658717039682,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -7471,8 +7675,18 @@
         3.9680402039873015e-10
       ],
       "first_sv": 0.014219659538471067,
-      "bitrate_today": 31.67706491167156,
-      "bitrate_fundamental": 7066.993784932825,
+      "bitrate_today": 166118.49234231154,
+      "bitrate_fundamental": 525984.9754548788,
+      "bitrate_physical_today": 166118.49234231154,
+      "bitrate_physical_fundamental": 525984.9754548788,
+      "bitrate_empirical_today": 31.67706491167156,
+      "bitrate_empirical_fundamental": 7066.993784932825,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.06232781752992514,
+      "noise_empirical_fundamental": 0.002077593917664172,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -7787,8 +8001,18 @@
         1.1958911349965936e-23
       ],
       "first_sv": 0.00039867782070211754,
-      "bitrate_today": 31.618887871828534,
-      "bitrate_fundamental": 5474.09262749507,
+      "bitrate_today": 13818.430255134586,
+      "bitrate_fundamental": 48675.0473863925,
+      "bitrate_physical_today": 13818.430255134586,
+      "bitrate_physical_fundamental": 48675.0473863925,
+      "bitrate_empirical_today": 31.618887871828534,
+      "bitrate_empirical_fundamental": 5474.09262749507,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.0017072823512628101,
+      "noise_empirical_fundamental": 5.690941170876035e-05,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -8165,8 +8389,18 @@
         1.8826815748972996e-37
       ],
       "first_sv": 0.002761713165771517,
-      "bitrate_today": 31.676694816215768,
-      "bitrate_fundamental": 6941.440198010334,
+      "bitrate_today": 64585.08213180547,
+      "bitrate_fundamental": 200467.42779145675,
+      "bitrate_physical_today": 64585.08213180547,
+      "bitrate_physical_fundamental": 200467.42779145675,
+      "bitrate_empirical_today": 31.676694816215768,
+      "bitrate_empirical_fundamental": 6941.440198010334,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.012297391299270686,
+      "noise_empirical_fundamental": 0.00040991304330902296,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -8583,8 +8817,18 @@
         4.573167429625519e-12
       ],
       "first_sv": 0.016995749006001,
-      "bitrate_today": 31.67706882913719,
-      "bitrate_fundamental": 7067.099311118047,
+      "bitrate_today": 178741.22728260627,
+      "bitrate_fundamental": 554511.8524931958,
+      "bitrate_physical_today": 178741.22728260627,
+      "bitrate_physical_fundamental": 554511.8524931958,
+      "bitrate_empirical_today": 31.67706882913719,
+      "bitrate_empirical_fundamental": 7067.099311118047,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.07449616172270065,
+      "noise_empirical_fundamental": 0.002483205390756689,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -9199,8 +9443,18 @@
         1.1228873624204538e-05
       ],
       "first_sv": 0.005374559318774662,
-      "bitrate_today": 31.67690148125959,
-      "bitrate_fundamental": 7057.372968107981,
+      "bitrate_today": 98045.20157461482,
+      "bitrate_fundamental": 242802.52574064618,
+      "bitrate_physical_today": 98045.20157461482,
+      "bitrate_physical_fundamental": 242802.52574064618,
+      "bitrate_empirical_today": 31.67690148125959,
+      "bitrate_empirical_fundamental": 7057.372968107981,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.023556769699896285,
+      "noise_empirical_fundamental": 0.0007852256566632097,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -9515,8 +9769,18 @@
         3.695779780131065e-07
       ],
       "first_sv": 0.00046536129918944635,
-      "bitrate_today": 31.639983837353284,
-      "bitrate_fundamental": 6377.8203795324935,
+      "bitrate_today": 19761.394637428337,
+      "bitrate_fundamental": 78303.14953066848,
+      "bitrate_physical_today": 19761.394637428337,
+      "bitrate_physical_fundamental": 78303.14953066848,
+      "bitrate_empirical_today": 31.639983837353284,
+      "bitrate_empirical_fundamental": 6377.8203795324935,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.001989693163678726,
+      "noise_empirical_fundamental": 6.632310545595755e-05,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -9907,8 +10171,18 @@
         4.244735170565785e-14
       ],
       "first_sv": 0.004234630461414252,
-      "bitrate_today": 31.669535671364862,
-      "bitrate_fundamental": 6959.449863563988,
+      "bitrate_today": 89346.05539804962,
+      "bitrate_fundamental": 299186.5499964404,
+      "bitrate_physical_today": 89346.05539804962,
+      "bitrate_physical_fundamental": 299186.5499964404,
+      "bitrate_empirical_today": 31.669535671364862,
+      "bitrate_empirical_fundamental": 6959.449863563988,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.01842683232303012,
+      "noise_empirical_fundamental": 0.0006142277441010042,
       "snr_empirical_today": 0.6666666666666667
     },
     {
@@ -10523,8 +10797,18 @@
         1.6124168348272097e-06
       ],
       "first_sv": 0.0018936321685391793,
-      "bitrate_today": 31.669414869584223,
-      "bitrate_fundamental": 6951.306363443114,
+      "bitrate_today": 58005.90728663606,
+      "bitrate_fundamental": 190510.27253777938,
+      "bitrate_physical_today": 58005.90728663606,
+      "bitrate_physical_fundamental": 190510.27253777938,
+      "bitrate_empirical_today": 31.669414869584223,
+      "bitrate_empirical_fundamental": 6951.306363443114,
+      "detector_noise_today": 1.5e-13,
+      "detector_noise_fundamental": 5.000000000000001e-15,
+      "noise_effective_today": 1.4999999999999999e-05,
+      "noise_effective_fundamental": 5.000000000000001e-07,
+      "noise_empirical_today": 0.008240443380769374,
+      "noise_empirical_fundamental": 0.0002746814460256459,
       "snr_empirical_today": 0.6666666666666667
     }
   ]

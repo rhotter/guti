@@ -526,7 +526,10 @@ def compute_noise_empirical(
 
     Uses noise_floor_from_total_snr(s, SNR_empirical) so that the total
     output SNR equals SNR_empirical = typical_signal / detector_noise.
-    Pass the result directly to get_bitrate(s, noise, ...).
+    This is useful as an observed-SNR diagnostic, but it normalizes away the
+    absolute gain of the forward model.  For first-principles detector-floor
+    capacity estimates, use compute_noise_effective(...), which preserves raw
+    SVD gain through detector_noise / source_amplitude.
     """
     snr = compute_empirical_snr(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,

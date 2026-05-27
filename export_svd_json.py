@@ -16,8 +16,14 @@ Schema per file:
       "n_singular_values": 300,
       "singular_values": [0.123, ...],   // downsampled to ≤300 points for web
       "sv_indices": [1, 2, ...],         // corresponding indices (1-based)
-      "bitrate_today": 1450.3,
-      "bitrate_fundamental": 23456.7,
+      "bitrate_today": 1450.3,              // physical detector-floor mode
+      "bitrate_fundamental": 23456.7,       // physical detector-floor mode
+      "bitrate_physical_today": 1450.3,
+      "bitrate_physical_fundamental": 23456.7,
+      "bitrate_empirical_today": 123.4,
+      "bitrate_empirical_fundamental": 456.7,
+      "noise_effective_today": 0.001,
+      "noise_empirical_today": 0.01,
       "first_sv": 0.123,
       "snr_empirical_today": 53.8
     },
@@ -26,13 +32,13 @@ Schema per file:
 }
 """
 
-import os, json, math
+import os, json
 import numpy as np
 
-from guti.data_utils import list_svd_variants, load_svd_variant
-from guti.parameters import Parameters
+from guti.data_utils import list_svd_variants
 from guti.core import get_bitrate
 from guti.noise_models import (
+    compute_detector_noise_std,
     compute_noise_empirical,
     compute_noise_effective,
     compute_empirical_snr,
@@ -43,6 +49,17 @@ OUT_DIR = "web/public/data"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 MAX_SV_POINTS = 300   # max singular values to embed per variant
+DEFAULT_BITRATE_MODE = "physical_detector_floor"
+BITRATE_MODES = {
+    "physical_detector_floor": {
+        "label": "Physical detector floor",
+        "description": "Uses detector_noise/source_amplitude and preserves raw forward gain.",
+    },
+    "empirical_observed_snr": {
+        "label": "Empirical observed SNR",
+        "description": "Uses Frobenius(SVD)/observed_SNR and normalizes away raw forward gain.",
+    },
+}
 
 MODALITIES = {
     "meg_opm":            "MEG OPM",
@@ -72,14 +89,32 @@ def downsample(arr, n):
     return idx.tolist(), arr[idx].tolist()
 
 
-def compute_bitrate(s, modality, n_sensors, freq=None, tier="today", time_resolution=0.01):
+def compute_physical_noise(modality, n_sensors, freq=None, tier="today"):
+    detector_noise = compute_detector_noise_std(
+        modality, n_sensors=n_sensors, frequency_hz=freq, tier=tier,
+    )
+    effective_noise = compute_noise_effective(
+        modality, n_sensors=n_sensors, frequency_hz=freq, tier=tier,
+    )
+    return float(detector_noise), float(effective_noise)
+
+
+def compute_bitrate_physical(
+    s, modality, n_sensors, freq=None, tier="today", time_resolution=0.01,
+):
+    _, noise = compute_physical_noise(modality, n_sensors, freq, tier)
+    return float(get_bitrate(s, noise, time_resolution=time_resolution))
+
+
+def compute_bitrate_empirical(
+    s, modality, n_sensors, freq=None, tier="today", time_resolution=0.01,
+):
     model = get_noise_model(modality)
-    if model.typical_signal_amplitude > 0.0:
-        noise = compute_noise_empirical(s, modality, n_sensors=n_sensors,
-                                        frequency_hz=freq, tier=tier)
-    else:
-        noise = compute_noise_effective(modality, n_sensors=n_sensors,
-                                        frequency_hz=freq, tier=tier)
+    if model.typical_signal_amplitude <= 0.0:
+        return None
+    noise = compute_noise_empirical(
+        s, modality, n_sensors=n_sensors, frequency_hz=freq, tier=tier,
+    )
     return float(get_bitrate(s, noise, time_resolution=time_resolution))
 
 
@@ -105,17 +140,59 @@ def export_modality(modality, label):
         idx, sv_vals = downsample(s, MAX_SV_POINTS)
         sv_indices = [i + 1 for i in idx]  # 1-based
 
-        # Bitrates
+        # Bitrates.  The compatibility fields bitrate_today/fundamental are
+        # the physical detector-floor mode used by the blog's first-principles
+        # capacity claim.  Empirical observed-SNR values are exported separately
+        # for diagnostic comparisons.
         try:
-            br_today = compute_bitrate(s, modality, n_sensors, freq, "today", tr)
+            det_today, noise_physical_today = compute_physical_noise(
+                modality, n_sensors, freq, "today",
+            )
+            br_physical_today = compute_bitrate_physical(
+                s, modality, n_sensors, freq, "today", tr,
+            )
         except Exception as e:
-            br_today = None
-            print(f"  bitrate today failed: {e}")
+            det_today = None
+            noise_physical_today = None
+            br_physical_today = None
+            print(f"  physical bitrate today failed: {e}")
 
         try:
-            br_fund = compute_bitrate(s, modality, n_sensors, freq, "fundamental", tr)
+            det_fund, noise_physical_fund = compute_physical_noise(
+                modality, n_sensors, freq, "fundamental",
+            )
+            br_physical_fund = compute_bitrate_physical(
+                s, modality, n_sensors, freq, "fundamental", tr,
+            )
         except Exception as e:
-            br_fund = None
+            det_fund = None
+            noise_physical_fund = None
+            br_physical_fund = None
+            print(f"  physical bitrate fundamental failed: {e}")
+
+        try:
+            br_emp_today = compute_bitrate_empirical(
+                s, modality, n_sensors, freq, "today", tr,
+            )
+            noise_emp_today = compute_noise_empirical(
+                s, modality, n_sensors=n_sensors, frequency_hz=freq, tier="today",
+            )
+        except Exception as e:
+            br_emp_today = None
+            noise_emp_today = None
+            print(f"  empirical bitrate today failed: {e}")
+
+        try:
+            br_emp_fund = compute_bitrate_empirical(
+                s, modality, n_sensors, freq, "fundamental", tr,
+            )
+            noise_emp_fund = compute_noise_empirical(
+                s, modality, n_sensors=n_sensors, frequency_hz=freq,
+                tier="fundamental",
+            )
+        except Exception:
+            br_emp_fund = None
+            noise_emp_fund = None
 
         # Empirical SNR
         try:
@@ -133,13 +210,27 @@ def export_modality(modality, label):
             "sv_indices": sv_indices,
             "singular_values": [float(x) for x in sv_vals],
             "first_sv": float(s[0]),
-            "bitrate_today": br_today,
-            "bitrate_fundamental": br_fund,
+            "bitrate_today": br_physical_today,
+            "bitrate_fundamental": br_physical_fund,
+            "bitrate_physical_today": br_physical_today,
+            "bitrate_physical_fundamental": br_physical_fund,
+            "bitrate_empirical_today": br_emp_today,
+            "bitrate_empirical_fundamental": br_emp_fund,
+            "detector_noise_today": det_today,
+            "detector_noise_fundamental": det_fund,
+            "noise_effective_today": noise_physical_today,
+            "noise_effective_fundamental": noise_physical_fund,
+            "noise_empirical_today": noise_emp_today,
+            "noise_empirical_fundamental": noise_emp_fund,
             "snr_empirical_today": snr_emp,
         }
         records.append(rec)
-        br_str = f"{br_today:.0f}" if br_today is not None else "N/A"
-        print(f"  {hash_key}: N={n_sensors}, sp={params.source_spacing_mm}mm → br_today={br_str} b/s")
+        br_str = f"{br_physical_today:.0f}" if br_physical_today is not None else "N/A"
+        emp_str = f"{br_emp_today:.0f}" if br_emp_today is not None else "N/A"
+        print(
+            f"  {hash_key}: N={n_sensors}, sp={params.source_spacing_mm}mm "
+            f"→ physical_today={br_str} b/s, empirical_today={emp_str} b/s"
+        )
 
     # Determine which parameters were actually swept
     sweep_params = []
@@ -152,8 +243,13 @@ def export_modality(modality, label):
         "modality": modality,
         "label": label,
         "sweep_params": sweep_params,
+        "default_bitrate_mode": DEFAULT_BITRATE_MODE,
+        "bitrate_modes": BITRATE_MODES,
         "noise_label_today": f"{model.today_best_noise:.2e} {model.measurement_units}",
         "noise_label_fundamental": f"{model.physical_floor_noise:.2e} {model.measurement_units}",
+        "noise_units": model.measurement_units,
+        "source_amplitude": model.source_amplitude,
+        "source_amplitude_units": model.source_amplitude_units,
         "typical_signal": model.typical_signal_amplitude,
         "variants": records,
     }

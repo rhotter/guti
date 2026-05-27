@@ -182,6 +182,8 @@ $$C = \tfrac{1}{2} \sum_i \log_2\!\left(1 + \frac{\sigma_i^2 a_i^2}{n^2}\right)$
 
 where *n* is the noise at the sensors, and *a_i* is the magnitude of the source's *i*'th singular component. Since we don't make assumptions on which SVD channels the brain will communicate on, we use an algorithm called the [water-filling algorithm](https://en.wikipedia.org/wiki/Water-filling_algorithm) which smartly picks how much of the signal power to put in each component to maximize the information transfer.
 
+For the first-principles estimates below, we use the physical detector-floor path: detector noise divided by source amplitude. The interactive explorer also exposes an empirical observed-SNR mode, which is useful as a sanity check but normalizes away the absolute forward-model gain.
+
 And that's it! That's how we compute the channel capacities for each modality.
 
 The beauty of this method is that it only requires knowledge of the physics of the modality. It can evaluate systems that don't exist yet — including systems that would cost many millions of dollars to build — and make predictions for how a system with more sensors or lower noise would behave.

@@ -4,8 +4,22 @@
   "sweep_params": [
     "num_sensors"
   ],
+  "default_bitrate_mode": "physical_detector_floor",
+  "bitrate_modes": {
+    "physical_detector_floor": {
+      "label": "Physical detector floor",
+      "description": "Uses detector_noise/source_amplitude and preserves raw forward gain."
+    },
+    "empirical_observed_snr": {
+      "label": "Empirical observed SNR",
+      "description": "Uses Frobenius(SVD)/observed_SNR and normalizes away raw forward gain."
+    }
+  },
   "noise_label_today": "6.19e-05 dimensionless (\u0394I/I)",
   "noise_label_fundamental": "2.34e-05 dimensionless (\u0394I/I)",
+  "noise_units": "dimensionless (\u0394I/I)",
+  "source_amplitude": 0.002,
+  "source_amplitude_units": "mm\u207b\u00b9 (\u0394\u03bc_a)",
   "typical_signal": 0.001,
   "variants": [
     {
@@ -388,8 +402,18 @@
         6.317118781063369e-17
       ],
       "first_sv": 3.148068572045304e-05,
-      "bitrate_today": 237.53392028808594,
-      "bitrate_fundamental": 476.7804260253906,
+      "bitrate_today": 0.0001520323712611571,
+      "bitrate_fundamental": 0.0010709221241995692,
+      "bitrate_physical_today": 0.0001520323712611571,
+      "bitrate_physical_fundamental": 0.0010709221241995692,
+      "bitrate_empirical_today": 237.53392028808594,
+      "bitrate_empirical_fundamental": 476.7804260253906,
+      "detector_noise_today": 2.1878612712181697e-05,
+      "detector_noise_fundamental": 8.267549425563516e-06,
+      "noise_effective_today": 0.010939306356090849,
+      "noise_effective_fundamental": 0.004133774712781758,
+      "noise_empirical_today": 3.486333497540278e-06,
+      "noise_empirical_fundamental": 1.3174251440935053e-06,
       "snr_empirical_today": 45.7067371297822
     },
     {
@@ -822,8 +846,18 @@
         5.0667591845731123e-17
       ],
       "first_sv": 7.670171180507168e-05,
-      "bitrate_today": 208.31129455566406,
-      "bitrate_fundamental": 488.428955078125,
+      "bitrate_today": 0.0005719252512790263,
+      "bitrate_fundamental": 0.004017107654362917,
+      "bitrate_physical_today": 0.0005719252512790263,
+      "bitrate_physical_fundamental": 0.004017107654362917,
+      "bitrate_empirical_today": 208.31129455566406,
+      "bitrate_empirical_fundamental": 488.428955078125,
+      "detector_noise_today": 3.094103082347576e-05,
+      "detector_noise_fundamental": 1.1692080525221815e-05,
+      "noise_effective_today": 0.015470515411737879,
+      "noise_effective_fundamental": 0.005846040262610907,
+      "noise_empirical_today": 1.3502629989937076e-05,
+      "noise_empirical_fundamental": 5.10241038979336e-06,
       "snr_empirical_today": 32.31954377037995
     },
     {
@@ -1258,8 +1292,18 @@
         5.77180294008799e-17
       ],
       "first_sv": 0.00026047794381156564,
-      "bitrate_today": 121.76922607421875,
-      "bitrate_fundamental": 350.0842590332031,
+      "bitrate_today": 0.002524827141314745,
+      "bitrate_fundamental": 0.017696969211101532,
+      "bitrate_physical_today": 0.002524827141314745,
+      "bitrate_physical_fundamental": 0.017696969211101532,
+      "bitrate_empirical_today": 121.76922607421875,
+      "bitrate_empirical_fundamental": 350.0842590332031,
+      "detector_noise_today": 5.359143742481471e-05,
+      "detector_noise_fundamental": 2.0251277515870787e-05,
+      "noise_effective_today": 0.026795718712407355,
+      "noise_effective_fundamental": 0.010125638757935394,
+      "noise_empirical_today": 8.500892632599978e-05,
+      "noise_empirical_fundamental": 3.2123403309889626e-05,
       "snr_empirical_today": 18.659697295914757
     },
     {
@@ -1850,8 +1894,18 @@
         1.444107318806804e-14
       ],
       "first_sv": 1.0715668395278044e-05,
-      "bitrate_today": 210.32986450195312,
-      "bitrate_fundamental": 355.5256652832031,
+      "bitrate_today": 2.3819588022888638e-05,
+      "bitrate_fundamental": 0.00016905840311665088,
+      "bitrate_physical_today": 2.3819588022888638e-05,
+      "bitrate_physical_fundamental": 0.00016905840311665088,
+      "bitrate_empirical_today": 210.32986450195312,
+      "bitrate_empirical_fundamental": 355.5256652832031,
+      "detector_noise_today": 1.547051541173788e-05,
+      "detector_noise_fundamental": 5.8460402626109074e-06,
+      "noise_effective_today": 0.007735257705868939,
+      "noise_effective_fundamental": 0.0029230201313054536,
+      "noise_empirical_today": 6.933306553299151e-07,
+      "noise_empirical_fundamental": 2.619976657846701e-07,
       "snr_empirical_today": 64.6390875407599
     },
     {
@@ -2286,8 +2340,18 @@
         6.460315325624873e-18
       ],
       "first_sv": 0.0003521307371556759,
-      "bitrate_today": 101.78043365478516,
-      "bitrate_fundamental": 308.37030029296875,
+      "bitrate_today": 0.003511016722768545,
+      "bitrate_fundamental": 0.02461405098438263,
+      "bitrate_physical_today": 0.003511016722768545,
+      "bitrate_physical_fundamental": 0.02461405098438263,
+      "bitrate_empirical_today": 101.78043365478516,
+      "bitrate_empirical_fundamental": 308.37030029296875,
+      "detector_noise_today": 6.188206164695152e-05,
+      "detector_noise_fundamental": 2.338416105044363e-05,
+      "noise_effective_today": 0.030941030823475758,
+      "noise_effective_fundamental": 0.011692080525221814,
+      "noise_empirical_today": 0.0001336730427295139,
+      "noise_empirical_fundamental": 5.0512731413559364e-05,
       "snr_empirical_today": 16.159771885189976
     },
     {
@@ -2722,8 +2786,18 @@
         1.3401698215995274e-17
       ],
       "first_sv": 0.00016860062896739691,
-      "bitrate_today": 153.21620178222656,
-      "bitrate_fundamental": 409.75164794921875,
+      "bitrate_today": 0.0015385374426841736,
+      "bitrate_fundamental": 0.010790792293846607,
+      "bitrate_physical_today": 0.0015385374426841736,
+      "bitrate_physical_fundamental": 0.010790792293846607,
+      "bitrate_empirical_today": 153.21620178222656,
+      "bitrate_empirical_fundamental": 409.75164794921875,
+      "detector_noise_today": 4.3757225424363395e-05,
+      "detector_noise_fundamental": 1.6535098851127032e-05,
+      "noise_effective_today": 0.021878612712181698,
+      "noise_effective_fundamental": 0.008267549425563516,
+      "noise_empirical_today": 4.4254846202169866e-05,
+      "noise_empirical_fundamental": 1.6723141138351747e-05,
       "snr_empirical_today": 22.8533685648911
     }
   ]
