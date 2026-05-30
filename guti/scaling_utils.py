@@ -4,7 +4,14 @@ Parameter sweep visualization utilities.
 
 from guti.data_utils import list_svd_variants
 from guti.parameters import Parameters
-from guti.core import get_bitrate, noise_floor_heuristic
+from guti.core import get_bitrate, noise_floor_from_total_snr
+from guti.noise_models import (
+    compute_noise_effective,
+    compute_noise_empirical,
+    get_effective_total_snr,
+    get_noise_model,
+    scale_singular_values_for_capacity,
+)
 import matplotlib.pyplot as plt
 import numpy as np
 from typing import Optional, Literal
@@ -88,7 +95,9 @@ def plot_parameter_sweep_spectra(
     # colors = plt.cm.viridis((np.array(param_values) - min_val) / (max_val - min_val))
     colors = [plt.cm.viridis(i) for i in np.linspace(0, 1, len(normalized_svs))]
 
+    seen_param_values = {}
     plt.figure(figsize=figsize)
+    seen_param_values = {}
     for (v, s_normalized), color in zip(normalized_svs, colors):
         params = v["params"]
         param_value = getattr(params, param_key)
@@ -161,7 +170,7 @@ def plot_bitrate_vs_parameter(
     constant_params: Optional[Parameters] = None,
     figsize: tuple = (10, 6),
     time_resolution: float = 1.0,
-    snr: float = 10.0
+    snr: float | None = None,
 ):
     normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
 
@@ -175,9 +184,19 @@ def plot_bitrate_vs_parameter(
     for v, s_normalized in normalized_svs:
         params = v["params"]
         param_value = getattr(params, param_key)
-        n_sensors = params.num_sensors
-        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=snr, n_detectors=n_sensors)
-        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution)
+        model = get_noise_model(modality_name)
+        n_sensors = params.num_sensors or model.reference_sensor_count
+        freq = getattr(params, "frequency_hz", None)
+        s_capacity = scale_singular_values_for_capacity(
+            v["s"],
+            modality_name,
+            params=params,
+        )
+        if model.typical_signal_amplitude > 0.0:
+            noise_eff = compute_noise_empirical(s_capacity, modality_name, n_sensors=n_sensors, frequency_hz=freq)
+        else:
+            noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
+        bitrate = get_bitrate(s_capacity, noise_eff, time_resolution=time_resolution)
         param_values.append(param_value)
         bitrates.append(bitrate)
 
@@ -243,11 +262,18 @@ def plot_bitrate_vs_snr(
     params = v["params"]
     n_sensors = params.num_sensors
 
-    # Compute bitrates for each SNR
+    # Compute bitrates for each SNR (snr acts as multiplier: noise = noise_eff / snr)
+    freq = getattr(params, "frequency_hz", None)
+    noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
+    s_capacity = scale_singular_values_for_capacity(
+        v["s"],
+        modality_name,
+        params=params,
+    )
     bitrates = []
     for snr in snr_values:
-        noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=snr, n_detectors=n_sensors)
-        bitrate = get_bitrate(s_normalized, noise_level, time_resolution=time_resolution)
+        noise = noise_eff / snr
+        bitrate = get_bitrate(s_capacity, noise, time_resolution=time_resolution)
         bitrates.append(bitrate)
 
     plt.figure(figsize=figsize)

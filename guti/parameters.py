@@ -54,6 +54,12 @@ class Parameters:
     # for fnirs
     max_dist: Optional[float] = None
 
+    # for td_fnirs
+    n_time_gates: Optional[int] = None
+    forward_model_convention: Optional[str] = None
+    forward_model_units: Optional[str] = None
+    voxel_volume_mm3: Optional[float] = None
+
     @classmethod
     def from_dict(cls, data: Dict) -> "Parameters":
         """Create Parameters object from dictionary."""

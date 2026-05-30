@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Interactive visualizations for understanding signal processing concepts, linear models, Fourier transforms, eigenvalues, and channel coding" />
+  <title>Signal Processing Visualizations</title>
+  <!-- KaTeX for math rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+  <!-- Plotly for visualizations -->
+  <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+  <!-- Math.js for calculations -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.11.1/math.min.js"></script>
+  <!-- Import CSS from our app -->
+  <script type="module" crossorigin src="/assets/index-6xp07JE2.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-Cozo9UVq.css">
+</head>
+<body>
+  <div class="app-container">
+    <header class="app-header">
+      <h1>Interactive Signal Processing Visualizations</h1>
+      <nav class="main-nav">
+        <ul>
+          <li><a href="#intro">Home</a></li>
+          <li><a href="#linear-model">Linear Model</a></li>
+          <li><a href="#fourier">Fourier Transform</a></li>
+          <li><a href="#eigenvalues">Eigenvalues</a></li>
+          <li><a href="#orthogonality">Orthogonality & Noise</a></li>
+          <li><a href="#channel-coding">SNR & Channel Coding</a></li>
+        </ul>
+      </nav>
+    </header>
+
+    <main class="content-container">
+      <!-- Introduction Section -->
+      <section id="intro" class="intro-section">
+        <h1>Welcome to Interactive Signal Processing Visualizations</h1>
+        
+        <p class="intro">
+          This application provides interactive visualizations to help understand key 
+          concepts in signal processing, linear algebra, and information theory.
+        </p>
+        
+        <div class="visualization-sections">
+          <h2>Available Visualizations</h2>
+          
+          <p>
+            Scroll down to explore each visualization, or use the navigation links above to jump to a specific section.
+            Each visualization demonstrates a fundamental concept in signal processing and how these concepts connect to one another.
+          </p>
+        </div>
+      </section>
+      
+      <!-- Linear Model Section -->
+      <section id="linear-model" class="visualization-section">
+        <h2 class="section-header">Linear Model Visualization</h2>
+        <div class="section-content">
+          <div class="page-container">
+            <section class="explanation">
+              <h2>Linear Models as Matrix Operations</h2>
+              <p>
+                Linear models can be visualized as matrices acting on vectors. 
+                Here, we demonstrate how a smoothing operation can be represented 
+                as a matrix of Gaussian weights multiplying a vector.
+              </p>
+              
+              <div id="linear-model-formula" class="katex-block"></div>
+              
+              <p>
+                Where A is our matrix of Gaussian weights and x is our input vector.
+                The result y is the smoothed version of x.
+              </p>
+            </section>
+
+            <section class="visualization">
+              <h2>Visualization</h2>
+              <div id="linear-model-viz"></div>
+            </section>
+
+            <section class="future-work">
+              <h3>Interactive Elements to be Added:</h3>
+              <ul>
+                <li>Adjustable kernel width for the Gaussian smoothing</li>
+                <li>Ability to upload custom vectors</li>
+                <li>Animated visualization of the smoothing process</li>
+              </ul>
+            </section>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Fourier Transform Section -->
+      <section id="fourier" class="visualization-section">
+        <h2 class="section-header">Fourier Transform Visualization</h2>
+        <div class="section-content">
+          <div class="page-container">
+            <section class="explanation">
+              <h2>Linear Models in Fourier Space</h2>
+              <p>
+                Linear operations like smoothing can be understood as multiplications in the Fourier domain. 
+                The Fourier transform converts a signal from the time/space domain to the frequency domain.
+              </p>
+              
+              <div id="fourier-formula" class="katex-block"></div>
+              
+              <p>
+                This shows that applying a linear operator A to a signal x and then taking the Fourier transform is 
+                equivalent to taking the Fourier transform of both and multiplying them in the frequency domain.
+              </p>
+            </section>
+
+            <section class="visualization">
+              <h2>Visualization</h2>
+              <div id="fourier-viz"></div>
+            </section>
+
+            <section class="future-work">
+              <h3>Interactive Elements to be Added:</h3>
+              <ul>
+                <li>Interactive filter design in the frequency domain</li>
+                <li>Real-time visualization of filtering effects</li>
+                <li>Side-by-side comparison of time domain filtering vs. frequency domain filtering</li>
+              </ul>
+            </section>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Eigenvalues Section -->
+      <section id="eigenvalues" class="visualization-section">
+        <h2 class="section-header">Eigenvalues Visualization</h2>
+        <div class="section-content">
+          <div class="page-container">
+            <section class="explanation">
+              <h2>Eigenvalues and Linear Transformations</h2>
+              <p>
+                Eigenvalues and eigenvectors provide insight into the behavior of linear transformations.
+                An eigenvector of a linear transformation is a non-zero vector that changes only by a scalar factor 
+                when that linear transformation is applied to it.
+              </p>
+              
+              <div id="eigenvalues-formula" class="katex-block"></div>
+              
+              <p>
+                Where A is a matrix, v is an eigenvector, and λ is the corresponding eigenvalue.
+                Fourier basis vectors are eigenvectors of circulant matrices, which represent convolution operations.
+              </p>
+            </section>
+
+            <section class="visualization">
+              <h2>Visualization</h2>
+              <div id="eigenvalues-viz"></div>
+            </section>
+
+            <section class="future-work">
+              <h3>Interactive Elements to be Added:</h3>
+              <ul>
+                <li>Interactive matrix editor</li>
+                <li>Eigenvector visualization in 2D/3D space</li>
+                <li>Demonstration of how Fourier basis vectors are eigenvectors of convolution operations</li>
+                <li>Connection between eigenvalues and frequency response</li>
+              </ul>
+            </section>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Orthogonality Section -->
+      <section id="orthogonality" class="visualization-section">
+        <h2 class="section-header">Orthogonality and Noise Visualization</h2>
+        <div class="section-content">
+          <div class="page-container">
+            <section class="explanation">
+              <h2>Orthogonality of Fourier Basis</h2>
+              <p>
+                The Fourier basis vectors are orthogonal to each other, which means they form an independent set of directions.
+                When noise is added to a signal, this noise gets distributed across the frequency components while maintaining
+                its statistical properties due to the orthogonality of the Fourier transform.
+              </p>
+              
+              <div id="orthogonality-formula" class="katex-block"></div>
+              
+              <p>
+                This orthogonality property ensures that noise in the time domain translates to noise with similar 
+                statistical properties in the frequency domain, just distributed differently.
+              </p>
+            </section>
+
+            <section class="visualization">
+              <h2>Visualization</h2>
+              <div id="orthogonality-viz"></div>
+            </section>
+
+            <section class="future-work">
+              <h3>Interactive Elements to be Added:</h3>
+              <ul>
+                <li>Adjustable noise level slider</li>
+                <li>Statistical analysis of noise distribution in both domains</li>
+                <li>Demonstration of how changing the basis affects noise distribution</li>
+                <li>Visualization of the orthogonality property</li>
+              </ul>
+            </section>
+          </div>
+        </div>
+      </section>
+      
+      <!-- Channel Coding Section -->
+      <section id="channel-coding" class="visualization-section">
+        <h2 class="section-header">SNR and Channel Coding Visualization</h2>
+        <div class="section-content">
+          <div class="page-container">
+            <section class="explanation">
+              <h2>Channel Capacity in Frequency Domain</h2>
+              <p>
+                In communication systems, the Shannon-Hartley theorem shows that the channel capacity 
+                depends on the signal-to-noise ratio (SNR). When we transform a signal to the Fourier domain, 
+                each frequency component can be treated as an independent channel with its own SNR.
+              </p>
+              
+              <div id="channel-coding-formula" class="katex-block"></div>
+              
+              <p>
+                Where C is the total capacity, P_i is the power allocated to the ith frequency component, and 
+                N_i is the noise power at that frequency. The optimal power allocation follows the water-filling 
+                principle, allocating more power to frequencies with better SNR.
+              </p>
+            </section>
+
+            <section class="visualization">
+              <h2>Visualization</h2>
+              <div id="channel-coding-viz"></div>
+            </section>
+
+            <section class="future-work">
+              <h3>Interactive Elements to be Added:</h3>
+              <ul>
+                <li>Adjustable total power budget</li>
+                <li>Customizable noise profile</li>
+                <li>Comparison between different power allocation strategies</li>
+                <li>Visualization of how water-filling algorithm works</li>
+                <li>Computation of total capacity and efficiency metrics</li>
+              </ul>
+            </section>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>
+        Interactive Visualizations for Signal Processing and Linear Algebra Concepts
+      </p>
+    </footer>
+
+    <!-- Back to Top Button -->
+    <div class="back-to-top" id="back-to-top" style="display: none;">↑</div>
+  </div>
+
+  <!-- Load our JavaScript file with all the visualizations -->
+</body>
+</html>

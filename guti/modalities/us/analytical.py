@@ -1324,6 +1324,7 @@ t0 = time.perf_counter()
 
 from guti.data_utils import Parameters
 from guti.core import get_bitrate, get_bitrate_channel_capacity, noise_floor_heuristic
+from guti.noise_models import compute_noise_effective
 from guti.data_utils import save_svd
 
 noise_level = args.noise_level
@@ -1331,6 +1332,21 @@ s_normalized = None
 bitrate_svd = None
 bitrate_slq = None
 saved_svd_path = None
+
+matrix_normalization_scale = (
+    1.0
+    if args.disable_matrix_normalization
+    else 1.0 / math.sqrt(len(source_positions) * len(sensor_positions))
+)
+if noise_level is None:
+    raw_noise_level = compute_noise_effective(
+        "us_analytical",
+        n_sensors=len(sensor_positions),
+        frequency_hz=center_frequency,
+    )
+    noise_level = raw_noise_level * matrix_normalization_scale
+    print(f"noise_eff (raw matrix units): {raw_noise_level}")
+    print(f"noise_level (analysis matrix units): {noise_level}")
 
 if bitrate_method in {"svd", "both"}:
     G_svd = G if G.device.type == svd_device else G.to(svd_device)
@@ -1367,7 +1383,7 @@ if bitrate_method in {"svd", "both"}:
         s_normalized = s
     else:
         s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
-    if args.noise_level is None:
+    if noise_level is None:
         noise_level = noise_floor_heuristic(
             s_normalized,
             heuristic=args.noise_heuristic,

@@ -1,12 +1,14 @@
 import type { Metadata } from "next";
 import { Analytics } from "@vercel/analytics/react";
 import "katex/dist/katex.min.css";
-
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Experiments.house",
+  title: "A Unified Theory of Brain Sensing",
+  description:
+    "Computing the theoretical information limit of brain imaging modalities from first principles.",
 };
+
 export default function RootLayout({
   children,
 }: {
@@ -14,11 +16,13 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+      </head>
       <body>
-        <div className="flex justify-center">
-          <div className="font-serif container p-6 text-gray-900 max-w-xl">
-            <div className="prose prose-sm">{children}</div>
-          </div>
+        <div className="page-wrapper">
+          <article>{children}</article>
         </div>
         <Analytics />
       </body>
