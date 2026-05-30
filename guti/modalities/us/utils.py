@@ -1,4 +1,4 @@
-from guti.core import get_voxel_mask, get_sensor_positions, get_grid_positions, get_sensor_positions
+from guti.core import BRAIN_RADIUS, get_voxel_mask, get_sensor_positions, get_grid_positions, get_sensor_positions
 import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
@@ -339,18 +339,17 @@ def simulate_free_field_propagation(
         # Replace zeros with small epsilon to avoid division by zero
         distances = torch.where(zero_distances, torch.tensor(1e-10, device=device), distances)
     
-    # Calculate expected pressure based on point source formula from acoustic wave theory
-    # Combines point source pressure equation p = (4πR)^(-1) * m''(t-R/c) (see Pierce's acoustics formula 4.3.8)
-    # with K-wave's pressure-to-density source conversion
-    # The mass source acceleration m'' is related to pressure through the wavenumber k
-    # Final formula: P = 1/(4πR) * (2π/λ) * peak_pressure * dx^2
-    # where R is distance, λ is wavelength, dx is voxel size
-    
+    # Scale each source by its effective cell volume in the hemisphere source grid
+    # rather than the simulation voxel size. This keeps cross-frequency sweeps tied
+    # to source discretization instead of the medium-resolution dx.
+    num_sources = source_signals.shape[0]
+    source_volume_m3 = (2.0 / 3.0) * np.pi * (BRAIN_RADIUS * 1e-3) ** 3
+    source_cell_volume = source_volume_m3 / float(num_sources)
+
     # Calculate propagator factor (spatial Green's function component)
     wavelength = sound_speed / center_frequency
     wavenumber = 2 * torch.pi / wavelength
-    spatial_step = torch.mean(voxel_size)
-    propagator_factor = (2 * wavenumber * spatial_step**2) / (4 * torch.pi * distances)
+    propagator_factor = (2 * wavenumber * source_cell_volume) / (4 * torch.pi * distances)
     
     # If only the propagator matrix is required, return early
     if not compute_time_series:
@@ -360,7 +359,6 @@ def simulate_free_field_propagation(
     travel_times = distances / sound_speed
     delay_steps = (torch.floor(travel_times / time_step)).int()
     
-    num_sources = source_signals.shape[0]
     num_receivers = receiver_positions.shape[0]
     num_time_steps = source_signals.shape[1]
     

@@ -11,3 +11,6 @@ results/archive/
 guti/modalities/meg/combined_jacobian.npy
 .cache/
 .vscode
+results_modal/
+guti/modalities/us/results/
+plots/

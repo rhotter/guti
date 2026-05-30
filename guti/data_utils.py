@@ -19,7 +19,7 @@ def save_svd(
     modality_name: str,
     params: Optional[Parameters] = None,
     default_run: bool = False,
-) -> None:
+) -> str:
     """
     Save the singular value spectrum and optional parameters to a file.
 

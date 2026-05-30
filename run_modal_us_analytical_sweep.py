@@ -260,6 +260,43 @@ def append_summary_record(log_dir: Path, record: dict) -> None:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def write_sdk_job_artifacts(output_dir: Path, output: dict) -> tuple[Path, Path | None]:
+    json_dir = output_dir / "json"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    json_path = json_dir / output["result_json_name"]
+    json_path.write_bytes(output["result_json_payload"])
+
+    npz_path: Path | None = None
+    if output.get("npz_payload") is not None:
+        npz_name = output.get("npz_download_name") or output.get("npz_name")
+        if npz_name:
+            npz_path = output_dir / npz_name
+            npz_path.parent.mkdir(parents=True, exist_ok=True)
+            npz_path.write_bytes(output["npz_payload"])
+    return json_path, npz_path
+
+
+def redownload_sdk_job_jsons(output_dir: Path, outputs: list[dict]) -> Path:
+    json_dir = output_dir / "json"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    aggregate_path = output_dir / "all_job_results.jsonl"
+    sorted_outputs = sorted(
+        outputs,
+        key=lambda item: (
+            item.get("index") is None,
+            item.get("index") if item.get("index") is not None else 0,
+        ),
+    )
+    with aggregate_path.open("w", encoding="utf-8") as aggregate:
+        for output in sorted_outputs:
+            json_path = json_dir / output["result_json_name"]
+            json_path.write_bytes(output["result_json_payload"])
+            aggregate.write(
+                json.dumps(output["result_record"], sort_keys=True, allow_nan=False) + "\n"
+            )
+    return aggregate_path
+
+
 def run_with_modal_sdk(
     run_specs: list[dict],
     jobs: int,
@@ -278,6 +315,8 @@ def run_with_modal_sdk(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_dir = Path(log_dir_arg)
     log_dir.mkdir(parents=True, exist_ok=True)
+    spec_by_index = {spec["index"]: spec for spec in run_specs}
+    downloaded_outputs: list[dict] = []
 
     failure_code: int | None = None
     total_batches = (len(run_specs) + jobs - 1) // jobs
@@ -285,92 +324,87 @@ def run_with_modal_sdk(
         with modal_module.app.run():
             for batch_index, batch in enumerate(batched(run_specs, jobs), start=1):
                 print(f"\nSubmitting SDK batch {batch_index}/{total_batches} ({len(batch)} runs)")
-                outputs = list(
-                    modal_module.run_us_analytical.map(
-                        [spec["analytical_args"] for spec in batch],
-                        order_outputs=True,
-                        return_exceptions=True,
-                        wrap_returned_exceptions=False,
+                stop_after_batch = False
+                try:
+                    for output in modal_module.run_us_analytical.map(
+                        batch,
+                        order_outputs=False,
+                    ):
+                        downloaded_outputs.append(output)
+                        json_path, npz_path = write_sdk_job_artifacts(output_dir, output)
+                        spec = spec_by_index.get(output["index"])
+                        record = {
+                            "runner": "sdk",
+                            "status": output["status"],
+                            "index": output["index"],
+                            "total": output["total"],
+                            "frequency_khz": output["frequency_khz"],
+                            "n_sources": output["n_sources"],
+                            "n_sensors": output["n_sensors"],
+                            "analytical_args": spec["analytical_args"] if spec is not None else None,
+                            "command": spec["command"] if spec is not None else None,
+                            "returncode": output.get("returncode"),
+                            "bitrate": output.get("bitrate"),
+                            "json_downloaded": str(json_path),
+                            "npz_downloaded": str(npz_path) if npz_path is not None else None,
+                            "has_payload": npz_path is not None,
+                        }
+                        append_summary_record(log_dir, record)
+                        bitrate_text = (
+                            f" bitrate={output['bitrate']}"
+                            if output.get("bitrate") is not None
+                            else ""
+                        )
+                        npz_text = (
+                            f" npz={npz_path}"
+                            if npz_path is not None
+                            else " no npz result found"
+                        )
+                        print(
+                            f"[{output['status']}] {output['index']}/{output['total']} "
+                            f"freq={output['frequency_khz']}kHz "
+                            f"sources={output['n_sources']} sensors={output['n_sensors']}"
+                            f"{bitrate_text} json={json_path}{npz_text}"
+                        )
+                        if output["status"] != "ok" and failure_code is None:
+                            failure_code = output.get("returncode") or 1
+                            if not continue_on_error:
+                                stop_after_batch = True
+                except Exception as exc:
+                    append_summary_record(
+                        log_dir,
+                        {
+                            "runner": "sdk",
+                            "status": "failed",
+                            "index": None,
+                            "total": len(run_specs),
+                            "frequency_khz": None,
+                            "n_sources": None,
+                            "n_sensors": None,
+                            "analytical_args": None,
+                            "command": None,
+                            "returncode": None,
+                            "bitrate": None,
+                            "json_downloaded": None,
+                            "npz_downloaded": None,
+                            "has_payload": False,
+                            "exception": str(exc),
+                            "batch_index": batch_index,
+                        },
                     )
-                )
-                for spec, output in zip(batch, outputs):
-                    if isinstance(output, Exception):
-                        append_summary_record(
-                            log_dir,
-                            {
-                                "runner": "sdk",
-                                "status": "failed",
-                                "index": spec["index"],
-                                "total": spec["total"],
-                                "frequency_khz": spec["frequency_khz"],
-                                "n_sources": spec["n_sources"],
-                                "n_sensors": spec["n_sensors"],
-                                "analytical_args": spec["analytical_args"],
-                                "command": spec["command"],
-                                "exception": str(output),
-                            },
-                        )
-                        print(
-                            f"[failed] {spec['index']}/{spec['total']} "
-                            f"freq={spec['frequency_khz']}kHz "
-                            f"sources={spec['n_sources']} sensors={spec['n_sensors']} "
-                            f"exception={output}"
-                        )
-                        failure_code = failure_code or 1
-                        if not continue_on_error:
-                            return failure_code
-                        continue
+                    aggregate_path = redownload_sdk_job_jsons(output_dir, downloaded_outputs)
+                    print(f"Re-downloaded {len(downloaded_outputs)} job JSONs to {output_dir / 'json'}")
+                    print(f"Wrote aggregate SDK results to {aggregate_path}")
+                    raise
+                if stop_after_batch:
+                    aggregate_path = redownload_sdk_job_jsons(output_dir, downloaded_outputs)
+                    print(f"Re-downloaded {len(downloaded_outputs)} job JSONs to {output_dir / 'json'}")
+                    print(f"Wrote aggregate SDK results to {aggregate_path}")
+                    return failure_code or 1
 
-                    filename, payload = output
-                    if payload is not None:
-                        output_path = output_dir / filename
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
-                        output_path.write_bytes(payload)
-                        append_summary_record(
-                            log_dir,
-                            {
-                                "runner": "sdk",
-                                "status": "ok",
-                                "index": spec["index"],
-                                "total": spec["total"],
-                                "frequency_khz": spec["frequency_khz"],
-                                "n_sources": spec["n_sources"],
-                                "n_sensors": spec["n_sensors"],
-                                "analytical_args": spec["analytical_args"],
-                                "command": spec["command"],
-                                "downloaded": str(output_path),
-                                "has_payload": True,
-                            },
-                        )
-                        print(
-                            f"[ok] {spec['index']}/{spec['total']} "
-                            f"freq={spec['frequency_khz']}kHz "
-                            f"sources={spec['n_sources']} sensors={spec['n_sensors']} "
-                            f"downloaded={output_path}"
-                        )
-                    else:
-                        append_summary_record(
-                            log_dir,
-                            {
-                                "runner": "sdk",
-                                "status": "ok",
-                                "index": spec["index"],
-                                "total": spec["total"],
-                                "frequency_khz": spec["frequency_khz"],
-                                "n_sources": spec["n_sources"],
-                                "n_sensors": spec["n_sensors"],
-                                "analytical_args": spec["analytical_args"],
-                                "command": spec["command"],
-                                "downloaded": None,
-                                "has_payload": False,
-                            },
-                        )
-                        print(
-                            f"[ok] {spec['index']}/{spec['total']} "
-                            f"freq={spec['frequency_khz']}kHz "
-                            f"sources={spec['n_sources']} sensors={spec['n_sensors']} "
-                            "no npz result found"
-                        )
+    aggregate_path = redownload_sdk_job_jsons(output_dir, downloaded_outputs)
+    print(f"Re-downloaded {len(downloaded_outputs)} job JSONs to {output_dir / 'json'}")
+    print(f"Wrote aggregate SDK results to {aggregate_path}")
 
     if failure_code is not None and not continue_on_error:
         return failure_code

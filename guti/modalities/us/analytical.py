@@ -8,12 +8,14 @@ We treat the "independent variables" in ultrasound imaging as sources. This reli
 import torch
 import math
 import numpy as np
+import json
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from guti.data_utils import save_svd
 from guti.modalities.us.utils import create_medium, create_sources_real, create_receivers_real, simulate_free_field_propagation, plot_medium
 import time
+from pathlib import Path
 
 import torch, torch.backends.cuda as cu
 import torch.cuda.comm as cuda_comm
@@ -78,6 +80,14 @@ def bitrate_slq_torch_gpu_chunked(
     normalize_scale: float = 1.0,
     verbose: bool = False,
 ):
+    """Approximate the Shannon bitrate using Stochastic Lanczos Quadrature.
+
+    The exact SVD path computes sum_i log2(1 + sigma_i^2 / noise^2). This
+    routine estimates the equivalent trace-log expression
+    Tr log(I + A A^T / noise^2) without forming the full spectrum. Random
+    Rademacher probe vectors estimate the trace, and Lanczos turns each probe's
+    quadratic form into a small tridiagonal eigendecomposition.
+    """
     if isinstance(A_cpu, torch.Tensor):
         assert A_cpu.device.type == "cpu"
     m, n = A_cpu.shape
@@ -589,6 +599,13 @@ def bitrate_slq_torch_gpu_streaming(
     normalize_scale: float = 1.0,
     verbose: bool = False,
 ):
+    """Streaming SLQ bitrate estimate without materializing the propagation matrix.
+
+    This estimates the same trace-log bitrate as ``bitrate_slq_torch_gpu_chunked``,
+    but builds only the matrix chunks needed for each Lanczos matvec. It is the
+    path used for large analytical sweeps where storing the full sensor-time by
+    source matrix would dominate memory.
+    """
     m = num_sensors_total * nt
     n = num_sources_total
     left = (m <= n) if use_left_if_smaller else True
@@ -1040,6 +1057,49 @@ def estimate_frobenius_norm_sq_streaming_probe_parallel(
 
 import argparse
 
+
+def _sanitize_json_value(value):
+    if isinstance(value, dict):
+        return {str(k): _sanitize_json_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_json_value(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_sanitize_json_value(v) for v in value.tolist()]
+    if isinstance(value, np.generic):
+        return _sanitize_json_value(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+def _write_result_json(path_str: str | None, record: dict) -> None:
+    if not path_str:
+        return
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(_sanitize_json_value(record), sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _emit_result_json(record: dict) -> None:
+    sanitized = _sanitize_json_value(record)
+    payload = json.dumps(sanitized, sort_keys=True, allow_nan=False)
+    print(f"RESULT_JSON: {payload}", flush=True)
+    _write_result_json(args.result_json_path, sanitized)
+
+
+def _sqrt_nonnegative_estimate(value: float, label: str) -> float:
+    if not math.isfinite(value):
+        raise ValueError(f"{label} must be finite, got {value}")
+    if value < 0.0:
+        if value > -1e-12:
+            value = 0.0
+        else:
+            raise ValueError(f"{label} must be non-negative, got {value}")
+    return math.sqrt(value)
+
 parser = argparse.ArgumentParser(description='Ultrasound simulation parameters')
 parser.add_argument('--n_sources', type=int, default=32000, help='Number of source points')
 parser.add_argument('--n_sensors', type=int, default=1000, help='Number of sensor points') 
@@ -1073,6 +1133,17 @@ parser.add_argument('--noise_power_probes', type=int, default=16, help='Probes f
 parser.add_argument('--noise_iters', type=int, default=100, help='Power-iteration steps for spectral norm')
 parser.add_argument('--noise_level', type=float, default=None, help='Override noise level (skip estimation)')
 parser.add_argument('--noise_verbose', action='store_true', default=True, help='Print noise estimation logs')
+parser.add_argument(
+    '--disable_matrix_normalization',
+    action='store_true',
+    help='Use the raw propagation matrix instead of dividing by sqrt(n_sources * n_sensors).',
+)
+parser.add_argument(
+    '--result_json_path',
+    type=str,
+    default=None,
+    help='Optional path to save a strict JSON result record for this run.',
+)
 
 args = parser.parse_args()
 
@@ -1086,6 +1157,7 @@ bitrate_method = args.bitrate_method
 accumulate_on_cpu = args.accumulate_on_cpu
 
 print(f"n_sources: {n_sources}, n_sensors: {n_sensors}, temporal_sampling: {temporal_sampling}, sensor_batch_size: {sensor_batch_size}")
+print(f"matrix_normalization: {'disabled' if args.disable_matrix_normalization else 'enabled'}")
 
 # We create a jwave medium object. This is mostly useful for non-free field simulations, but we use it here for convenience/consistency.
 domain, medium_original, time_axis, brain_mask, skull_mask, scalp_mask = create_medium(central_frequency=center_frequency, pad=30)
@@ -1110,15 +1182,15 @@ source_signal = build_source_signal(
 source_signals = source_signal
 source_signals = np.tile(source_signals, (n_sources, 1))
 
-nt = time_axis.shape[0]//temporal_sampling + 1
+nt = math.ceil(time_axis.shape[0] / temporal_sampling)
 voxel_size = np.array(domain.dx)
+effective_time_resolution = time_step * temporal_sampling
 
 #%%
 
 # device for propagation (and potentially accumulation)
 device = "cuda"
 
-temporal_sampling = 5
 use_complex_ampitudes = False
 
 if args.slq_streaming and bitrate_method in {"svd", "both"}:
@@ -1143,6 +1215,7 @@ source_signals_t = torch.tensor(source_signals, device=device)
 voxel_size_t = torch.tensor(voxel_size, device=device)
 
 stream_device_ids = None
+slq_device_ids = None
 source_positions_t_list = None
 source_signals_t_list = None
 voxel_size_t_list = None
@@ -1151,6 +1224,7 @@ if args.slq_streaming and args.slq_probe_parallel:
         stream_device_ids = [int(x) for x in args.slq_devices.split(",") if x.strip() != ""]
     else:
         stream_device_ids = list(range(torch.cuda.device_count()))
+    slq_device_ids = stream_device_ids
     source_positions_t_list = [
         torch.tensor(source_positions, device=f"cuda:{dev}") for dev in stream_device_ids
     ]
@@ -1254,6 +1328,9 @@ from guti.data_utils import save_svd
 
 noise_level = args.noise_level
 s_normalized = None
+bitrate_svd = None
+bitrate_slq = None
+saved_svd_path = None
 
 if bitrate_method in {"svd", "both"}:
     G_svd = G if G.device.type == svd_device else G.to(svd_device)
@@ -1277,19 +1354,28 @@ if bitrate_method in {"svd", "both"}:
     ax.grid(True, which='both', linestyle='--', alpha=0.3)
     plt.tight_layout()
 
-    save_svd(s, f'us_free_field_analytical_frequency_sweep', params=Parameters(
+    saved_svd_path = save_svd(s, f'us_free_field_analytical_frequency_sweep', params=Parameters(
         num_sensors=len(sensor_positions),
         num_brain_grid_points=len(source_positions),
-        time_resolution=time_step,
+        time_resolution=effective_time_resolution,
         frequency_hz=center_frequency,
         comment=f"signal_type={args.signal_type},signal_cycles={args.signal_cycles},signal_window={args.signal_window}",
         vincent_trick=False
     ))
 
-    s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
-    noise_level = noise_floor_heuristic(s_normalized, heuristic=args.noise_heuristic, snr=args.noise_snr)
+    if args.disable_matrix_normalization:
+        s_normalized = s
+    else:
+        s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
+    if args.noise_level is None:
+        noise_level = noise_floor_heuristic(
+            s_normalized,
+            heuristic=args.noise_heuristic,
+            snr=args.noise_snr,
+        )
+    bitrate_svd = float(get_bitrate(s_normalized, noise_level, time_resolution=effective_time_resolution))
     print(f"noise_level: {noise_level}")
-    print(f"bitrate: {get_bitrate(s_normalized, noise_level, time_resolution=1.0)}")
+    print(f"bitrate: {bitrate_svd}")
     print(n_sensors)
     # print(f"bitrate: {get_bitrate_channel_capacity(s, args.noise_snr, nsensors_reference=n_sensors, n_sensors=n_sensors, time_resolution=1.0)}")
 
@@ -1297,7 +1383,10 @@ if bitrate_method in {"slq", "both"}:
     if not torch.cuda.is_available():
         print("CUDA unavailable; skipping SLQ bitrate approximation.")
     else:
-        normalize_scale = 1.0 / math.sqrt(len(source_positions) * len(sensor_positions))
+        if args.disable_matrix_normalization:
+            normalize_scale = 1.0
+        else:
+            normalize_scale = 1.0 / math.sqrt(len(source_positions) * len(sensor_positions))
         if args.slq_streaming:
             if noise_level is None:
                 if args.noise_heuristic == "first":
@@ -1351,7 +1440,10 @@ if bitrate_method in {"slq", "both"}:
                             device="cuda",
                             verbose=args.noise_verbose,
                         )
-                    noise_level = math.sqrt(frob_sq) / args.noise_snr
+                    noise_level = _sqrt_nonnegative_estimate(
+                        frob_sq,
+                        "streaming Frobenius norm estimate",
+                    ) / args.noise_snr
                 print(f"noise_level (estimated): {noise_level}")
             print("Computing bitrate using SLQ (streaming)")
             if args.slq_probe_parallel:
@@ -1365,7 +1457,7 @@ if bitrate_method in {"slq", "both"}:
                     nt,
                     sensor_batch_size,
                     noise_std_full_brain=noise_level,
-                    time_resolution=1.0,
+                    time_resolution=effective_time_resolution,
                     s=args.slq_s,
                     t=args.slq_t,
                     batch=args.slq_batch,
@@ -1373,6 +1465,7 @@ if bitrate_method in {"slq", "both"}:
                     verbose=args.slq_verbose,
                 )
             else:
+                slq_device_ids = [torch.cuda.current_device()]
                 bitrate_slq = bitrate_slq_torch_gpu_streaming(
                     compute_chunk_matrix,
                     num_sensors_total,
@@ -1380,7 +1473,7 @@ if bitrate_method in {"slq", "both"}:
                     nt,
                     sensor_batch_size,
                     noise_std_full_brain=noise_level,
-                    time_resolution=1.0,
+                    time_resolution=effective_time_resolution,
                     s=args.slq_s,
                     t=args.slq_t,
                     batch=args.slq_batch,
@@ -1409,7 +1502,10 @@ if bitrate_method in {"slq", "both"}:
                         chunk_rows=args.slq_chunk_rows,
                         verbose=args.noise_verbose,
                     )
-                    noise_level = math.sqrt(frob_sq) / args.noise_snr
+                    noise_level = _sqrt_nonnegative_estimate(
+                        frob_sq,
+                        "chunked Frobenius norm estimate",
+                    ) / args.noise_snr
                 print(f"noise_level (estimated): {noise_level}")
             print("Computing bitrate using SLQ")
             if args.slq_probe_parallel:
@@ -1417,10 +1513,11 @@ if bitrate_method in {"slq", "both"}:
                     device_ids = [int(x) for x in args.slq_devices.split(",") if x.strip() != ""]
                 else:
                     device_ids = list(range(torch.cuda.device_count()))
+                slq_device_ids = device_ids
                 bitrate_slq = bitrate_slq_torch_gpu_chunked_probe_parallel(
                     G_cpu,
                     noise_std_full_brain=noise_level,
-                    time_resolution=1.0,
+                    time_resolution=effective_time_resolution,
                     s=args.slq_s,
                     t=args.slq_t,
                     batch=args.slq_batch,
@@ -1434,10 +1531,11 @@ if bitrate_method in {"slq", "both"}:
                     device_ids = [int(x) for x in args.slq_devices.split(",") if x.strip() != ""]
                 else:
                     device_ids = list(range(torch.cuda.device_count()))
+                slq_device_ids = device_ids
                 bitrate_slq = bitrate_slq_torch_multi_gpu_sharded(
                     G_cpu,
                     noise_std_full_brain=noise_level,
-                    time_resolution=1.0,
+                    time_resolution=effective_time_resolution,
                     s=args.slq_s,
                     t=args.slq_t,
                     batch=args.slq_batch,
@@ -1449,7 +1547,7 @@ if bitrate_method in {"slq", "both"}:
                 bitrate_slq = bitrate_slq_torch_gpu_chunked(
                     G_cpu,
                     noise_std_full_brain=noise_level,
-                    time_resolution=1.0,
+                    time_resolution=effective_time_resolution,
                     s=args.slq_s,
                     t=args.slq_t,
                     batch=args.slq_batch,
@@ -1457,7 +1555,32 @@ if bitrate_method in {"slq", "both"}:
                     normalize_scale=normalize_scale,
                     verbose=args.slq_verbose,
                 )
+                slq_device_ids = [torch.cuda.current_device()]
         print(f"bitrate (SLQ GPU): {bitrate_slq}")
+
+result_record = {
+    "status": "ok",
+    "n_sources": int(len(source_positions)),
+    "n_sensors": int(len(sensor_positions)),
+    "frequency_hz": float(center_frequency),
+    "frequency_khz": float(center_frequency / 1_000.0),
+    "temporal_sampling": int(args.temporal_sampling),
+    "time_step_seconds": float(time_step),
+    "effective_time_resolution_seconds": float(effective_time_resolution),
+    "sensor_batch_size": int(args.sensor_batch_size),
+    "bitrate_method": bitrate_method,
+    "bitrate": bitrate_slq if bitrate_slq is not None else bitrate_svd,
+    "bitrate_slq": bitrate_slq,
+    "bitrate_svd": bitrate_svd,
+    "noise_level": noise_level,
+    "matrix_normalization": "disabled" if args.disable_matrix_normalization else "enabled",
+    "slq_streaming": bool(args.slq_streaming),
+    "slq_probe_parallel": bool(args.slq_probe_parallel),
+    "slq_multi_gpu": bool(args.slq_multi_gpu),
+    "slq_device_ids": slq_device_ids if slq_device_ids is not None else stream_device_ids,
+    "saved_svd_path": saved_svd_path,
+}
+_emit_result_json(result_record)
 
 exit(0)
 
