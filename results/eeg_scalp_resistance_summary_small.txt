@@ -1,0 +1,36 @@
+EEG scalp-to-scalp head volume resistance simulation
+
+Model:
+- Four concentric spherical layers using GUTI's radius constants.
+- brain: outer radius 80 mm, thickness 80 mm, conductivity 0.33 S/m.
+- csf: outer radius 81 mm, thickness 1 mm, conductivity 1.65 S/m.
+- skull: outer radius 86 mm, thickness 5 mm, conductivity 0.0099 S/m.
+- scalp: outer radius 92 mm, thickness 6 mm, conductivity 0.33 S/m.
+- Two identical circular scalp electrodes, 8 cm center-to-center arc spacing.
+- Uniform current density over each electrode.
+- Contact/electrode/gel/skin-interface impedance is not included.
+- Spherical harmonic truncation: l <= 240000.
+
+Selected results:
+area_cm2,equivalent_flat_radius_mm,resistance_ohm
+1e-06,0.006,289933.46
+9.878e-06,0.018,92533.63
+9.758e-05,0.056,29578.89
+0.0009639,0.175,9539.96
+0.009522,0.551,3159.79
+0.09406,1.730,1124.34
+0.2562,2.856,746.20
+0.5241,4.084,567.95
+1.072,5.842,438.61
+1.901,7.778,358.83
+5.177,12.837,250.73
+10.59,18.361,188.89
+25,28.209,125.73
+
+Area scaling:
+- Global log-log fit: R ~= 441.3 * A^-0.456 ohm, with A in cm^2.
+- The head-volume part falls more weakly than 1/A because current spreads in 3D tissue.
+
+Interpretation:
+These values are a lower bound on measured EEG impedance because contact
+impedance at the electrode/gel/skin interface is omitted.
