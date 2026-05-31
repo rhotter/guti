@@ -111,43 +111,47 @@ Shot noise at ANSI max: **σ ≈ 2.3×10⁻⁵** (√7 ≈ 2.65× better).
 
 **Scaling with sensor count:** If total detector area is fixed, each detector gets area ∝ 1/N → photon count ∝ 1/N → shot noise ∝ √N. Exponent = 0.5. However, the forward model singular values also scale as ~√N (more source-detector pairs → more rows in the Jacobian), so per-channel SNR stays approximately constant. Capacity increases with N only through additional spatial channels, with diminishing returns.
 
-### Ultrasound: acoustic thermal noise + electronic Johnson noise
+### Ultrasound: acoustic thermal modal power + electronic Johnson noise
 
-Two independent noise sources, combined in RSS:
+Two independent receiver noise sources are combined in RSS.
 
-**1. Acoustic thermal noise (Mellen 1952):** Thermal pressure fluctuations in the medium from Brownian motion of fluid molecules. The spectral density rises as f²:
+**1. Acoustic thermal modal power:** For one scalp tile, the accepted thermal acoustic power is
 ```
-NL = -15 + 20·log₁₀(f_kHz)   [dB re 1 µPa²/Hz]
-```
-At 50 kHz: NL ≈ 19 dB → **p_thermal ≈ 8.9 µPa/√Hz**. This is a thermodynamic limit — irreducible at body temperature.
-
-**2. Electronic Johnson noise:** V = √(4 k_B T R), R = 50 Ω → 0.93 nV/√Hz. Referred to pressure via transducer sensitivity S_rx = 1 mV/Pa: **p_electronic ≈ 0.93 µPa/√Hz**.
-
-**Acoustic thermal dominates** above ~10 kHz. At 50 kHz: ratio is ~10×. At 2 MHz: ratio is ~380×.
-
-Referred to forward-model units (dividing by transmit pressure P_tx = 10 kPa):
-```
-noise_fwd = p_total_eff / P_tx × √BW_eff
+A_elem = A_head / N
+lambda = c / f
+P_n = A_elem * (2*pi / lambda^2) * k_B * T * Delta_f
+p_thermal = sqrt((P_n / A_elem) * rho * c)
 ```
 
-**Pulse averaging:** US sends ~PRF = c/(2D) ≈ 5,133 pulse-echoes per second (limited by round-trip time at 150 mm brain depth). With brain states changing at f_brain = 1 Hz, each brain-state sample averages N_avg = PRF/f_brain ≈ 5,133 pulses, reducing noise by √5133 ≈ 72×. The effective noise bandwidth is BW_pulse × f_brain / PRF (≈ 9.7 Hz for 50 kHz US, ≈ 389 Hz for 2 MHz US). This ensures consistency with the capacity formula where time_resolution = 1/f_brain.
+This is the thermodynamic acoustic floor written as accepted half-space modes. It replaces the previous Mellen-plus-directivity calculation: do not multiply by a separate aperture directivity factor, because the accepted-mode count is already the spatial-mode normalization. After converting power back to pressure, `A_elem` cancels, so this ideal detector pressure floor is independent of `N` for fixed hemisphere coverage.
 
-**Aperture directivity:** Acoustic thermal noise is isotropic, but a finite-aperture transducer spatially filters it. When ka > 1 (element size > wavelength), the transducer only "sees" noise from within its beam solid angle. The effective noise reduction factor is `1/√(1 + ka²)`, where `ka = 2πf·a/c` and `a` is the element radius. Signal (echoes from within the beam) is unaffected, so SNR improves.
+**2. Electronic Johnson noise:** `V = sqrt(4 k_B T R)`, `R = 50 ohm` gives 0.93 nV/sqrt(Hz). Referred to pressure via transducer sensitivity `S_rx = 1 mV/Pa`: **p_electronic ≈ 0.93 microPa/sqrt(Hz)**.
 
-At N=1500 sensors on the scalp hemisphere (area ≈ 53,200 mm², element radius ≈ 3.4 mm):
+Referred to forward-model units:
+```
+p_total = sqrt(p_thermal^2 + (p_electronic_density * sqrt(BW_eff))^2)
+noise_fwd = p_total / P_tx
+noise_eff = noise_fwd / (Delta Z/Z)
+```
 
-| Frequency | p_thermal | ka | directivity | noise_eff (per brain sample) |
-|-----------|-----------|-----|-------------|------------------------------|
-| 50 kHz | 8.9 µPa/√Hz | 0.69 | 0.82 | 2.31×10⁻⁷ |
-| 500 kHz | 88.9 µPa/√Hz | 6.9 | 0.14 | 1.27×10⁻⁶ |
-| 2 MHz | 355.7 µPa/√Hz | 27.4 | 0.037 | 2.57×10⁻⁶ |
-| 5 MHz | 889.1 µPa/√Hz | 68.5 | 0.015 | 4.06×10⁻⁶ |
+with `P_tx = 10 kPa` and `Delta Z/Z = 0.01`.
 
-At 2 MHz, directivity provides a **27× noise reduction** and pulse averaging provides a **72× noise reduction**. Combined with the higher Mellen noise (40× in spectral density), the net noise_eff at 2 MHz is only 11× higher than at 50 kHz.
+**Pulse averaging:** US sends `PRF = c/(2D) ≈ 5,133` pulse-echoes per second at `D = 150 mm`. With brain states changing at `f_brain = 1 Hz`, each brain-state sample averages about 5,133 pulses. The effective bandwidth is `BW_eff = f_center * f_brain / PRF` (9.74 Hz for 50 kHz, 390 Hz for 2 MHz).
+
+The resulting code-generated floors are the same for N=1500 and N=6000 because the modal-power area factor cancels in pressure:
+
+| Frequency | BW_eff | p_thermal RMS | p_electronic RMS | noise_eff (per brain sample) |
+|-----------|--------|---------------|------------------|------------------------------|
+| 50 kHz | 9.74 Hz | 20.6 microPa | 2.89 microPa | 2.08×10⁻⁷ |
+| 500 kHz | 97.4 Hz | 0.652 mPa | 9.13 microPa | 6.52×10⁻⁶ |
+| 2 MHz | 390 Hz | 5.22 mPa | 18.3 microPa | 5.22×10⁻⁵ |
+| 5 MHz | 974 Hz | 20.6 mPa | 28.9 microPa | 2.06×10⁻⁴ |
+
+With pulse averaging, the effective acoustic thermal pressure grows approximately as `f^(3/2)` because the mode density contributes `f^2` and `BW_eff` contributes another factor of `f` under a square root.
 
 **Skull attenuation** remains the dominant challenge at clinical frequencies: ~15 dB/cm/MHz in bone, giving ~42 dB round trip at 2 MHz through 7 mm skull. This reduces the singular values by 125×. No SVD simulations currently exist above 70 kHz.
 
-**Scaling with sensor count:** More sensors → smaller elements → larger ka at a given frequency → more directivity → less thermal noise per element. But smaller elements also mean less signal per element (in ka > 1 regime the element acts as a spatial low-pass filter). The net effect depends on the scatterer geometry. In the ka < 1 regime (50 kHz), both signal and noise are element-area-independent, so noise doesn't scale with N (exponent = 0.0).
+**Scaling with sensor count:** Under this modal-power receiver model, thermal pressure noise is independent of element area after the accepted power is converted to pressure. Sensor count changes capacity through the forward matrix, not through a separate detector-noise exponent. Exponent = 0.0.
 
 ---
 
@@ -162,7 +166,7 @@ All values at reference bandwidth and sensor count.
 | **MEG OPM** | Atomic spin (spin projection) | 150 fT (15 fT/√Hz) | 5 fT (0.5 fT/√Hz, 1 cm³ cell) | 100 Hz | 1000 | 10 nA·m |
 | **fNIRS CW** | Photon shot noise | 62 ppm (5 mW) | 23 ppm (35 mW ANSI) | 10 Hz | 800 | 0.002 mm⁻¹ (Δμ_a) |
 | **TD-fNIRS** | Shot + gating | 440 ppm (5 mW) | 165 ppm (35 mW ANSI) | 10 Hz | 400 | 0.002 mm⁻¹ (Δμ_a) |
-| **Ultrasound** | Acoustic thermal | freq+aperture dependent | same | = f_center | varies | 0.01 (ΔZ/Z) |
+| **Ultrasound** | Acoustic thermal modal power | 2.08e-9 pressure ratio at 50 kHz | same | 9.74 Hz effective @ 50 kHz | 6000 | 0.01 (ΔZ/Z) |
 
 ### Sensor-count noise scaling
 
@@ -172,7 +176,7 @@ All values at reference bandwidth and sensor count.
 | MEG SQUID | 1.0 | Coil area ∝ 1/N, flux noise fixed → field noise ∝ N |
 | MEG OPM | 0.0 | Each vapor cell is independent |
 | fNIRS | 0.5 | Detector area ∝ 1/N → photons ∝ 1/N → shot noise ∝ √N |
-| Ultrasound | computed | Aperture directivity: noise depends on ka = 2πfa/c. Element radius a = √(scalp_area/(Nπ)). For ka < 1 (element < λ), noise is area-independent. For ka > 1 (element > λ), directivity reduces isotropic thermal noise by ~1/ka while preserving on-axis signal. Computed from first principles, not a fixed exponent. |
+| Ultrasound | 0.0 | Accepted modal power ∝ element area, but pressure conversion divides by element area, so the detector pressure floor is N-independent for fixed hemisphere coverage |
 
 ---
 
@@ -188,9 +192,9 @@ Using the largest available sensor configuration per modality. Temporal sampling
 | **MEG SQUID** | 1000 | 100 Hz | 5.00e-6 | 1,907 | 221 | **90,208** |
 | **MEG OPM** | 1000 | 100 Hz | 1.50e-5 | 1,133 | 491 | **178,741** |
 | **fNIRS CW** | 800 | 1 Hz | 3.09e-2 | 0.01 | 0 | **0** |
-| **US 50 kHz** | 1500 | 1 Hz | 2.31e-7 | 4,289,528 | 15,040 | **208,761** |
-| **US 2 MHz** | 1500 | 1 Hz | 2.57e-6 | 385,721 | 14,321 | **157,392** |
-| **US 2 MHz + skull** | 1500 | 1 Hz | 2.57e-6 | 3,064 | 13,681 | **60,133** |
+| **US 50 kHz** | 1500 | 1 Hz | 2.08e-7 | 4,752,941 | 15,044 | **210,984** |
+| **US 2 MHz** | 1500 | 1 Hz | 5.22e-5 | 18,971 | 13,819 | **96,224** |
+| **US 2 MHz + skull** | 1500 | 1 Hz | 5.22e-5 | 151 | 5,612 | **11,476** |
 
 ### Fundamental physics limits
 
@@ -200,11 +204,11 @@ Using the largest available sensor configuration per modality. Temporal sampling
 | **MEG SQUID** | 1000 | 100 Hz | 1.00e-7 | 95,335 | 494 | **288,700** | Body thermal B-field |
 | **MEG OPM** | 1000 | 100 Hz | 5.00e-7 | 33,992 | ~900 | **~200,000** | Spin projection (1 cm³ SERF cell) |
 | **fNIRS CW** | 800 | 1 Hz | 1.17e-2 | 0.03 | 0 | **0** | Shot noise @ ANSI max |
-| **US 50 kHz** | 1500 | 1 Hz | 2.31e-7 | 4,289,528 | 15,040 | **208,761** | Acoustic thermal |
-| **US 2 MHz** | 1500 | 1 Hz | 2.57e-6 | 385,721 | 14,321 | **157,392** | Acoustic thermal |
-| **US 2 MHz + skull** | 1500 | 1 Hz | 2.57e-6 | 3,064 | 13,681 | **60,133** | Acoustic thermal + skull |
+| **US 50 kHz** | 1500 | 1 Hz | 2.08e-7 | 4,752,941 | 15,044 | **210,984** | Acoustic thermal |
+| **US 2 MHz** | 1500 | 1 Hz | 5.22e-5 | 18,971 | 13,819 | **96,224** | Acoustic thermal |
+| **US 2 MHz + skull** | 1500 | 1 Hz | 5.22e-5 | 151 | 5,612 | **11,476** | Acoustic thermal + skull |
 
-US 2 MHz rows use the 50 kHz SVD spectrum (no 2 MHz simulation exists). The "+ skull" row applies 42 dB round-trip attenuation (15 dB/cm/MHz × 2 MHz × 7 mm × 2). Noise includes aperture directivity (ka=27, 27× reduction) and pulse averaging (N_avg=5133, 72× reduction).
+US 2 MHz rows use the 50 kHz SVD spectrum (no 2 MHz simulation exists). The "+ skull" row applies 42 dB round-trip attenuation (15 dB/cm/MHz × 2 MHz × 7 mm × 2). Noise uses the modal thermal-power formula and pulse-averaged bandwidth; no separate aperture-directivity multiplier is applied.
 
 ---
 
@@ -216,7 +220,7 @@ US 2 MHz rows use the 50 kHz SVD spectrum (no 2 MHz simulation exists). The "+ s
 
 **fNIRS** — Zero bits at both tiers. The 7× power increase from ANSI max (35 mW vs 5 mW) only improves shot noise by 2.65×. The fundamental bottleneck is attenuation: OD ≈ 4 at 30 mm means only 1 in 10,000 photons reach the detector. σ₁ = 3.5×10⁻⁴ is 33× below the fundamental noise floor. Reaching SNR₁ = 1 would require ~4.8 kW optical power (138,000× ANSI limit). fNIRS is fundamentally incapable of per-voxel imaging at depth; it measures bulk hemodynamic changes over large volumes.
 
-**Ultrasound** — Today = fundamental (acoustic thermal noise is irreducible at body temperature). At 50 kHz (free-field, no skull): **209k bits/s** with SNR₁ ≈ 4.3M. At 2 MHz (clinical frequency): Mellen noise is 40× higher in spectral density, but aperture directivity (ka=27, 27× reduction) and pulse averaging (5133 pulses/s, 72× reduction) keep the effective noise manageable — **157k bits/s** free-field. With skull attenuation (~42 dB round trip at 2 MHz), **60k bits/s** — still competitive with MEG SQUID and 59× better than EEG.
+**Ultrasound** — Today = fundamental (acoustic thermal noise is irreducible at body temperature). At 50 kHz (free-field, no skull): **211k bits/s** with SNR₁ ≈ 4.8M. At 2 MHz (clinical frequency), the modal thermal floor is much higher: `noise_eff` is 250× the 50 kHz value after pulse averaging, giving **96k bits/s** free-field. With skull attenuation (~42 dB round trip at 2 MHz), the same SVD estimate falls to **11.5k bits/s**. That is still above the EEG row in this table, but below the MEG rows.
 
 ---
 
@@ -237,7 +241,7 @@ bitrate = get_bitrate(s_raw, noise_eff, time_resolution=0.01)  # 100 Hz
 br_today = get_bitrate(s, compute_noise_effective("meg_squid", tier="today"), 0.01)
 br_fund  = get_bitrate(s, compute_noise_effective("meg_squid", tier="fundamental"), 0.01)
 
-# Ultrasound at different frequencies (Mellen noise scales as f²)
+# Ultrasound at different frequencies (modal thermal power scales through lambda)
 noise_50k = compute_noise_effective("us_analytical", n_sensors=1500, frequency_hz=50e3)
 noise_2M  = compute_noise_effective("us_analytical", n_sensors=1500, frequency_hz=2e6)
 ```
@@ -245,5 +249,5 @@ noise_2M  = compute_noise_effective("us_analytical", n_sensors=1500, frequency_h
 ## Open questions
 
 1. **Source amplitude choice**: 10 nA·m is a single cortical column. It penalizes EEG and fNIRS, which detect distributed activity. A multi-scale comparison varying source extent would be more informative.
-2. **Ultrasound ka regime**: At higher frequencies (>500 kHz), ka > 1 and larger elements would benefit from directional noise rejection (∝ √A). The current model is correct for the 50 kHz regime.
+2. **Ultrasound receive normalization**: The current model assumes each receiver tile accepts half-space acoustic modes and does not add a separate directivity correction. This should be revisited only if the forward model explicitly includes a matched receive aperture response.
 3. **fNIRS forward model units**: The zero-bitrate result should be validated by verifying the Jacobian has the expected units (mm, mapping mm⁻¹ absorption to dimensionless ΔI/I).

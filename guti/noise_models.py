@@ -123,35 +123,34 @@ _TD_FNIRS_NOISE_FUND = 1.0 / math.sqrt(
 
 # Ultrasound: noise in forward-model units (dimensionless pressure ratio)
 # The forward model maps scatterer reflectivity (dimensionless) to received
-# pressure ratio (dimensionless).  Two noise sources:
+# pressure ratio (dimensionless).  Two independent receiver noise sources:
 #
-# 1. Acoustic thermal noise (Mellen 1952):
-#    NL = -15 + 20·log₁₀(f_kHz)  [dB re 1 µPa²/Hz]
-#    At 50 kHz: NL ≈ 19 dB → S_p ≈ 7.9e-11 Pa²/Hz → p_th ≈ 8.9 µPa/√Hz
-#    This is thermal pressure fluctuations in the medium itself.
+# 1. Acoustic thermal noise from the accepted acoustic mode count:
+#    P_n = A_elem * (2π / λ²) * k_B T * Δf
+#    where A_elem is the scalp tile area per element.  This is the half-space
+#    modal/equipartition form of the same thermal physics behind Mellen's
+#    pressure-noise floor.  We convert the available acoustic power to an
+#    equivalent RMS pressure with I = P/A = p²/(ρc).
 #
 # 2. Electronic Johnson noise:
 #    V_noise = √(4 k_B T R), R = 50 Ω → 0.93 nV/√Hz
 #    Referred to pressure via transducer sensitivity S_rx = 1 mV/Pa:
-#    p_elec ≈ 0.93 µPa/√Hz
+#    p_elec ≈ 0.93 µPa/√Hz.
 #
 # Referred to forward-model units: noise_fwd = p_total / P_tx
-#   where P_tx ≈ 10 kPa (transmit pressure at brain depth)
+#   where P_tx ≈ 10 kPa (transmit pressure at brain depth).
 #
-# The noise model is *frequency-aware*:
-#   - Acoustic thermal noise (Mellen 1952) scales as f² in PSD (f in amplitude)
-#   - Aperture directivity: for ka > 1 the element spatially filters isotropic
-#     thermal noise, reducing effective noise by ~1/ka in amplitude.
-#     ka = 2πf·a/c, where a = element radius = √(scalp_area / (N·π)).
-#   - Pulse averaging: PRF = c/(2D) pulse-echoes per second, all seeing the
-#     same brain state.  Averaging N_avg = PRF/f_brain reduces noise by √N_avg.
-#     The effective noise bandwidth is BW_pulse * f_brain / PRF.
+# The noise model is frequency-aware.  The thermal mode density contributes
+# 1/λ² ∝ f² scaling, and pulse averaging reduces the effective bandwidth:
+#   PRF = c/(2D), N_avg = PRF/f_brain, BW_eff = BW_pulse * f_brain / PRF.
 _US_DEFAULT_CENTER_FREQ = 50e3  # Hz  (used when frequency not specified)
 _US_TRANSMIT_PRESSURE = 1e4  # Pa  (10 kPa at brain depth after skull)
 _US_TRANSDUCER_SENSITIVITY = 1e-3  # V/Pa
 _US_SOUND_SPEED = 1540.0  # m/s in soft tissue
+_US_TISSUE_DENSITY = 1000.0  # kg/m³, soft-tissue/water approximation
 _US_BRAIN_DEPTH = 0.150  # m  (max imaging depth, sets PRF)
 _US_DEFAULT_F_BRAIN = 1.0  # Hz  (brain-state temporal bandwidth)
+_US_ACCEPTED_SOLID_ANGLE = 2 * math.pi  # half-space modes accepted by surface elements
 
 # Scalp hemisphere area for element sizing: 2π × R² with R = 92 mm
 _US_SCALP_AREA_MM2 = 2 * math.pi * 92**2  # ~53,200 mm²
@@ -168,72 +167,82 @@ def _us_prf(depth_m: float = _US_BRAIN_DEPTH) -> float:
     return _US_SOUND_SPEED / (2 * depth_m)
 
 
-def _us_acoustic_thermal_noise(freq_hz: float) -> float:
-    """Mellen (1952) acoustic thermal noise spectral density in Pa/sqrt(Hz)."""
-    freq_khz = freq_hz / 1e3
-    nl_db = -15 + 20 * math.log10(freq_khz)  # dB re 1 µPa²/Hz
-    return math.sqrt(10 ** (nl_db / 10)) * 1e-6  # Pa/√Hz
+def _us_element_area_m2(n_sensors: int) -> float:
+    """Scalp hemisphere tile area represented by one ultrasound receiver."""
+    if n_sensors <= 0:
+        raise ValueError("n_sensors must be positive")
+    return _US_SCALP_AREA_MM2 * 1e-6 / n_sensors
 
 
-def _us_element_ka(freq_hz: float, n_sensors: int) -> float:
-    """Compute ka for a circular piston element tiling the scalp hemisphere."""
-    area_mm2 = _US_SCALP_AREA_MM2 / n_sensors
-    radius_m = math.sqrt(area_mm2 / math.pi) * 1e-3  # mm → m
-    k = 2 * math.pi * freq_hz / _US_SOUND_SPEED
-    return k * radius_m
+def _us_effective_bandwidth_hz(
+    freq_hz: float,
+    f_brain: float = _US_DEFAULT_F_BRAIN,
+) -> float:
+    """Pulse bandwidth after averaging pulse-echoes for one brain-state sample."""
+    # BW_pulse = freq_hz (100% fractional BW)
+    # PRF = c/(2D) ≈ 5133 Hz
+    # N_avg = PRF / f_brain
+    # BW_eff = BW_pulse / N_avg = BW_pulse * f_brain / PRF
+    return freq_hz * f_brain / _us_prf()
 
 
-def _us_directivity_factor(ka: float) -> float:
-    """Noise reduction factor from aperture directivity.
+def _us_acoustic_thermal_noise_power(
+    freq_hz: float,
+    bandwidth_hz: float,
+    n_sensors: int,
+) -> float:
+    """Acoustic thermal noise power accepted by one receiver element.
 
-    For a circular piston receiving isotropic noise:
-      ka << 1  →  omnidirectional, factor = 1 (no reduction)
-      ka >> 1  →  directional, factor ≈ 1/ka
-
-    We use a smooth interpolation: factor = 1 / sqrt(1 + ka²).
+    P_n = A_elem * (2π / λ²) * k_B T * Δf.
     """
-    return 1.0 / math.sqrt(1.0 + ka**2)
+    area_m2 = _us_element_area_m2(n_sensors)
+    wavelength_m = _US_SOUND_SPEED / freq_hz
+    mode_count = area_m2 * _US_ACCEPTED_SOLID_ANGLE / wavelength_m**2
+    return mode_count * K_B * BODY_TEMP_K * bandwidth_hz
+
+
+def _us_acoustic_thermal_pressure_rms(
+    freq_hz: float,
+    bandwidth_hz: float,
+    n_sensors: int,
+) -> float:
+    """Equivalent RMS pressure for the accepted thermal acoustic power."""
+    area_m2 = _us_element_area_m2(n_sensors)
+    power_w = _us_acoustic_thermal_noise_power(freq_hz, bandwidth_hz, n_sensors)
+    intensity_w_m2 = power_w / area_m2
+    return math.sqrt(intensity_w_m2 * _US_TISSUE_DENSITY * _US_SOUND_SPEED)
 
 
 def _us_total_noise_fwd(
     freq_hz: float,
     n_sensors: int | None = None,
     f_brain: float = _US_DEFAULT_F_BRAIN,
+    bandwidth_hz: float | None = None,
 ) -> float:
     """Total US noise in forward-model units per brain-state sample.
 
-    Combines acoustic thermal (frequency-dependent, aperture-filtered) and
-    electronic Johnson (frequency-independent) noise in RSS, then refers to
-    fwd-model units by dividing by transmit pressure.
+    Combines acoustic thermal modal power and electronic Johnson noise in RSS,
+    then refers to fwd-model units by dividing by transmit pressure.
 
     The noise bandwidth accounts for pulse averaging: each brain-state sample
     averages N_avg = PRF/f_brain pulse-echoes, so the effective bandwidth is
     BW_pulse * f_brain / PRF.  This ensures consistency with the capacity
     formula C = (1/2T) Σ log₂(1 + (σ/noise)²) where T = 1/f_brain.
     """
-    p_thermal = _us_acoustic_thermal_noise(freq_hz)
-
-    # Aperture directivity reduces thermal noise (but not electronic noise)
     n = n_sensors if n_sensors is not None else _US_DEFAULT_N_SENSORS
-    ka = _us_element_ka(freq_hz, n)
-    dir_factor = _us_directivity_factor(ka)
-    p_thermal_eff = p_thermal * dir_factor
+    bw_eff = (
+        bandwidth_hz
+        if bandwidth_hz is not None
+        else _us_effective_bandwidth_hz(freq_hz, f_brain)
+    )
+    p_thermal = _us_acoustic_thermal_pressure_rms(freq_hz, bw_eff, n)
+    p_electronic = _US_P_ELECTRONIC * math.sqrt(bw_eff)
+    p_total = math.sqrt(p_thermal**2 + p_electronic**2)
 
-    p_total = math.sqrt(p_thermal_eff**2 + _US_P_ELECTRONIC**2)
-
-    # Effective bandwidth after pulse averaging:
-    # BW_pulse = freq_hz (100% fractional BW)
-    # PRF = c/(2D) ≈ 5133 Hz
-    # N_avg = PRF / f_brain
-    # BW_eff = BW_pulse / N_avg = BW_pulse * f_brain / PRF
-    prf = _us_prf()
-    bw_pulse = freq_hz
-    bw_eff = bw_pulse * f_brain / prf
-
-    return p_total / _US_TRANSMIT_PRESSURE * math.sqrt(bw_eff)
+    return p_total / _US_TRANSMIT_PRESSURE
 
 
-# Default noise at 50 kHz (for the NoiseModel entry)
+# Default noise at 50 kHz, per pulse-averaged brain-state sample
 _US_NOISE_FWD_50K = _us_total_noise_fwd(_US_DEFAULT_CENTER_FREQ, _US_DEFAULT_N_SENSORS)
 
 # Neural current dipole amplitude (same for EEG, MEG)
@@ -434,11 +443,11 @@ NOISE_MODELS = {
     ),
     "us_analytical": NoiseModel(
         canonical_name="us_analytical",
-        noise_source="Acoustic thermal (Mellen) + electronic Johnson noise",
+        noise_source="Acoustic thermal modal power + electronic Johnson noise",
         measurement_units="dimensionless (pressure amplitude ratio)",
         reference_sensor_count=6000,
         sensor_count_noise_exponent=0.0,
-        reference_bandwidth_hz=_US_DEFAULT_CENTER_FREQ,  # BW = center freq
+        reference_bandwidth_hz=_us_effective_bandwidth_hz(_US_DEFAULT_CENTER_FREQ),
         today_best_noise=_US_NOISE_FWD_50K,
         physical_floor_noise=_US_NOISE_FWD_50K,  # thermal IS fundamental
         source_amplitude=_US_REFLECTIVITY,
@@ -450,9 +459,10 @@ NOISE_MODELS = {
         reference_total_snr=2000.0,
         notes=(
             "Frequency-aware: use frequency_hz kwarg in compute_noise_effective. "
-            "Acoustic thermal noise (Mellen 1952) scales as f²; dominates "
-            "electronic Johnson (~0.93 µPa/√Hz) above ~10 kHz.  "
-            "Defaults to 50 kHz.  At 2 MHz noise is ~195× higher."
+            "Acoustic thermal noise uses modal power "
+            "P_n=A_elem·2π/λ²·kBT·Δf, converted to pressure with I=p²/(ρc). "
+            "Electronic Johnson (~0.93 µPa/√Hz) is added in RSS. "
+            "Defaults to 50 kHz with pulse-averaged effective bandwidth."
         ),
     ),
 }
@@ -509,18 +519,21 @@ def compute_detector_noise_std(
     ----------
     tier : "today" or "fundamental"
     frequency_hz : float, optional
-        Center frequency — only used for ultrasound, where acoustic thermal
-        noise scales as f² (Mellen 1952).  Defaults to 50 kHz.
+        Center frequency — only used for ultrasound, where modal acoustic
+        thermal noise scales through λ.  Defaults to 50 kHz.
+    bandwidth_hz : float, optional
+        Measurement bandwidth.  For ultrasound this overrides the default
+        pulse-averaged effective bandwidth.
     """
     canon = canonicalize_modality_name(modality_name)
     model = NOISE_MODELS[canon]
 
     n = n_sensors if n_sensors is not None else model.reference_sensor_count
 
-    # Ultrasound: recompute noise from scratch (frequency + aperture aware)
+    # Ultrasound: recompute noise from scratch (frequency + modal bandwidth aware)
     if canon == "us_analytical":
         freq = frequency_hz if frequency_hz is not None else _US_DEFAULT_CENTER_FREQ
-        return _us_total_noise_fwd(freq, n_sensors=n)
+        return _us_total_noise_fwd(freq, n_sensors=n, bandwidth_hz=bandwidth_hz)
 
     if canon == "fmri_bold":
         return _fmri_relative_noise(
@@ -565,8 +578,11 @@ def compute_noise_effective(
     Parameters
     ----------
     frequency_hz : float, optional
-        Center frequency — only used for ultrasound (Mellen acoustic thermal
-        noise scales as f²).  Defaults to 50 kHz.
+        Center frequency — only used for ultrasound, where modal acoustic
+        thermal noise scales through λ.  Defaults to 50 kHz.
+    bandwidth_hz : float, optional
+        Measurement bandwidth.  For ultrasound this overrides the default
+        pulse-averaged effective bandwidth.
     """
     canon = canonicalize_modality_name(modality_name)
     model = NOISE_MODELS[canon]

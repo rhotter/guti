@@ -141,6 +141,7 @@ Here's a table of the equations used for each modality:
 | :--- | :--- | :--- | :--- |
 | EEG | Poisson equation | OpenMEEG | Conductivity of brain = conductivity of scalp = 33× conductivity of skull |
 | MEG | Biot-Savart | Analytical (Sarvas formula) | — |
+| fMRI | Reconstructed BOLD image model | Analytical Gaussian PSF + HRF | 1% BOLD contrast, finite voxel size, temporal HRF |
 | fNIRS | Radiative transfer equation | Analytical Green's function | Homogeneous absorption and scattering coefficients |
 | Ultrasound | Acoustic wave equation | Analytical Green's function | — |
 
@@ -161,8 +162,9 @@ Here's a table of the noise sources for each modality:
 | EEG | Johnson noise | ~90 nV (5 kΩ, 100 Hz BW) | Same — thermodynamic floor |
 | MEG SQUID | SQUID flux noise | 5 fT/√Hz | 0.1 fT/√Hz (body thermal) |
 | MEG OPM | Atomic spin noise | 15 fT/√Hz | 0.5 fT/√Hz (spin projection, 1 cm³ cell) |
+| fMRI | Thermal/reconstruction + physiological noise | BOLD response SNR derived from 1% contrast and tSNR ~80 | high-quality BOLD response SNR floor |
 | fNIRS | Shot noise | 62 ppm (5 mW) | 23 ppm (ANSI max, 35 mW) |
-| Ultrasound | Acoustic thermal (Mellen) | frequency-dependent | Same — thermodynamic floor |
+| Ultrasound | Acoustic thermal modal power | frequency-dependent | Same — thermodynamic floor |
 
 Each of these noise sources are additive, Gaussian, and independent across the sensors.
 

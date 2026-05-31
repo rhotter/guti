@@ -20,6 +20,10 @@ interface Variant {
   hash: string;
   num_sensors: number | null;
   source_spacing_mm: number | null;
+  grid_resolution_mm: number | null;
+  psf_fwhm_mm: number | null;
+  bold_contrast: number | null;
+  bold_snr: number | null;
   frequency_hz: number | null;
   n_singular_values: number;
   sv_indices: number[];
@@ -31,12 +35,6 @@ interface Variant {
   bitrate_physical_fundamental: number | null;
   bitrate_empirical_today: number | null;
   bitrate_empirical_fundamental: number | null;
-  detector_noise_today: number | null;
-  detector_noise_fundamental: number | null;
-  noise_effective_today: number | null;
-  noise_effective_fundamental: number | null;
-  noise_empirical_today: number | null;
-  noise_empirical_fundamental: number | null;
   snr_empirical_today: number | null;
 }
 
@@ -48,9 +46,8 @@ interface ModalityData {
   bitrate_modes?: Record<string, { label: string; description: string }>;
   noise_label_today: string;
   noise_label_fundamental: string;
-  noise_units?: string;
-  source_amplitude?: number;
-  source_amplitude_units?: string;
+  source_amplitude: number;
+  source_amplitude_units: string;
   typical_signal: number;
   variants: Variant[];
 }
@@ -64,11 +61,17 @@ const MODALITIES = [
   { key: "meg_squid", label: "MEG SQUID" },
   { key: "eeg_openmeeg", label: "EEG" },
   { key: "fnirs_analytical_cw", label: "fNIRS CW" },
+  { key: "fmri_bold", label: "fMRI" },
+  { key: "us_free_field_analytical_frequency_sweep", label: "Ultrasound" },
 ];
 
 const PARAM_LABELS: Record<string, string> = {
   num_sensors: "# sensors",
   source_spacing_mm: "source spacing (mm)",
+  grid_resolution_mm: "voxel size (mm)",
+  psf_fwhm_mm: "PSF FWHM (mm)",
+  bold_snr: "BOLD response SNR",
+  frequency_hz: "frequency (Hz)",
 };
 
 // viridis-ish palette
@@ -86,13 +89,6 @@ const bitrateFor = (v: Variant, tier: "today" | "fundamental", mode: NoiseMode) 
   }
   const physical = tier === "today" ? v.bitrate_physical_today : v.bitrate_physical_fundamental;
   return physical ?? (tier === "today" ? v.bitrate_today : v.bitrate_fundamental);
-};
-
-const noiseFloorFor = (v: Variant, tier: "today" | "fundamental", mode: NoiseMode) => {
-  if (mode === "empirical_observed_snr") {
-    return tier === "today" ? v.noise_empirical_today : v.noise_empirical_fundamental;
-  }
-  return tier === "today" ? v.noise_effective_today : v.noise_effective_fundamental;
 };
 
 // ── main component ────────────────────────────────────────────────────────────
@@ -205,11 +201,9 @@ export default function ScalingPlots() {
     const globalMax = Math.max(...filteredVariants.map((v) => v.singular_values[0]));
     const series = filteredVariants.map((v, i) => {
       const scale = normalized ? globalMax : 1;
-      const noiseFloor = noiseFloorFor(v, tier, noiseMode);
       return {
         label: `${PARAM_LABELS[sweepParam] ?? sweepParam}=${(v as any)[sweepParam]}`,
         color: COLORS[i % COLORS.length],
-        noiseFloor: noiseFloor === null ? null : noiseFloor / scale,
         data: v.sv_indices.map((idx, j) => ({
           idx,
           val: v.singular_values[j] / scale,
@@ -217,7 +211,7 @@ export default function ScalingPlots() {
       };
     });
     return { series, maxPoints: Math.max(...filteredVariants.map((v) => v.n_singular_values)) };
-  }, [filteredVariants, normalized, sweepParam, tier, noiseMode]);
+  }, [filteredVariants, normalized, sweepParam]);
 
   // ── render ────────────────────────────────────────────────────────────────
 
@@ -328,17 +322,19 @@ export default function ScalingPlots() {
             </label>
 
             {/* Noise model */}
-            <label style={{ display: "flex", alignItems: "center", gap: 4, color: "#374151" }}>
-              Mode:
-              <select
-                value={noiseMode}
-                onChange={(e) => setNoiseMode(e.target.value as NoiseMode)}
-                style={{ border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 6px", fontSize: 12 }}
-              >
-                <option value="physical_detector_floor">Physical detector floor</option>
-                <option value="empirical_observed_snr">Empirical observed SNR</option>
-              </select>
-            </label>
+            {chartType === "bitrate" && (
+              <label style={{ display: "flex", alignItems: "center", gap: 4, color: "#374151" }}>
+                Mode:
+                <select
+                  value={noiseMode}
+                  onChange={(e) => setNoiseMode(e.target.value as NoiseMode)}
+                  style={{ border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 6px", fontSize: 12 }}
+                >
+                  <option value="physical_detector_floor">Physical detector floor</option>
+                  <option value="empirical_observed_snr">Empirical observed SNR</option>
+                </select>
+              </label>
+            )}
 
             {/* Normalized toggle (spectra only) */}
             {chartType === "spectra" && (
@@ -353,12 +349,12 @@ export default function ScalingPlots() {
             )}
           </div>
 
-          {/* Noise info line */}
+          {/* SNR info line */}
           <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
             {noiseMode === "physical_detector_floor" ? (
               <>
-                Physical detector floor · detector noise today: {modalityData.noise_label_today} ·
-                source amplitude: {modalityData.source_amplitude ?? "—"} {modalityData.source_amplitude_units ?? ""}
+                Physical detector floor · noise today: {modalityData.noise_label_today} ·
+                source amplitude: {modalityData.source_amplitude} {modalityData.source_amplitude_units}
               </>
             ) : (
               <>
@@ -438,12 +434,7 @@ function SpectraChart({
   series,
   normalized,
 }: {
-  series: {
-    label: string;
-    color: string;
-    noiseFloor: number | null;
-    data: { idx: number; val: number }[];
-  }[];
+  series: { label: string; color: string; data: { idx: number; val: number }[] }[];
   normalized: boolean;
 }) {
   // Build unified data: array of {idx, series0, series1, ...}
@@ -456,7 +447,6 @@ function SpectraChart({
     series.forEach((s, i) => {
       const pt = s.data.find((d) => d.idx === idx);
       if (pt) row[`s${i}`] = pt.val;
-      if (s.noiseFloor !== null) row[`n${i}`] = s.noiseFloor;
     });
     return row;
   });
@@ -497,21 +487,6 @@ function SpectraChart({
             name={s.label}
             connectNulls
           />
-        ))}
-        {series.map((s, i) => (
-          s.noiseFloor === null ? null : (
-            <Line
-              key={`${s.label}-noise`}
-              dataKey={`n${i}`}
-              stroke={s.color}
-              strokeWidth={1}
-              dot={false}
-              name={`${s.label} noise floor`}
-              legendType="none"
-              connectNulls
-              strokeDasharray="4 4"
-            />
-          )
         ))}
       </LineChart>
     </ResponsiveContainer>

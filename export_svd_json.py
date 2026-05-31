@@ -70,6 +70,7 @@ MODALITIES = {
     "eeg_openmeeg":       "EEG (OpenMEEG)",
     "fnirs_analytical_cw": "fNIRS CW",
     "fmri_bold":          "fMRI BOLD",
+    "us_free_field_analytical_frequency_sweep": "Ultrasound",
 }
 
 # time resolution per modality (seconds)
@@ -79,6 +80,7 @@ TIME_RESOLUTION = {
     "eeg_openmeeg":       0.01,
     "fnirs_analytical_cw": 1.0,  # 1 Hz hemodynamic
     "fmri_bold":           2.0,  # TR = 2 s; HRF handled explicitly below
+    "us_free_field_analytical_frequency_sweep": 1.0,
 }
 
 
