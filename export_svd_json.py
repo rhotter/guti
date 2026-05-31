@@ -31,12 +31,12 @@ import numpy as np
 
 from guti.data_utils import list_svd_variants, load_svd_variant
 from guti.parameters import Parameters
-from guti.core import get_bitrate
+from guti.capacity import get_bitrate_from_average_output_power
+from guti.core import get_grid_positions
 from guti.noise_models import (
     capacity_forward_gain_scale,
-    compute_noise_empirical,
-    compute_noise_effective,
-    compute_empirical_snr,
+    compute_average_output_power,
+    compute_output_noise_std,
     get_noise_model,
     scale_singular_values_for_capacity,
 )
@@ -74,6 +74,32 @@ def downsample(arr, n):
     return idx.tolist(), arr[idx].tolist()
 
 
+def infer_matrix_shape(modality, params, n_singular_values):
+    if getattr(params, "matrix_size", None) is not None:
+        n_outputs, n_sources = params.matrix_size
+        return int(n_outputs), int(n_sources)
+
+    if modality.startswith("meg_"):
+        if params.num_sensors is None or params.source_spacing_mm is None:
+            raise ValueError("MEG capacity needs num_sensors and source_spacing_mm")
+        n_outputs = 3 * int(params.num_sensors)
+        n_sources = 3 * len(get_grid_positions(grid_spacing_mm=params.source_spacing_mm))
+        return n_outputs, n_sources
+
+    if modality.startswith("eeg_"):
+        if params.num_sensors is None or params.num_brain_grid_points is None:
+            raise ValueError("EEG capacity needs num_sensors and num_brain_grid_points")
+        return int(params.num_sensors), 3 * int(params.num_brain_grid_points)
+
+    if params.num_sensors is not None and params.num_brain_grid_points is not None:
+        return int(params.num_sensors), int(params.num_brain_grid_points)
+
+    raise ValueError(
+        f"Cannot infer matrix shape for {modality}; singular values alone "
+        f"only give min(n_outputs, n_sources)={n_singular_values}"
+    )
+
+
 def compute_bitrate(
     s,
     modality,
@@ -83,20 +109,30 @@ def compute_bitrate(
     time_resolution=0.01,
     params=None,
 ):
-    model = get_noise_model(modality)
     s_capacity = scale_singular_values_for_capacity(
         s,
         modality,
         params=params,
         voxel_size_mm=getattr(params, "grid_resolution_mm", None),
     )
-    if model.typical_signal_amplitude > 0.0:
-        noise = compute_noise_empirical(s_capacity, modality, n_sensors=n_sensors,
-                                        frequency_hz=freq, tier=tier)
-    else:
-        noise = compute_noise_effective(modality, n_sensors=n_sensors,
-                                        frequency_hz=freq, tier=tier)
-    return float(get_bitrate(s_capacity, noise, time_resolution=time_resolution))
+    n_outputs, n_sources = infer_matrix_shape(modality, params, len(s_capacity))
+    average_output_power = compute_average_output_power(modality)
+    noise = compute_output_noise_std(
+        modality,
+        n_sensors=n_sensors,
+        frequency_hz=freq,
+        tier=tier,
+    )
+    return float(
+        get_bitrate_from_average_output_power(
+            s_capacity,
+            average_output_power=average_output_power,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            noise=noise,
+            time_resolution=time_resolution,
+        )
+    )
 
 
 def export_modality(modality, label):
@@ -140,7 +176,13 @@ def export_modality(modality, label):
 
         # Empirical SNR
         try:
-            snr_emp = float(compute_empirical_snr(modality, n_sensors=n_sensors, frequency_hz=freq))
+            noise_today = compute_output_noise_std(
+                modality,
+                n_sensors=n_sensors,
+                frequency_hz=freq,
+                tier="today",
+            )
+            snr_emp = float(np.sqrt(compute_average_output_power(modality)) / noise_today)
         except Exception:
             snr_emp = None
 

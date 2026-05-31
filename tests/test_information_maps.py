@@ -3,15 +3,16 @@ import unittest
 import numpy as np
 
 from compute_information_maps import (
-    empirical_noise_for_matrix,
     posterior_info_scalar,
     posterior_info_vector3,
+    scale_matrix_for_output_power,
 )
 from export_svd_json import compute_bitrate
-from guti.core import get_bitrate
+from guti.capacity import get_bitrate_from_average_output_power
 from guti.noise_models import (
     capacity_forward_gain_scale,
-    compute_noise_empirical,
+    compute_average_output_power,
+    compute_output_noise_std,
 )
 from guti.parameters import Parameters
 
@@ -45,24 +46,51 @@ class InformationMapMathTests(unittest.TestCase):
         np.testing.assert_allclose(posterior_det, expected_det, atol=1e-12)
         np.testing.assert_allclose(info, -0.5 * np.log2(expected_det), atol=1e-12)
 
-    def test_empirical_noise_preserves_ratios_under_global_gain(self):
+    def test_output_power_scaling_preserves_ratios_under_global_gain(self):
         rng = np.random.default_rng(2)
         A = rng.normal(size=(6, 10))
 
-        noise_a, meta_a = empirical_noise_for_matrix(A, "meg_opm", n_sensors=200)
-        noise_b, meta_b = empirical_noise_for_matrix(37.0 * A, "meg_opm", n_sensors=200)
+        A_a, noise_a, meta_a = scale_matrix_for_output_power(A, "meg_opm", n_sensors=200)
+        A_b, noise_b, meta_b = scale_matrix_for_output_power(37.0 * A, "meg_opm", n_sensors=200)
 
-        self.assertAlmostEqual(meta_a["empirical_snr"], meta_b["empirical_snr"])
-        np.testing.assert_allclose(A / noise_a, (37.0 * A) / noise_b, atol=1e-12)
+        self.assertAlmostEqual(meta_a["output_snr"], meta_b["output_snr"])
+        np.testing.assert_allclose(A_a / noise_a, A_b / noise_b, atol=1e-12)
+
+    def test_output_power_scaling_matches_svd_total_input_power_path(self):
+        rng = np.random.default_rng(3)
+        A = rng.normal(size=(6, 10))
+        s = np.linalg.svd(A, compute_uv=False)
+
+        _, matrix_noise, meta = scale_matrix_for_output_power(
+            A,
+            "meg_opm",
+            n_sensors=A.shape[0],
+        )
+        svd_bitrate = get_bitrate_from_average_output_power(
+            s,
+            average_output_power=compute_average_output_power("meg_opm"),
+            noise=compute_output_noise_std("meg_opm", n_sensors=A.shape[0]),
+            n_sources=A.shape[1],
+            n_outputs=A.shape[0],
+        )
+        matrix_bitrate = get_bitrate_from_average_output_power(
+            s,
+            average_output_power=compute_average_output_power("meg_opm"),
+            noise=matrix_noise,
+            n_sources=A.shape[1],
+            n_outputs=A.shape[0],
+        )
+
+        np.testing.assert_allclose(meta["total_input_power"], meta["per_source_input_power"] * A.shape[1])
+        np.testing.assert_allclose(matrix_bitrate, svd_bitrate, rtol=1e-12)
 
     def test_fnirs_bitrate_uses_voxel_integrated_transfer_function(self):
         s_integrated = np.array([6.0e-2, 2.0e-2, 1.0e-2])
-        params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
-        noise = compute_noise_empirical(
-            s_integrated,
-            "fnirs_analytical_cw",
-            n_sensors=800,
-            tier="today",
+        params = Parameters(
+            num_sensors=800,
+            grid_resolution_mm=6.0,
+            num_brain_grid_points=4,
+            matrix_size=(3, 4),
         )
 
         actual = compute_bitrate(
@@ -73,9 +101,16 @@ class InformationMapMathTests(unittest.TestCase):
             time_resolution=1.0,
             params=params,
         )
-        expected = get_bitrate(
+        expected = get_bitrate_from_average_output_power(
             s_integrated,
-            noise,
+            average_output_power=compute_average_output_power("fnirs_analytical_cw"),
+            noise=compute_output_noise_std(
+                "fnirs_analytical_cw",
+                n_sensors=800,
+                tier="today",
+            ),
+            n_sources=4,
+            n_outputs=3,
             time_resolution=1.0,
         )
 

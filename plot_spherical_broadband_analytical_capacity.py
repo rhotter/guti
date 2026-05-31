@@ -11,10 +11,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
-from guti.core import (
-    get_bitrate,
-    noise_floor_heuristic,
-    water_filling_spectrum,
+from guti.capacity import (
+    get_bitrate_from_average_output_power,
+    get_capacity_from_average_output_power,
 )
 
 US_ANALYTICAL_SOURCE_RADIUS_M = 0.08
@@ -279,35 +278,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Raise an error if a frequency does not converge before hitting the resolution caps.",
     )
     parser.add_argument(
-        "--capacity-snr",
-        type=float,
-        default=2000.0,
-        help="SNR passed to get_bitrate_channel_capacity().",
-    )
-    parser.add_argument(
-        "--noise-heuristic",
-        choices=("power", "first"),
-        default="power",
-        help="Noise heuristic used with get_bitrate(). Matches analytical.py.",
-    )
-    parser.add_argument(
-        "--noise-snr",
-        type=float,
-        default=2000.0,
-        help="SNR passed to noise_floor_heuristic() for get_bitrate().",
-    )
-    parser.add_argument(
         "--noise-level",
         type=float,
+        default=5e-4,
+        help="Per-output-channel noise standard deviation. Default gives output SNR 2000 when average output power is 1.",
+    )
+    parser.add_argument(
+        "--average-output-power",
+        type=float,
+        default=1.0,
+        help="Per-output-channel average signal power.",
+    )
+    parser.add_argument(
+        "--n-sources",
+        type=int,
         default=None,
-        help=(
-            "Absolute noise level override for get_bitrate(). If provided, "
-            "--noise-heuristic and --noise-snr are ignored."
-        ),
+        help="Input source count for total input-power estimation. Defaults to number of nonzero singular values.",
+    )
+    parser.add_argument(
+        "--n-outputs",
+        type=int,
+        default=None,
+        help="Output channel count for total input-power estimation. Defaults to number of nonzero singular values.",
     )
     parser.add_argument(
         "--metric",
-        choices=("bitrate", "channel_capacity", "mode_scaled_capacity"),
+        choices=("bitrate", "channel_capacity"),
         default="bitrate",
         help="Primary metric to plot and use for convergence. Default: bitrate",
     )
@@ -316,15 +312,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=1e-3,
         help="Relative threshold for counting significant modes: sigma_i >= frac * sigma_max.",
-    )
-    parser.add_argument(
-        "--mode-snr-target",
-        type=float,
-        default=1.0,
-        help=(
-            "Target average output SNR per significant mode for mode_scaled_capacity. "
-            "The total output SNR target becomes mode_snr_target * M(f)."
-        ),
     )
     parser.add_argument(
         "--time-resolution",
@@ -433,17 +420,6 @@ def get_mode_count(svals: np.ndarray, threshold_frac: float) -> tuple[int, float
     return int(np.count_nonzero(svals >= threshold)), threshold
 
 
-def capacity_from_power_allocation_over_noise(
-    svals: np.ndarray,
-    power_allocation_over_noise: np.ndarray,
-    time_resolution: float,
-) -> float:
-    return float(
-        (1.0 / (2.0 * time_resolution))
-        * np.sum(np.log2(1.0 + power_allocation_over_noise * (svals**2)))
-    )
-
-
 def evaluate_frequency_at_resolution(
     freq_khz: float,
     ell_max_est: int,
@@ -482,66 +458,46 @@ def evaluate_frequency_at_resolution(
     svals = svals[np.abs(svals) > 0]
     top_singular_value = float(svals[0]) if svals.size else 0.0
     mode_count, mode_threshold = get_mode_count(svals, args.mode_threshold_frac)
-    if args.noise_level is None:
-        noise_level = float(
-            noise_floor_heuristic(
-                svals,
-                heuristic=args.noise_heuristic,
-                snr=args.noise_snr,
-            )
-        )
-    else:
-        noise_level = float(args.noise_level)
+    noise_level = float(args.noise_level)
+    average_output_power = float(args.average_output_power)
+    n_sources = int(args.n_sources) if args.n_sources is not None else int(svals.size)
+    n_outputs = int(args.n_outputs) if args.n_outputs is not None else int(svals.size)
     bitrate = float(
-        get_bitrate(
+        get_bitrate_from_average_output_power(
             svals,
-            noise_level,
+            average_output_power=average_output_power,
+            noise=noise_level,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
             time_resolution=args.time_resolution,
         )
-    )
-    current_power_allocation_over_noise = water_filling_spectrum(
-        svals.astype(np.float64),
-        args.capacity_snr,
-    )
-    current_output_power_over_noise = float(
-        np.sum((svals.astype(np.float64) ** 2) * current_power_allocation_over_noise)
     )
     channel_capacity = float(
-        capacity_from_power_allocation_over_noise(
+        get_capacity_from_average_output_power(
             svals.astype(np.float64),
-            current_power_allocation_over_noise,
+            average_output_power=average_output_power,
+            noise=noise_level,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
             time_resolution=args.time_resolution,
         )
     )
-    average_mode_snr_current = float(current_output_power_over_noise / mode_count) if mode_count > 0 else float("nan")
-
-    mode_scaled_output_power_over_noise = float(args.mode_snr_target * mode_count)
-    mode_scaled_capacity = 0.0
-    average_mode_snr_mode_scaled = float("nan")
-    if mode_count > 0 and mode_scaled_output_power_over_noise > 0:
-        mode_scaled_snr = math.sqrt(mode_scaled_output_power_over_noise)
-        mode_scaled_power_allocation_over_noise = water_filling_spectrum(
-            svals.astype(np.float64),
-            mode_scaled_snr,
-        )
-        mode_scaled_capacity = float(
-            capacity_from_power_allocation_over_noise(
-                svals.astype(np.float64),
-                mode_scaled_power_allocation_over_noise,
-                time_resolution=args.time_resolution,
-            )
-        )
-        realized_output_power_over_noise = float(
-            np.sum((svals.astype(np.float64) ** 2) * mode_scaled_power_allocation_over_noise)
-        )
-        average_mode_snr_mode_scaled = float(realized_output_power_over_noise / mode_count)
+    current_output_power_over_noise = (
+        float(n_outputs * average_output_power / noise_level**2)
+        if noise_level > 0
+        else float("nan")
+    )
+    average_mode_snr_current = (
+        float(average_output_power / noise_level**2) if mode_count > 0 else float("nan")
+    )
+    mode_scaled_capacity = channel_capacity
+    mode_scaled_output_power_over_noise = current_output_power_over_noise
+    average_mode_snr_mode_scaled = average_mode_snr_current
 
     if args.metric == "bitrate":
         metric_value = bitrate
-    elif args.metric == "channel_capacity":
-        metric_value = channel_capacity
     else:
-        metric_value = mode_scaled_capacity
+        metric_value = channel_capacity
     return {
         "frequency_khz": float(freq_khz),
         "bitrate": bitrate,

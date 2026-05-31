@@ -4,11 +4,10 @@ Parameter sweep visualization utilities.
 
 from guti.data_utils import list_svd_variants
 from guti.parameters import Parameters
-from guti.core import get_bitrate, noise_floor_from_total_snr
+from guti.capacity import get_bitrate_from_average_output_power
 from guti.noise_models import (
-    compute_noise_effective,
-    compute_noise_empirical,
-    get_effective_total_snr,
+    compute_average_output_power,
+    compute_output_noise_std,
     get_noise_model,
     scale_singular_values_for_capacity,
 )
@@ -44,6 +43,38 @@ def normalize_singular_values(s: np.ndarray, params: Parameters, method: Literal
         return s / np.sqrt(Ninput * Noutput)
     else:
         raise ValueError(f"Invalid normalization method: {method}")
+
+
+def infer_matrix_shape_for_capacity(
+    modality_name: str,
+    params: Parameters,
+    n_singular_values: int,
+) -> tuple[int, int]:
+    if getattr(params, "matrix_size", None) is not None:
+        n_outputs, n_sources = params.matrix_size
+        return int(n_outputs), int(n_sources)
+
+    if modality_name.startswith("meg_"):
+        if params.num_sensors is None or params.source_spacing_mm is None:
+            raise ValueError("MEG capacity needs num_sensors and source_spacing_mm")
+        from guti.core import get_grid_positions
+
+        n_outputs = 3 * int(params.num_sensors)
+        n_sources = 3 * len(get_grid_positions(grid_spacing_mm=params.source_spacing_mm))
+        return n_outputs, n_sources
+
+    if modality_name.startswith("eeg_"):
+        if params.num_sensors is None or params.num_brain_grid_points is None:
+            raise ValueError("EEG capacity needs num_sensors and num_brain_grid_points")
+        return int(params.num_sensors), 3 * int(params.num_brain_grid_points)
+
+    if params.num_sensors is not None and params.num_brain_grid_points is not None:
+        return int(params.num_sensors), int(params.num_brain_grid_points)
+
+    raise ValueError(
+        f"Cannot infer matrix shape for {modality_name}; singular values alone "
+        f"only give min(n_outputs, n_sources)={n_singular_values}"
+    )
 
 
 def get_normalized_variants(modality_name: str, param_key: str, constant_params: Optional[Parameters] = None, normalization_method: Literal["sqrtN", "s0"] = "sqrtN"):
@@ -170,7 +201,6 @@ def plot_bitrate_vs_parameter(
     constant_params: Optional[Parameters] = None,
     figsize: tuple = (10, 6),
     time_resolution: float = 1.0,
-    snr: float | None = None,
 ):
     normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
 
@@ -192,11 +222,23 @@ def plot_bitrate_vs_parameter(
             modality_name,
             params=params,
         )
-        if model.typical_signal_amplitude > 0.0:
-            noise_eff = compute_noise_empirical(s_capacity, modality_name, n_sensors=n_sensors, frequency_hz=freq)
-        else:
-            noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
-        bitrate = get_bitrate(s_capacity, noise_eff, time_resolution=time_resolution)
+        n_outputs, n_sources = infer_matrix_shape_for_capacity(
+            modality_name,
+            params,
+            len(s_capacity),
+        )
+        bitrate = get_bitrate_from_average_output_power(
+            s_capacity,
+            average_output_power=compute_average_output_power(modality_name),
+            noise=compute_output_noise_std(
+                modality_name,
+                n_sensors=n_sensors,
+                frequency_hz=freq,
+            ),
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            time_resolution=time_resolution,
+        )
         param_values.append(param_value)
         bitrates.append(bitrate)
 
@@ -210,83 +252,6 @@ def plot_bitrate_vs_parameter(
     plt.tight_layout()
     plt.savefig(f"plots/bitrate.png")
     plt.show()
-
-
-def plot_bitrate_vs_snr(
-    modality_name: str,
-    param_key: str,
-    param_value: float,
-    snr_values: np.ndarray,
-    constant_params: Optional[Parameters] = None,
-    figsize: tuple = (10, 6),
-    time_resolution: float = 1.0
-):
-    """
-    Plot bitrate vs SNR for a specific parameter value.
-
-    Args:
-        modality_name: Name of the imaging modality
-        param_key: Parameter key being swept
-        param_value: Specific value of the parameter to analyze
-        snr_values: Array of SNR values to test
-        constant_params: Fixed parameters
-        figsize: Figure size
-        time_resolution: Time resolution in seconds
-
-    Example:
-        >>> snrs = np.logspace(-1, 2, 50)  # SNR from 0.1 to 100
-        >>> plot_bitrate_vs_snr("fnirs_analytical_cw", "grid_resolution_mm", 5.0, snrs)
-    """
-    if constant_params is None:
-        constant_params = Parameters()
-
-    # Get the variant with this parameter value
-    normalized_svs = get_normalized_variants(modality_name, param_key, constant_params)
-
-    if not normalized_svs:
-        print(f"No variants found for {modality_name} with given parameters")
-        return
-
-    # Find the variant matching our param_value
-    matching_variant = None
-    for v, s_normalized in normalized_svs:
-        if getattr(v["params"], param_key) == param_value:
-            matching_variant = (v, s_normalized)
-            break
-
-    if matching_variant is None:
-        print(f"No variant found with {param_key}={param_value}")
-        return
-
-    v, s_normalized = matching_variant
-    params = v["params"]
-    n_sensors = params.num_sensors
-
-    # Compute bitrates for each SNR (snr acts as multiplier: noise = noise_eff / snr)
-    freq = getattr(params, "frequency_hz", None)
-    noise_eff = compute_noise_effective(modality_name, n_sensors=n_sensors, frequency_hz=freq)
-    s_capacity = scale_singular_values_for_capacity(
-        v["s"],
-        modality_name,
-        params=params,
-    )
-    bitrates = []
-    for snr in snr_values:
-        noise = noise_eff / snr
-        bitrate = get_bitrate(s_capacity, noise, time_resolution=time_resolution)
-        bitrates.append(bitrate)
-
-    plt.figure(figsize=figsize)
-    plt.plot(snr_values, bitrates, 'o-', linewidth=2, markersize=6)
-    # plt.xscale('log')
-    plt.xlabel('SNR')
-    plt.ylabel('Bitrate (bits/s)')
-    plt.title(f'Information Capacity vs SNR \n {modality_name} ({param_key}={param_value})')
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(f"plots/bitrate_vs_snr.png")
-    plt.show()
-
 
 def show_sweep_results(
     modality_name: str,

@@ -31,6 +31,15 @@ results_volume = modal.Volume.from_name("us-results", create_if_missing=True)
 
 BRAIN_RADIUS = 80  # mm
 SCALP_RADIUS = 92  # mm
+K_B = 1.380649e-23
+BODY_TEMP_K = 310
+US_TYPICAL_OUTPUT_AMPLITUDE = 1e-3
+US_TRANSMIT_PRESSURE = 1e4
+US_TRANSDUCER_SENSITIVITY = 1e-3
+US_SOUND_SPEED = 1540.0
+US_BRAIN_DEPTH = 0.150
+US_SCALP_AREA_MM2 = 2 * 3.141592653589793 * SCALP_RADIUS**2
+US_R_ELEC = 50
 
 
 def get_sensor_positions(n_sensors: int = 100, offset: float = 0, start_n: int = 0, end_n=None):
@@ -77,6 +86,45 @@ def create_receivers_real(n_sensors: int):
     """Create receiver positions in real coordinates (meters)."""
     sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8)
     return sensor_positions * 1e-3  # Convert mm to meters
+
+
+def compute_us_output_noise_std(freq_hz: float, n_sensors: int, f_brain: float = 1.0) -> float:
+    """Per-output-channel US noise in forward-model units."""
+    import math
+
+    freq_khz = freq_hz / 1e3
+    acoustic_noise_pa_per_sqrt_hz = math.sqrt(10 ** ((-15 + 20 * math.log10(freq_khz)) / 10)) * 1e-6
+    element_area_mm2 = US_SCALP_AREA_MM2 / n_sensors
+    element_radius_m = math.sqrt(element_area_mm2 / math.pi) * 1e-3
+    ka = 2 * math.pi * freq_hz / US_SOUND_SPEED * element_radius_m
+    directivity_factor = 1.0 / math.sqrt(1.0 + ka**2)
+    thermal_pa = acoustic_noise_pa_per_sqrt_hz * directivity_factor
+
+    voltage_johnson = math.sqrt(4 * K_B * BODY_TEMP_K * US_R_ELEC)
+    electronic_pa = voltage_johnson / US_TRANSDUCER_SENSITIVITY
+    pressure_noise_pa = math.sqrt(thermal_pa**2 + electronic_pa**2)
+
+    prf = US_SOUND_SPEED / (2 * US_BRAIN_DEPTH)
+    bandwidth_eff = freq_hz * f_brain / prf
+    return pressure_noise_pa / US_TRANSMIT_PRESSURE * math.sqrt(bandwidth_eff)
+
+
+def compute_iid_bitrate_from_output_power(
+    singular_values,
+    *,
+    average_output_power: float,
+    output_noise: float,
+    n_sources: int,
+    n_outputs: int,
+) -> float:
+    import numpy as np
+
+    spectrum_power = float(np.sum(np.asarray(singular_values) ** 2))
+    if spectrum_power <= 0:
+        return 0.0
+    per_source_power = n_outputs * average_output_power / spectrum_power
+    snr_per_mode = (np.asarray(singular_values) ** 2) * per_source_power / output_noise**2
+    return float(0.5 * np.sum(np.log2(1.0 + snr_per_mode)))
 
 
 # ============================================================================
@@ -652,11 +700,15 @@ def run_us_simulation(
     print(f"\nFirst 10 singular values: {s[:10]}")
     print(f"Sum of first 10: {np.sum(s[:10]):.4f}")
 
-    # Compute bitrate
-    s_normalized = s / (n_sources_actual**0.5 * n_sensors**0.5)
-    total_power = np.sum(np.abs(s_normalized) ** 2)
-    noise_level = np.sqrt(total_power) / 2000.0  # SNR=2000
-    bitrate = 0.5 * np.sum(np.log2(1 + (s_normalized / noise_level)**2))
+    # Compute bitrate from per-output average signal power and per-output noise.
+    noise_level = compute_us_output_noise_std(center_frequency, n_sensors)
+    bitrate = compute_iid_bitrate_from_output_power(
+        s,
+        average_output_power=US_TYPICAL_OUTPUT_AMPLITUDE**2,
+        output_noise=noise_level,
+        n_sources=n_sources_actual,
+        n_outputs=matrix_rows,
+    )
 
     print(f"Noise level: {noise_level:.6e}")
     print(f"Bitrate: {bitrate:.2f} bits/sample")
@@ -703,6 +755,7 @@ def run_us_simulation(
         "matrix_size_gb": matrix_size_gb,
         "bitrate": bitrate,
         "noise_level": noise_level,
+        "average_output_power": US_TYPICAL_OUTPUT_AMPLITUDE**2,
         "params_hash": params_hash if save_results else None,
     }
 
@@ -871,11 +924,15 @@ def run_us_simulation_cpu(
     print(f"\nFirst 10 singular values: {s[:10]}")
     print(f"Sum of first 10: {np.sum(s[:10]):.4f}")
 
-    # Compute bitrate
-    s_normalized = s / (n_sources_actual**0.5 * n_sensors**0.5)
-    total_power = np.sum(np.abs(s_normalized) ** 2)
-    noise_level = np.sqrt(total_power) / 2000.0  # SNR=2000
-    bitrate = 0.5 * np.sum(np.log2(1 + (s_normalized / noise_level)**2))
+    # Compute bitrate from per-output average signal power and per-output noise.
+    noise_level = compute_us_output_noise_std(center_frequency, n_sensors)
+    bitrate = compute_iid_bitrate_from_output_power(
+        s,
+        average_output_power=US_TYPICAL_OUTPUT_AMPLITUDE**2,
+        output_noise=noise_level,
+        n_sources=n_sources_actual,
+        n_outputs=matrix_rows,
+    )
 
     print(f"Noise level: {noise_level:.6e}")
     print(f"Bitrate: {bitrate:.2f} bits/sample")
@@ -918,6 +975,7 @@ def run_us_simulation_cpu(
         "matrix_size_gb": matrix_size_gb,
         "bitrate": bitrate,
         "noise_level": noise_level,
+        "average_output_power": US_TYPICAL_OUTPUT_AMPLITUDE**2,
         "params_hash": params_hash,
     }
 

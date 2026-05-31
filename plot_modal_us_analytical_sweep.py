@@ -10,7 +10,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from guti.core import get_bitrate, get_bitrate_channel_capacity, noise_floor_heuristic
+from guti.capacity import (
+    get_bitrate_from_average_output_power,
+    get_capacity_from_average_output_power,
+)
+from guti.noise_models import compute_average_output_power, compute_output_noise_std
 from guti.parameters import Parameters
 
 
@@ -45,36 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional substring filter on Parameters.comment to isolate one sweep.",
     )
     parser.add_argument(
-        "--noise-heuristic",
-        choices=["power", "first"],
-        default="power",
-        help="Noise heuristic used to reconstruct bitrate from saved singular values.",
-    )
-    parser.add_argument(
-        "--noise-snr",
-        type=float,
-        default=2000.0,
-        help="SNR used with the selected noise heuristic.",
-    )
-    parser.add_argument(
         "--outdir",
         default="plots/us_analytical_heatmaps",
         help="Directory to write the PNG files into.",
     )
     parser.add_argument(
-        "--capacity-snr",
-        type=float,
-        default=None,
-        help=(
-            "SNR passed to get_bitrate_channel_capacity(). "
-            "Defaults to --noise-snr when omitted."
-        ),
-    )
-    parser.add_argument(
         "--capacity-time-resolution",
         type=float,
         default=1.0,
-        help="time_resolution passed to get_bitrate_channel_capacity(). Default: 1.0",
+        help="time_resolution passed to get_capacity_from_average_output_power(). Default: 1.0",
     )
     return parser
 
@@ -210,7 +193,7 @@ def main() -> int:
     summary_frequencies_khz: list[int] = []
     summary_max_bitrates: list[float] = []
     summary_max_capacities: list[float] = []
-    capacity_snr = args.capacity_snr if args.capacity_snr is not None else args.noise_snr
+    average_output_power = compute_average_output_power("us_analytical")
 
     for freq_khz in args.frequencies_khz:
         freq_hz = freq_khz * 1000
@@ -242,23 +225,36 @@ def main() -> int:
             j = args.sensor_counts.index(sensor_count)
 
             s_normalized = s / math.sqrt(source_count * sensor_count)
-            noise_level = noise_floor_heuristic(
-                s_normalized,
-                heuristic=args.noise_heuristic,
-                snr=args.noise_snr,
+            matrix_size = getattr(params, "matrix_size", None)
+            if matrix_size is None:
+                n_outputs, n_sources = sensor_count, source_count
+            else:
+                n_outputs, n_sources = matrix_size
+            output_noise = compute_output_noise_std(
+                "us_analytical",
+                n_sensors=sensor_count,
+                frequency_hz=freq_hz,
             )
 
             first_sv_grid[i, j] = float(s_normalized[0])
             bitrate_grid[i, j] = float(
-                get_bitrate(s_normalized, noise_level, time_resolution=1.0)
+                get_bitrate_from_average_output_power(
+                    s,
+                    average_output_power=average_output_power,
+                    noise=output_noise,
+                    n_sources=int(n_sources),
+                    n_outputs=int(n_outputs),
+                    time_resolution=1.0,
+                )
             )
             s_for_capacity = s[np.abs(s) > 0]
             capacity_grid[i, j] = float(
-                get_bitrate_channel_capacity(
+                get_capacity_from_average_output_power(
                     s_for_capacity.astype(np.float64),
-                    snr_at_reference_nsensors=capacity_snr,
-                    nsensors_reference=sensor_count,
-                    n_sensors=sensor_count,
+                    average_output_power=average_output_power,
+                    noise=output_noise,
+                    n_sources=int(n_sources),
+                    n_outputs=int(n_outputs),
                     time_resolution=args.capacity_time_resolution,
                 )
             )

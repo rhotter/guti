@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Run modal_us_analytical.py over a source/sensor/frequency sweep.
 
-This sweep targets the branch-specific approximation path in
-``guti.modalities.us.analytical`` by defaulting to ``--bitrate_method slq``.
+This sweep targets the SVD bitrate path in ``guti.modalities.us.analytical``.
 Any unknown flags are forwarded directly to the underlying analytical script,
-so branch-specific options such as ``--slq_s`` or ``--noise_snr`` can be passed
-without changing this driver.
+so branch-specific options can be passed without changing this driver.
 """
 
 from __future__ import annotations
@@ -79,10 +77,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--bitrate-method",
         choices=["svd", "slq", "both"],
-        default="slq",
+        default="svd",
         help=(
             "Bitrate path to use in guti.modalities.us.analytical. "
-            "Default: slq"
+            "Default: svd"
         ),
     )
     parser.add_argument(

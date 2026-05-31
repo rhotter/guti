@@ -5,8 +5,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from guti.core import get_bitrate_channel_capacity, noise_floor_from_total_snr
-
 
 # ---------------------------------------------------------------------------
 # Physical constants
@@ -38,18 +36,11 @@ class NoiseModel:
     today_best_noise: float
     physical_floor_noise: float
 
-    # Typical physiological source amplitude (sets the signal level for physics-based SNR)
-    source_amplitude: float
-    source_amplitude_units: str
-
     # Empirically observed signal amplitude in *measurement_units*.
-    # Used to compute SNR from actual measurements rather than from an idealised
-    # single-dipole source amplitude.  SNR_empirical = typical_signal / detector_noise.
+    # Its square is the per-output-channel average signal power for the
+    # capacity workflow.
     typical_signal_amplitude: float = 0.0
     typical_signal_notes: str = ""
-
-    # Legacy field kept for backward compatibility with get_bitrate_channel_capacity
-    reference_total_snr: float = 100.0
 
     notes: str = ""
 
@@ -236,21 +227,6 @@ def _us_total_noise_fwd(
 # Default noise at 50 kHz (for the NoiseModel entry)
 _US_NOISE_FWD_50K = _us_total_noise_fwd(_US_DEFAULT_CENTER_FREQ, _US_DEFAULT_N_SENSORS)
 
-# Neural current dipole amplitude (same for EEG, MEG)
-_NEURAL_DIPOLE = 10e-9  # 10 nA·m
-
-# EEG forward model uses mm coordinates (OpenMEEG BEM), so the dipole
-# "unit" in the lead field is A·mm, not A·m.
-# 10 nA·m = 10e-9 A·m × 1000 mm/m = 10e-6 A·mm
-_EEG_DIPOLE_MM = _NEURAL_DIPOLE * 1e3  # 10e-6 A·mm
-
-# Typical brain acoustic reflectivity  ΔZ/Z ≈ 1%
-_US_REFLECTIVITY = 0.01  # dimensionless
-
-# fNIRS absorption change
-_FNIRS_DELTA_MUA = 0.002  # mm⁻¹
-
-
 NOISE_MODELS = {
     "eeg_openmeeg": NoiseModel(
         canonical_name="eeg_openmeeg",
@@ -261,18 +237,13 @@ NOISE_MODELS = {
         reference_bandwidth_hz=100.0,
         today_best_noise=_EEG_NOISE_TODAY,
         physical_floor_noise=_EEG_NOISE_TODAY,  # Johnson IS fundamental
-        source_amplitude=_EEG_DIPOLE_MM,
-        source_amplitude_units="A·mm (OpenMEEG BEM uses mm coordinates)",
         typical_signal_amplitude=5e-6,  # 5 µV: typical evoked potential amplitude at scalp
         typical_signal_notes="5 µV: midpoint of 1–10 µV range for evoked responses (ERPs, SSEPs). "
                               "Spontaneous alpha/beta can be 20–100 µV but those are bulk rhythms, "
                               "not single-source events.",
-        reference_total_snr=100.0,
         notes=(
             "R=5kΩ at 256 electrodes.  If electrode area shrinks as 1/N, "
-            "contact resistance grows like N → Johnson noise ∝ √N.  "
-            "source_amplitude is in A·mm (not A·m) because the OpenMEEG "
-            "lead field uses mm geometry."
+            "contact resistance grows like N → Johnson noise ∝ √N."
         ),
     ),
     "meg_opm": NoiseModel(
@@ -284,13 +255,10 @@ NOISE_MODELS = {
         reference_bandwidth_hz=100.0,
         today_best_noise=_MEG_OPM_NOISE_TODAY,
         physical_floor_noise=_MEG_OPM_NOISE_FUND,
-        source_amplitude=_NEURAL_DIPOLE,
-        source_amplitude_units="A·m",
         typical_signal_amplitude=100e-15,  # 100 fT: typical evoked MEG response
         typical_signal_notes="100 fT: midpoint of 50–200 fT range for evoked MEG responses. "
                               "Spontaneous alpha/mu rhythms can reach 500–1000 fT but "
                               "evoked single-trial responses are 50–200 fT.",
-        reference_total_snr=100.0,
         notes=(
             "OPMs measure field directly — noise is intrinsic to the vapor cell "
             "and does not scale with sensor count.  "
@@ -309,13 +277,10 @@ NOISE_MODELS = {
         reference_bandwidth_hz=100.0,
         today_best_noise=_MEG_SQUID_NOISE_TODAY,
         physical_floor_noise=_MEG_SQUID_NOISE_FUND,
-        source_amplitude=_NEURAL_DIPOLE,
-        source_amplitude_units="A·m",
         typical_signal_amplitude=100e-15,  # 100 fT: typical evoked MEG response
         typical_signal_notes="100 fT: same as OPM — same brain physics, same signal levels. "
                               "SQUIDs sit ~20 mm from scalp vs ~6 mm for OPMs, so absolute "
                               "field amplitudes are somewhat lower, but 100 fT is a good midpoint.",
-        reference_total_snr=100.0,
         notes=(
             "Fixed helmet coverage, loop area ∝ 1/N.  Area-independent flux "
             "noise → field noise ∝ N."
@@ -330,13 +295,10 @@ NOISE_MODELS = {
         reference_bandwidth_hz=_FNIRS_CW_BW_REF,
         today_best_noise=_FNIRS_CW_NOISE_TODAY,
         physical_floor_noise=_FNIRS_CW_NOISE_FUND,
-        source_amplitude=_FNIRS_DELTA_MUA,
-        source_amplitude_units="mm⁻¹ (Δμ_a)",
         typical_signal_amplitude=1e-3,  # 0.1% = 1000 ppm ΔI/I: typical hemodynamic response
         typical_signal_notes="1000 ppm (0.1% ΔI/I): typical hemodynamic response amplitude "
                               "at 30 mm separation. Range is 500–5000 ppm depending on task "
                               "and channel geometry.",
-        reference_total_snr=100.0,
         notes=(
             "Today: 5 mW source.  Fundamental: ANSI Z136.1 max ~35 mW "
             "(364 mW/cm² × 3.5 mm aperture) at 830 nm, OD≈4.  "
@@ -352,12 +314,9 @@ NOISE_MODELS = {
         reference_bandwidth_hz=_FNIRS_CW_BW_REF,
         today_best_noise=_TD_FNIRS_NOISE_TODAY,
         physical_floor_noise=_TD_FNIRS_NOISE_FUND,
-        source_amplitude=_FNIRS_DELTA_MUA,
-        source_amplitude_units="mm⁻¹ (Δμ_a)",
         typical_signal_amplitude=1e-3,  # same hemodynamic signal as CW
         typical_signal_notes="Same 1000 ppm hemodynamic response as CW fNIRS — TD measures "
                               "the same signal but with time-resolved photon distributions.",
-        reference_total_snr=40.0,
         notes=(
             "Same as CW but time gating retains ~1% of photons.  "
             "Fundamental: ANSI max power ~35 mW at 830 nm."
@@ -372,15 +331,12 @@ NOISE_MODELS = {
         reference_bandwidth_hz=_US_DEFAULT_CENTER_FREQ,  # BW = center freq
         today_best_noise=_US_NOISE_FWD_50K,
         physical_floor_noise=_US_NOISE_FWD_50K,  # thermal IS fundamental
-        source_amplitude=_US_REFLECTIVITY,
-        source_amplitude_units="dimensionless (ΔZ/Z reflectivity)",
         typical_signal_amplitude=1e-3,  # ~0.1% reflectivity change; in fwd-model units noise_eff is already dimensionless
         typical_signal_notes="0.1% acoustic reflectivity change (ΔZ/Z ≈ 0.001). US fwd model is already in "
                               "dimensionless units so noise is already noise_eff; typical_signal here is "
                               "the dimensionless reflectivity contrast expected from brain tissue.",
-        reference_total_snr=2000.0,
         notes=(
-            "Frequency-aware: use frequency_hz kwarg in compute_noise_effective. "
+            "Frequency-aware: use frequency_hz kwarg in compute_detector_noise_std. "
             "Acoustic thermal noise (Mellen 1952) scales as f²; dominates "
             "electronic Johnson (~0.93 µPa/√Hz) above ~10 kHz.  "
             "Defaults to 50 kHz.  At 2 MHz noise is ~195× higher."
@@ -459,33 +415,29 @@ def compute_detector_noise_std(
     return base_noise * bw_factor * n_factor
 
 
-def compute_noise_effective(
+def compute_average_output_power(modality_name: str) -> float:
+    """Return the per-output-channel average signal power for a modality."""
+    model = get_noise_model(modality_name)
+    if model.typical_signal_amplitude == 0.0:
+        raise ValueError(f"No typical_signal_amplitude set for '{modality_name}'")
+    return model.typical_signal_amplitude**2
+
+
+def compute_output_noise_std(
     modality_name: str,
     n_sensors: int | None = None,
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
 ) -> float:
-    """
-    Effective noise in forward-model units: detector_noise / source_amplitude.
-
-    This is the value to pass directly to ``get_bitrate(s, noise, ...)``,
-    where *s* are the raw (un-normalised) singular values of the forward model.
-    The ratio ``s_i / noise_effective`` is then dimensionless.
-
-    Parameters
-    ----------
-    frequency_hz : float, optional
-        Center frequency — only used for ultrasound (Mellen acoustic thermal
-        noise scales as f²).  Defaults to 50 kHz.
-    """
-    canon = canonicalize_modality_name(modality_name)
-    model = NOISE_MODELS[canon]
-    detector_noise = compute_detector_noise_std(
-        modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
+    """Return per-output-channel noise standard deviation."""
+    return compute_detector_noise_std(
+        modality_name,
+        n_sensors=n_sensors,
+        bandwidth_hz=bandwidth_hz,
+        tier=tier,
+        frequency_hz=frequency_hz,
     )
-    return detector_noise / model.source_amplitude
 
 
 def capacity_forward_gain_scale(
@@ -514,112 +466,4 @@ def scale_singular_values_for_capacity(
         modality_name,
         params=params,
         voxel_size_mm=voxel_size_mm,
-    )
-
-
-def compute_empirical_snr(
-    modality_name: str,
-    n_sensors: int | None = None,
-    bandwidth_hz: float | None = None,
-    tier: str = "today",
-    frequency_hz: float | None = None,
-) -> float:
-    """
-    SNR derived from empirically observed signal amplitudes.
-
-    Returns typical_signal_amplitude / detector_noise, giving an SNR
-    grounded in what instruments actually measure rather than in an
-    idealised single-dipole source amplitude.
-    """
-    canon = canonicalize_modality_name(modality_name)
-    model = NOISE_MODELS[canon]
-    if model.typical_signal_amplitude == 0.0:
-        raise ValueError(f"No typical_signal_amplitude set for '{modality_name}'")
-    detector_noise = compute_detector_noise_std(
-        modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
-    )
-    return model.typical_signal_amplitude / detector_noise
-
-
-def compute_noise_empirical(
-    s: np.ndarray,
-    modality_name: str,
-    n_sensors: int | None = None,
-    bandwidth_hz: float | None = None,
-    tier: str = "today",
-    frequency_hz: float | None = None,
-) -> float:
-    """
-    Noise floor in SVD units anchored to empirically observed signal amplitudes.
-
-    Uses noise_floor_from_total_snr(s, SNR_empirical) so that the total
-    output SNR equals SNR_empirical = typical_signal / detector_noise.
-    Pass the result directly to get_bitrate(s, noise, ...).
-    """
-    snr = compute_empirical_snr(
-        modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
-    )
-    return noise_floor_from_total_snr(s, snr)
-
-
-# ---------------------------------------------------------------------------
-# Legacy helpers (kept for backward compatibility)
-# ---------------------------------------------------------------------------
-
-def get_effective_total_snr(
-    modality_name: str,
-    n_sensors: int | None = None,
-    reference_total_snr: float | None = None,
-) -> float:
-    model = get_noise_model(modality_name)
-    snr = (
-        model.reference_total_snr
-        if reference_total_snr is None
-        else reference_total_snr
-    )
-
-    if n_sensors is None:
-        return snr
-
-    return snr * (
-        model.reference_sensor_count / n_sensors
-    ) ** model.sensor_count_noise_exponent
-
-
-def get_effective_noise_floor(
-    s,
-    modality_name: str,
-    n_sensors: int | None = None,
-    reference_total_snr: float | None = None,
-) -> float:
-    total_snr = get_effective_total_snr(
-        modality_name=modality_name,
-        n_sensors=n_sensors,
-        reference_total_snr=reference_total_snr,
-    )
-    return noise_floor_from_total_snr(s, total_snr)
-
-
-def get_bitrate_channel_capacity_for_modality(
-    s,
-    modality_name: str,
-    n_sensors: int | None = None,
-    time_resolution: float = 1.0,
-    reference_total_snr: float | None = None,
-) -> float:
-    model = get_noise_model(modality_name)
-    snr = (
-        model.reference_total_snr
-        if reference_total_snr is None
-        else reference_total_snr
-    )
-    return get_bitrate_channel_capacity(
-        s=s,
-        snr_at_reference_nsensors=snr,
-        nsensors_reference=model.reference_sensor_count,
-        n_sensors=n_sensors,
-        time_resolution=time_resolution,
-        sensor_count_snr_exponent=model.sensor_count_noise_exponent,
     )

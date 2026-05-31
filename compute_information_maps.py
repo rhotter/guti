@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """Compute posterior information maps for representative GUTI modalities.
 
-The model is:
+The posterior model is:
 
     y = A x + n
     x ~ N(0, I)
     n ~ N(0, noise^2 I)
 
-By default the maps use the same empirical-SNR normalization as the web bitrate
-export: the whole forward matrix is scaled relative to a noise floor such that
-sqrt(sum(s_i^2)) / noise equals the modality's empirical SNR.  This preserves the
-spatial structure of the forward model while avoiding claims that depend on an
-unvalidated absolute Jacobian gain.
+The forward matrix is scaled so that unit-variance source coordinates imply the
+modality's configured per-output-channel average signal power. Noise is the
+configured per-output-channel noise standard deviation.
 
-Use --scaling physical to inspect the raw source-amplitude/noise model instead.
 For EEG/MEG, each voxel has a 3-vector dipole source and the voxel score is the
 mutual information for that 3D block.  For fNIRS, each voxel is scalar absorption
 contrast integrated over the voxel volume.
@@ -32,19 +29,14 @@ from scipy.linalg import cho_factor, cho_solve
 
 from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
 from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
-from guti.noise_models import (
-    compute_detector_noise_std,
-    compute_empirical_snr,
-    get_noise_model,
-)
+from guti.noise_models import compute_average_output_power, compute_output_noise_std
 from guti.parameters import Parameters
 from recompute_meg_variants import compute_forward_matrix as compute_meg_forward_matrix
 
 
 OUT_DIR = Path("results/information_maps")
 HEAD_CENTER = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
-SCALING_CHOICES = ("empirical", "physical")
-DEFAULT_SCALING = "empirical"
+OUTPUT_POWER_SCALING = "average_output_power"
 COMPARISON_LABELS = {
     "eeg_homogeneous": "EEG homogeneous",
     "meg_opm": "MEG OPM",
@@ -176,59 +168,42 @@ def as_numpy(array) -> np.ndarray:
     return np.asarray(array)
 
 
-def empirical_noise_for_matrix(
+def scale_matrix_for_output_power(
     A: np.ndarray,
     modality_name: str,
     n_sensors: int,
     tier: str = "today",
-) -> tuple[float, dict]:
-    """Noise floor matching the repo's empirical bitrate normalization.
+) -> tuple[np.ndarray, float, dict]:
+    """Scale a forward matrix to the average-output-power capacity workflow."""
+    matrix = np.asarray(A, dtype=np.float64)
+    n_outputs, n_sources = matrix.shape
+    matrix_norm = float(np.linalg.norm(matrix))
+    if matrix_norm <= 0:
+        raise ValueError(f"Cannot normalize zero matrix for {modality_name}")
 
-    The web bitrate export uses compute_noise_empirical(), equivalent to
-    noise = sqrt(sum(s_i^2)) / empirical_snr.  The Frobenius norm of A equals
-    sqrt(sum(s_i^2)), so this avoids an expensive SVD while producing the same
-    channel ratios.
-    """
-    empirical_snr = compute_empirical_snr(
+    average_output_power = compute_average_output_power(modality_name)
+    output_noise = compute_output_noise_std(
         modality_name,
         n_sensors=n_sensors,
         tier=tier,
     )
-    matrix_norm = float(np.linalg.norm(np.asarray(A, dtype=np.float64)))
-    if matrix_norm <= 0:
-        raise ValueError(f"Cannot empirically normalize zero matrix for {modality_name}")
+    per_source_input_power = n_outputs * average_output_power / matrix_norm**2
+    total_input_power = n_sources * per_source_input_power
 
-    noise = matrix_norm / empirical_snr
-    model = get_noise_model(modality_name)
-    return noise, {
-        "scaling": "empirical",
-        "empirical_snr": empirical_snr,
-        "typical_signal_amplitude": model.typical_signal_amplitude,
+    return matrix * np.sqrt(per_source_input_power), output_noise, {
+        "scaling": OUTPUT_POWER_SCALING,
+        "average_output_power": average_output_power,
+        "output_noise_std": output_noise,
+        "output_snr": np.sqrt(average_output_power) / output_noise,
+        "per_source_input_power": per_source_input_power,
+        "total_input_power": total_input_power,
         "matrix_frobenius_norm": matrix_norm,
-        "noise_used": noise,
+        "noise_used": output_noise,
         "noise_interpretation": (
-            "Frobenius(A)/empirical_snr; matches export_svd_json.py "
-            "empirical bitrate normalization"
+            "per-output-channel detector noise; forward matrix scaled so "
+            "mean output signal power matches average_output_power"
         ),
     }
-
-
-def choose_noise(
-    A: np.ndarray,
-    modality_name: str,
-    n_sensors: int,
-    physical_noise: float,
-    scaling: str,
-) -> tuple[float, dict]:
-    if scaling == "empirical":
-        return empirical_noise_for_matrix(A, modality_name, n_sensors)
-    if scaling == "physical":
-        return physical_noise, {
-            "scaling": "physical",
-            "noise_used": physical_noise,
-            "noise_interpretation": "detector noise in forward-model measurement units",
-        }
-    raise ValueError(f"Unknown scaling {scaling!r}; expected one of {SCALING_CHOICES}")
 
 
 def summarize_by_depth(depth: np.ndarray, info_bits: np.ndarray, bin_width_mm: float):
@@ -422,7 +397,7 @@ def plot_combined_depth_profiles(paths: list[Path], scaling: str) -> None:
             dpi=180,
             bbox_inches="tight",
         )
-        if scaling == DEFAULT_SCALING:
+        if scaling == OUTPUT_POWER_SCALING:
             fig.savefig(
                 OUT_DIR / f"all_modalities_depth_mean_{scale}.png",
                 dpi=180,
@@ -474,14 +449,14 @@ def run_meg(
     grid_spacing_mm: float,
     offset_mm: float,
     depth_bin_width_mm: float,
-    scaling: str,
 ) -> Path:
-    model = get_noise_model(name)
-    physical_noise = compute_detector_noise_std(name, n_sensors=n_sensors, tier="today")
     A_raw = compute_meg_forward_matrix(n_sensors, grid_spacing_mm, offset_mm)
     positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
-    A = A_raw * model.source_amplitude
-    noise, scaling_params = choose_noise(A, name, n_sensors, physical_noise, scaling)
+    A, noise, scaling_params = scale_matrix_for_output_power(
+        A_raw,
+        name,
+        n_sensors,
+    )
     posterior_det, info_bits = posterior_info_vector3(A, noise, len(positions))
     return save_result(
         name,
@@ -494,8 +469,6 @@ def run_meg(
             "forward_matrix_shape": list(A.shape),
             "grid_spacing_mm": grid_spacing_mm,
             "sensor_offset_mm": offset_mm,
-            "detector_noise_today": physical_noise,
-            "source_amplitude": model.source_amplitude,
             "model": "Sarvas MEG, 3 dipole orientations per voxel",
             "sensor_model": "triaxial magnetic field components at each sensor position",
             **scaling_params,
@@ -509,22 +482,12 @@ def run_eeg(
     n_sensors: int,
     grid_spacing_mm: float,
     depth_bin_width_mm: float,
-    scaling: str,
 ) -> Path:
-    physical_noise = compute_detector_noise_std(
-        "eeg_openmeeg",
-        n_sensors=n_sensors,
-        tier="today",
-    )
-    source_amplitude_a_m = 10e-9
     A_raw, positions = compute_eeg_forward_matrix(n_sensors, grid_spacing_mm)
-    A = A_raw * source_amplitude_a_m
-    noise, scaling_params = choose_noise(
-        A,
+    A, noise, scaling_params = scale_matrix_for_output_power(
+        A_raw,
         "eeg_openmeeg",
         n_sensors,
-        physical_noise,
-        scaling,
     )
     posterior_det, info_bits = posterior_info_vector3(A, noise, len(positions))
     return save_result(
@@ -537,8 +500,6 @@ def run_eeg(
             "n_sensors": n_sensors,
             "forward_matrix_shape": list(A.shape),
             "grid_spacing_mm": grid_spacing_mm,
-            "detector_noise_today": physical_noise,
-            "source_amplitude_a_m": source_amplitude_a_m,
             "model": (
                 "homogeneous quasi-static dipole potential; OpenMEEG is not "
                 "used because leadfields/OpenMEEG binaries are unavailable"
@@ -556,14 +517,7 @@ def run_fnirs(
     grid_spacing_mm: float,
     max_dist_mm: float,
     depth_bin_width_mm: float,
-    scaling: str,
 ) -> Path:
-    model = get_noise_model("fnirs_analytical_cw")
-    physical_noise = compute_detector_noise_std(
-        "fnirs_analytical_cw",
-        n_sensors=n_sensors,
-        tier="today",
-    )
     modality = fNIRSAnalytical(
         Parameters(
             num_sensors=n_sensors,
@@ -575,13 +529,10 @@ def run_fnirs(
     A_transfer = as_numpy(modality.compute_forward_model())
     positions = modality.grid_points
     voxel_volume_mm3 = grid_spacing_mm**3
-    A = np.asarray(A_transfer, dtype=np.float64) * model.source_amplitude
-    noise, scaling_params = choose_noise(
-        A,
+    A, noise, scaling_params = scale_matrix_for_output_power(
+        A_transfer,
         "fnirs_analytical_cw",
         n_sensors,
-        physical_noise,
-        scaling,
     )
     posterior_var, info_bits = posterior_info_scalar(A, noise)
     return save_result(
@@ -596,8 +547,6 @@ def run_fnirs(
             "n_unique_source_detector_pairs": int(A.shape[0]),
             "grid_spacing_mm": grid_spacing_mm,
             "max_dist_mm": max_dist_mm,
-            "detector_noise_today": physical_noise,
-            "source_amplitude": model.source_amplitude,
             "voxel_volume_mm3": voxel_volume_mm3,
             "transfer_function_units": "mm^-1",
             "transfer_function_convention": "voxel-integrated before absorption scaling",
@@ -621,15 +570,6 @@ def main() -> None:
     parser.add_argument("--fnirs-grid-spacing-mm", type=float, default=6.0)
     parser.add_argument("--fnirs-max-dist-mm", type=float, default=50.0)
     parser.add_argument("--depth-bin-width-mm", type=float, default=2.0)
-    parser.add_argument(
-        "--scaling",
-        choices=SCALING_CHOICES,
-        default=DEFAULT_SCALING,
-        help=(
-            "empirical matches the web bitrate normalization; physical uses "
-            "raw source-amplitude and detector-noise units"
-        ),
-    )
     args = parser.parse_args()
 
     outputs = []
@@ -638,7 +578,6 @@ def main() -> None:
             args.eeg_sensors,
             args.grid_spacing_mm,
             args.depth_bin_width_mm,
-            args.scaling,
         )
     )
     outputs.append(
@@ -648,7 +587,6 @@ def main() -> None:
             args.grid_spacing_mm,
             7.0,
             args.depth_bin_width_mm,
-            args.scaling,
         )
     )
     outputs.append(
@@ -658,7 +596,6 @@ def main() -> None:
             args.grid_spacing_mm,
             25.0,
             args.depth_bin_width_mm,
-            args.scaling,
         )
     )
     outputs.append(
@@ -667,10 +604,9 @@ def main() -> None:
             args.fnirs_grid_spacing_mm,
             args.fnirs_max_dist_mm,
             args.depth_bin_width_mm,
-            args.scaling,
         )
     )
-    plot_combined_depth_profiles(outputs, args.scaling)
+    plot_combined_depth_profiles(outputs, OUTPUT_POWER_SCALING)
     print("Wrote:")
     for path in outputs:
         print(f"  {path}")

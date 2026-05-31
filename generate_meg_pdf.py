@@ -7,12 +7,12 @@ Pages:
       1. SVD spectra – unnormalized (raw singular values)
       2. SVD spectra – normalized by the largest singular value across all variants
       3. First singular value vs num_sensors
-      4. Bitrate (empirical SNR) vs num_sensors
+      4. Bitrate vs num_sensors
     Sweep source_spacing_mm (constant num_sensors=500):
       5. SVD spectra – unnormalized
       6. SVD spectra – normalized
       7. First singular value vs source_spacing_mm
-      8. Bitrate (empirical SNR) vs source_spacing_mm
+      8. Bitrate vs source_spacing_mm
 
 Output: plots/meg_scaling.pdf
 """
@@ -27,8 +27,13 @@ from matplotlib.cm import viridis
 
 from guti.data_utils import list_svd_variants
 from guti.parameters import Parameters
-from guti.core import get_bitrate, noise_floor_from_total_snr
-from guti.noise_models import compute_noise_empirical, compute_noise_effective, get_noise_model
+from guti.capacity import get_bitrate_from_average_output_power
+from guti.core import get_grid_positions
+from guti.noise_models import (
+    compute_average_output_power,
+    compute_output_noise_std,
+    get_noise_model,
+)
 
 os.makedirs("plots", exist_ok=True)
 
@@ -41,22 +46,26 @@ def get_variants(modality, sweep_key, constant_params):
     return list_svd_variants(modality, constant_params=constant_params, sort_by=sweep_key)
 
 
-def compute_bitrate_physics(s, modality, n_sensors, freq=None, time_resolution=0.01):
-    """Physics-based noise (detector_noise / source_amplitude = 10 nA·m dipole).
-    Shows how capacity scales; not anchored to real observed signals."""
-    noise = compute_noise_effective(modality, n_sensors=n_sensors, frequency_hz=freq)
-    return float(get_bitrate(s, noise, time_resolution=time_resolution))
-
-
-def compute_bitrate_empirical(s, modality, n_sensors, freq=None, time_resolution=0.01):
-    """Empirical noise floor anchored to typical observed signal amplitudes.
-    SNR = typical_signal / detector_noise; flat when SNR < 1 (noise-limited)."""
-    model = get_noise_model(modality)
-    if model.typical_signal_amplitude > 0.0:
-        noise = compute_noise_empirical(s, modality, n_sensors=n_sensors, frequency_hz=freq)
-    else:
-        noise = compute_noise_effective(modality, n_sensors=n_sensors, frequency_hz=freq)
-    return float(get_bitrate(s, noise, time_resolution=time_resolution))
+def compute_bitrate(s, params, modality, freq=None, time_resolution=0.01):
+    """Bitrate from per-output average signal power and per-output noise."""
+    n_sensors = params.num_sensors
+    n_outputs = 3 * n_sensors
+    n_sources = 3 * len(get_grid_positions(grid_spacing_mm=params.source_spacing_mm))
+    noise = compute_output_noise_std(
+        modality,
+        n_sensors=n_sensors,
+        frequency_hz=freq,
+    )
+    return float(
+        get_bitrate_from_average_output_power(
+            s,
+            average_output_power=compute_average_output_power(modality),
+            noise=noise,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            time_resolution=time_resolution,
+        )
+    )
 
 
 def colormap(n):
@@ -112,21 +121,23 @@ def plot_bitrate(ax, variants, sweep_key, modality, title, time_resolution=0.01)
         ax.set_title(title)
         return
 
-    xs, ys_phys, ys_emp = [], [], []
+    xs, ys = [], []
     model = get_noise_model(modality)
     for _, v in variants:
-        n_sensors = v["params"].num_sensors
         freq = getattr(v["params"], "frequency_hz", None)
         xs.append(getattr(v["params"], sweep_key))
-        ys_phys.append(compute_bitrate_physics(v["s"], modality, n_sensors=n_sensors,
-                                               freq=freq, time_resolution=time_resolution))
-        ys_emp.append(compute_bitrate_empirical(v["s"], modality, n_sensors=n_sensors,
-                                                freq=freq, time_resolution=time_resolution))
+        ys.append(
+            compute_bitrate(
+                v["s"],
+                v["params"],
+                modality,
+                freq=freq,
+                time_resolution=time_resolution,
+            )
+        )
 
-    ax.plot(xs, ys_phys, "o-", linewidth=2, markersize=6, color="steelblue",
-            label=f"Physics (10 nA·m dipole)")
-    ax.plot(xs, ys_emp, "s--", linewidth=2, markersize=6, color="darkorange",
-            label=f"Empirical ({int(model.typical_signal_amplitude*1e15):.0f} fT signal)")
+    ax.plot(xs, ys, "o-", linewidth=2, markersize=6, color="darkorange",
+            label="Output-power workflow")
     ax.set_xlabel(sweep_key)
     ax.set_ylabel("Bitrate (bits/s)")
     ax.set_ylim(bottom=0)
@@ -135,8 +146,7 @@ def plot_bitrate(ax, variants, sweep_key, modality, title, time_resolution=0.01)
     ax.grid(True, alpha=0.3)
 
     # annotate empirical SNR
-    snr = model.typical_signal_amplitude / model.today_best_noise * 1  # rough
-    ax.text(0.02, 0.97, f"Empirical SNR today ≈ {model.typical_signal_amplitude / model.today_best_noise:.2f}",
+    ax.text(0.02, 0.97, f"Output SNR today ~= {model.typical_signal_amplitude / model.today_best_noise:.2f}",
             transform=ax.transAxes, va="top", fontsize=7, color="darkorange")
 
 
@@ -163,7 +173,7 @@ def build_pdf():
             plot_first_sv(axes[1, 0], variants, sweep_key,
                           title="First singular value vs num_sensors")
             plot_bitrate(axes[1, 1], variants, sweep_key, modality,
-                         title="Bitrate (empirical SNR) vs num_sensors")
+                         title="Bitrate vs num_sensors")
 
             plt.tight_layout()
             pdf.savefig(fig, dpi=150)
@@ -184,7 +194,7 @@ def build_pdf():
             plot_first_sv(axes[1, 0], variants, sweep_key,
                           title="First singular value vs source_spacing_mm")
             plot_bitrate(axes[1, 1], variants, sweep_key, modality,
-                         title="Bitrate (empirical SNR) vs source_spacing_mm")
+                         title="Bitrate vs source_spacing_mm")
 
             plt.tight_layout()
             pdf.savefig(fig, dpi=150)
