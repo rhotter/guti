@@ -1078,6 +1078,20 @@ def get_bitrate(
     )
 
 
+def get_bitrate_temporal_filter(
+    s: np.ndarray,
+    noise: float,
+    freqs: np.ndarray,
+    H_magnitude: np.ndarray,
+) -> float:
+    """Capacity in bits/s for a spatial spectrum followed by a temporal filter."""
+    if len(freqs) < 2:
+        return 0.0
+    df = float(freqs[1] - freqs[0])
+    sigma_eff = np.outer(np.asarray(s), np.asarray(H_magnitude)).ravel()
+    return df * float(np.sum(np.log2(1 + (sigma_eff / noise) ** 2)))
+
+
 def noise_floor_from_total_snr(
     s: np.ndarray,
     total_snr: float,

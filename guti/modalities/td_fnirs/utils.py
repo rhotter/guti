@@ -195,7 +195,7 @@ def get_valid_source_detector_pairs(
     head_center: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Get all valid source-detector pairs satisfying the distance criterion,
+    Get unique source-detector pairs satisfying the distance criterion,
     together with their outward normals on the hemisphere surface.
 
     Parameters
@@ -208,6 +208,7 @@ def get_valid_source_detector_pairs(
     Returns
     -------
     sources, source_normals, detectors, detector_normals : each (n_pairs, 3)
+        Source-detector pairs are unordered; reciprocal pairs are not duplicated.
     """
     if head_center is None:
         from guti.core import BRAIN_RADIUS
@@ -224,7 +225,9 @@ def get_valid_source_detector_pairs(
     d_mat = torch.norm(
         sensor_positions_mm[:, None, :] - sensor_positions_mm[None, :, :], dim=2
     )
-    mask = (d_mat <= max_dist) & (d_mat > 0)
+    # The semi-infinite diffusion sensitivity is reciprocal in this model.
+    # Keep each pair once to avoid counting both source-detector directions.
+    mask = torch.triu((d_mat <= max_dist) & (d_mat > 0), diagonal=1)
     src_idx, det_idx = torch.nonzero(mask, as_tuple=True)
 
     return (

@@ -20,6 +20,10 @@ interface Variant {
   hash: string;
   num_sensors: number | null;
   source_spacing_mm: number | null;
+  grid_resolution_mm: number | null;
+  psf_fwhm_mm: number | null;
+  bold_contrast: number | null;
+  bold_snr: number | null;
   frequency_hz: number | null;
   n_singular_values: number;
   sv_indices: number[];
@@ -27,6 +31,10 @@ interface Variant {
   first_sv: number;
   bitrate_today: number | null;
   bitrate_fundamental: number | null;
+  bitrate_physical_today: number | null;
+  bitrate_physical_fundamental: number | null;
+  bitrate_empirical_today: number | null;
+  bitrate_empirical_fundamental: number | null;
   snr_empirical_today: number | null;
 }
 
@@ -34,11 +42,17 @@ interface ModalityData {
   modality: string;
   label: string;
   sweep_params: string[];
+  default_bitrate_mode?: NoiseMode;
+  bitrate_modes?: Record<string, { label: string; description: string }>;
   noise_label_today: string;
   noise_label_fundamental: string;
+  source_amplitude: number;
+  source_amplitude_units: string;
   typical_signal: number;
   variants: Variant[];
 }
+
+type NoiseMode = "physical_detector_floor" | "empirical_observed_snr";
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -47,11 +61,17 @@ const MODALITIES = [
   { key: "meg_squid", label: "MEG SQUID" },
   { key: "eeg_openmeeg", label: "EEG" },
   { key: "fnirs_analytical_cw", label: "fNIRS CW" },
+  { key: "fmri_bold", label: "fMRI" },
+  { key: "us_free_field_analytical_frequency_sweep", label: "Ultrasound" },
 ];
 
 const PARAM_LABELS: Record<string, string> = {
   num_sensors: "# sensors",
   source_spacing_mm: "source spacing (mm)",
+  grid_resolution_mm: "voxel size (mm)",
+  psf_fwhm_mm: "PSF FWHM (mm)",
+  bold_snr: "BOLD response SNR",
+  frequency_hz: "frequency (Hz)",
 };
 
 // viridis-ish palette
@@ -62,6 +82,14 @@ const COLORS = [
 
 const fmt = (x: number | null) =>
   x === null ? "—" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : x.toFixed(0);
+
+const bitrateFor = (v: Variant, tier: "today" | "fundamental", mode: NoiseMode) => {
+  if (mode === "empirical_observed_snr") {
+    return tier === "today" ? v.bitrate_empirical_today : v.bitrate_empirical_fundamental;
+  }
+  const physical = tier === "today" ? v.bitrate_physical_today : v.bitrate_physical_fundamental;
+  return physical ?? (tier === "today" ? v.bitrate_today : v.bitrate_fundamental);
+};
 
 // ── main component ────────────────────────────────────────────────────────────
 
@@ -77,6 +105,7 @@ export default function ScalingPlots() {
   const [chartType, setChartType] = useState<"spectra" | "bitrate" | "first_sv">("bitrate");
   const [normalized, setNormalized] = useState(true);
   const [tier, setTier] = useState<"today" | "fundamental">("today");
+  const [noiseMode, setNoiseMode] = useState<NoiseMode>("physical_detector_floor");
 
   // Load data for active modality
   useEffect(() => {
@@ -86,6 +115,7 @@ export default function ScalingPlots() {
       .then((r) => r.json())
       .then((d: ModalityData) => {
         setData((prev) => ({ ...prev, [activeModality]: d }));
+        setNoiseMode(d.default_bitrate_mode ?? "physical_detector_floor");
         // set default sweep/fixed params
         if (d.sweep_params.length > 0) {
           setSweepParam(d.sweep_params[0]);
@@ -139,23 +169,23 @@ export default function ScalingPlots() {
       const sv = (v as any)[sweepParam];
       if (sv === null) continue;
       const cur = byVal[sv];
-      const vBr = tier === "today" ? v.bitrate_today : v.bitrate_fundamental;
-      const curBr = cur ? (tier === "today" ? cur.bitrate_today : cur.bitrate_fundamental) : -Infinity;
+      const vBr = bitrateFor(v, tier, noiseMode);
+      const curBr = cur ? bitrateFor(cur, tier, noiseMode) : -Infinity;
       if (!cur || (vBr ?? 0) > (curBr ?? 0)) byVal[sv] = v;
     }
     return Object.values(byVal).sort(
       (a, b) => ((a as any)[sweepParam] ?? 0) - ((b as any)[sweepParam] ?? 0)
     );
-  }, [modalityData, sweepParam, tier]);
+  }, [modalityData, sweepParam, tier, noiseMode]);
 
   // Bitrate chart data
   const bitrateData = useMemo(() => {
     return sweepVariants.map((v) => ({
       x: (v as any)[sweepParam],
-      today: v.bitrate_today,
-      fundamental: v.bitrate_fundamental,
+      today: bitrateFor(v, "today", noiseMode),
+      fundamental: bitrateFor(v, "fundamental", noiseMode),
     }));
-  }, [sweepVariants, sweepParam]);
+  }, [sweepVariants, sweepParam, noiseMode]);
 
   // First SV chart data
   const firstSvData = useMemo(() => {
@@ -291,6 +321,21 @@ export default function ScalingPlots() {
               </select>
             </label>
 
+            {/* Noise model */}
+            {chartType === "bitrate" && (
+              <label style={{ display: "flex", alignItems: "center", gap: 4, color: "#374151" }}>
+                Mode:
+                <select
+                  value={noiseMode}
+                  onChange={(e) => setNoiseMode(e.target.value as NoiseMode)}
+                  style={{ border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 6px", fontSize: 12 }}
+                >
+                  <option value="physical_detector_floor">Physical detector floor</option>
+                  <option value="empirical_observed_snr">Empirical observed SNR</option>
+                </select>
+              </label>
+            )}
+
             {/* Normalized toggle (spectra only) */}
             {chartType === "spectra" && (
               <label style={{ display: "flex", alignItems: "center", gap: 4, cursor: "pointer", color: "#374151" }}>
@@ -305,13 +350,19 @@ export default function ScalingPlots() {
           </div>
 
           {/* SNR info line */}
-          {modalityData.variants[0]?.snr_empirical_today !== null && (
-            <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
-              Empirical SNR (today, ref N): {modalityData.variants[0]?.snr_empirical_today?.toFixed(2)} ·
-              noise today: {modalityData.noise_label_today} ·
-              typical signal: {modalityData.typical_signal}
-            </div>
-          )}
+          <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
+            {noiseMode === "physical_detector_floor" ? (
+              <>
+                Physical detector floor · noise today: {modalityData.noise_label_today} ·
+                source amplitude: {modalityData.source_amplitude} {modalityData.source_amplitude_units}
+              </>
+            ) : (
+              <>
+                Empirical observed SNR · SNR today: {modalityData.variants[0]?.snr_empirical_today?.toFixed(2) ?? "—"} ·
+                typical signal: {modalityData.typical_signal}
+              </>
+            )}
+          </div>
 
           {/* Chart */}
           <div style={{ width: "100%", height: 360 }}>

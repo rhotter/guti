@@ -173,12 +173,12 @@ At the code level, we now separate two effects:
 The scaling assumptions we currently use are:
 
 - EEG: noise grows like sqrt(N) at fixed scalp coverage, since Johnson voltage noise scales like sqrt(R) and contact resistance rises as electrode area shrinks.
-- MEG OPM: a conservative sqrt(N) penalty under fixed helmet coverage.
+- MEG OPM: no sensor-count penalty in field units; each vapor cell measures local magnetic field directly.
 - MEG SQUID: an N penalty, because pickup-loop field noise scales roughly like 1 / area if flux noise is approximately fixed.
 - CW fNIRS and TD fNIRS: sqrt(N), matching shot-noise-limited detectors with shrinking aperture area.
-- Ultrasound: for now a conservative sqrt(N) penalty, until the receive model is calibrated in absolute detector units.
+- Ultrasound: no detector-noise N penalty in the modal-power model; accepted acoustic power and element area cancel when converted back to pressure.
 
-For the reference detector floors, we use numbers in the range of current hardware: about 0.4 uV RMS for EEG front ends over roughly 0.5-100 Hz, about 3 fT/sqrt(Hz) for SQUID magnetometers, about 15 fT/sqrt(Hz) for OPMs, about 17.7 fW/sqrt(Hz) for a high-performance fNIRS detector, and sub-Pa/sqrt(Hz) minimum-detectable pressure for modern optical ultrasound detectors.
+For the reference detector floors, see `noise_floors.md`. The current defaults are 93 nV RMS for EEG over 100 Hz, 5 fT/sqrt(Hz) SQUID field noise, 15 fT/sqrt(Hz) OPM field noise, fNIRS shot noise from 5 mW through OD ~4, and ultrasound acoustic thermal modal power referred to a pressure-ratio detector floor.
 
 Because not every forward model in this repo is yet calibrated all the way to absolute physical units, the capacity code carries one extra per-modality calibration constant: an effective reference output SNR at a reference sensor count. The key change is that the noise floor is no longer inferred from the singular spectrum itself, and the sensor-count dependence is now explicit.
 
