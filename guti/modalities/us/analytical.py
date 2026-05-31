@@ -1120,6 +1120,22 @@ parser.add_argument(
     help='SVD method for bitrate_method=svd. direct uses torch.linalg.svdvals; gram uses eigvalsh of the smaller Gram matrix.',
 )
 parser.add_argument(
+    '--stream_gram',
+    action='store_true',
+    help='For --svd_method=gram, accumulate G^T G from sensor chunks without materializing G.',
+)
+parser.add_argument(
+    '--save_gram_matrix',
+    action='store_true',
+    help='Save the full Gram matrix used for SVD. Use with --svd_method=gram.',
+)
+parser.add_argument(
+    '--gram_output_path',
+    type=str,
+    default=None,
+    help='Optional .npy path for the saved Gram matrix. Defaults next to the saved SVD result.',
+)
+parser.add_argument(
     '--bitrate_method',
     type=str,
     default='slq',
@@ -1205,6 +1221,10 @@ if args.slq_streaming and args.slq_probe_parallel:
 
 # %%
 
+gram_for_svd = None
+gram_side_for_svd = None
+gram_output_path = None
+
 if not args.slq_streaming:
     print("Computing SVD (batched simulation + Gram accumulation)...")
 
@@ -1285,29 +1305,61 @@ def make_compute_chunk_matrix_for_device(dev_id: int):
 
 G = None
 if not args.slq_streaming:
-    # Accumulate Gram or do TSQR in batches over sensors
+    # Accumulate matrix rows in batches over sensors. For large source/sensor
+    # convergence sweeps, the full G matrix may not fit in memory, but G^T G can
+    # still fit. In that case --stream_gram avoids materializing G.
     t0 = time.perf_counter()
-    R_acc = None
-    gram_via_tiling = False
-    G_device = "cpu" if accumulate_on_cpu else device
-    G = torch.zeros((num_sensors_total * nt, num_sources_total), dtype=torch.float32, device=G_device)
-    k = 10  # Number of chunks to accumulate on GPU before transferring to CPU
-    gpu_chunks = []
-    gpu_start_idx = 0
-    last_index = 0
     print(f"num_sensors_total: {num_sensors_total}, nt: {nt}")
-    for start in range(0, num_sensors_total, sensor_batch_size):
-        print(f"Processing batch {start // sensor_batch_size + 1} of {(num_sensors_total + sensor_batch_size - 1) // sensor_batch_size}")
-        end = min(start + sensor_batch_size, num_sensors_total)
-        print(f"start: {start}, end: {end}")
-        chunk_matrix = compute_chunk_matrix(start, end)
-        chunk_rows = chunk_matrix.shape[0]
-        print(f"last_index: {last_index}, chunk_rows: {chunk_rows}")
-        if accumulate_on_cpu:
-            G[last_index:last_index + chunk_rows] = chunk_matrix.cpu()
-        else:
-            G[last_index:last_index + chunk_rows] = chunk_matrix
-        last_index += chunk_rows
+
+    if args.stream_gram:
+        if args.svd_method != "gram":
+            raise ValueError("--stream_gram requires --svd_method=gram")
+        n_outputs_total = num_sensors_total * nt
+        if n_outputs_total < num_sources_total:
+            raise ValueError(
+                "--stream_gram currently accumulates G^T G and requires "
+                f"n_outputs >= n_sources, got {n_outputs_total} < {num_sources_total}. "
+                "Reduce temporal_sampling, increase sensors, or reduce sources."
+            )
+        gram_device = "cpu" if accumulate_on_cpu else device
+        print(
+            f"Streaming G^T G accumulation on {gram_device}; "
+            f"Gram shape=({num_sources_total}, {num_sources_total})"
+        )
+        gram_for_svd = torch.zeros(
+            (num_sources_total, num_sources_total),
+            dtype=torch.float32,
+            device=gram_device,
+        )
+        for start in range(0, num_sensors_total, sensor_batch_size):
+            print(f"Processing batch {start // sensor_batch_size + 1} of {(num_sensors_total + sensor_batch_size - 1) // sensor_batch_size}")
+            end = min(start + sensor_batch_size, num_sensors_total)
+            print(f"start: {start}, end: {end}")
+            chunk_matrix = compute_chunk_matrix(start, end)
+            if accumulate_on_cpu:
+                chunk_matrix = chunk_matrix.cpu()
+            gram_for_svd.addmm_(chunk_matrix.T, chunk_matrix)
+            del chunk_matrix
+            if device == "cuda":
+                torch.cuda.empty_cache()
+        gram_for_svd = 0.5 * (gram_for_svd + gram_for_svd.T)
+        gram_side_for_svd = "G^T G"
+    else:
+        G_device = "cpu" if accumulate_on_cpu else device
+        G = torch.zeros((num_sensors_total * nt, num_sources_total), dtype=torch.float32, device=G_device)
+        last_index = 0
+        for start in range(0, num_sensors_total, sensor_batch_size):
+            print(f"Processing batch {start // sensor_batch_size + 1} of {(num_sensors_total + sensor_batch_size - 1) // sensor_batch_size}")
+            end = min(start + sensor_batch_size, num_sensors_total)
+            print(f"start: {start}, end: {end}")
+            chunk_matrix = compute_chunk_matrix(start, end)
+            chunk_rows = chunk_matrix.shape[0]
+            print(f"last_index: {last_index}, chunk_rows: {chunk_rows}")
+            if accumulate_on_cpu:
+                G[last_index:last_index + chunk_rows] = chunk_matrix.cpu()
+            else:
+                G[last_index:last_index + chunk_rows] = chunk_matrix
+            last_index += chunk_rows
 
     if device == "cuda":
         torch.cuda.synchronize()
@@ -1352,21 +1404,37 @@ if noise_level is None:
     print(f"noise_level (analysis matrix units): {noise_level}")
 
 if bitrate_method in {"svd", "both"}:
-    G_svd = G if G.device.type == svd_device else G.to(svd_device)
+    if G is None and gram_for_svd is None:
+        raise ValueError("No materialized matrix or streamed Gram is available for SVD")
+    G_svd = None if G is None else (G if G.device.type == svd_device else G.to(svd_device))
     if args.svd_method == "gram":
-        m, n = G_svd.shape
-        print(f"Computing singular values via {args.svd_method} method for matrix {m} x {n}")
-        if m >= n:
-            gram = G_svd.T @ G_svd
-            gram_side = "G^T G"
+        if gram_for_svd is not None:
+            gram = gram_for_svd
+            if gram.device.type != svd_device:
+                gram = gram.to(svd_device)
+            gram_side = gram_side_for_svd or "streamed Gram"
         else:
-            gram = G_svd @ G_svd.T
-            gram_side = "G G^T"
-        gram = 0.5 * (gram + gram.T)
+            m, n = G_svd.shape
+            print(f"Computing singular values via {args.svd_method} method for matrix {m} x {n}")
+            if m >= n:
+                gram = G_svd.T @ G_svd
+                gram_side = "G^T G"
+            else:
+                gram = G_svd @ G_svd.T
+                gram_side = "G G^T"
+            gram = 0.5 * (gram + gram.T)
+        gram_side_for_svd = gram_side
         print(f"Computing eigvalsh({gram_side}) with shape {tuple(gram.shape)}")
         eigvals = torch.linalg.eigvalsh(gram)
         s = eigvals.clamp_min(0).sqrt().flip(0)
-        del gram, eigvals
+        if args.save_gram_matrix:
+            gram_output_path = args.gram_output_path
+            if gram_output_path is None:
+                gram_output_path = "pending"
+            print(f"Deferring Gram save until SVD path is known: {gram_output_path}")
+        if gram_for_svd is None and not args.save_gram_matrix:
+            del gram
+        del eigvals
         if svd_device == "cuda":
             torch.cuda.empty_cache()
     else:
@@ -1400,6 +1468,21 @@ if bitrate_method in {"svd", "both"}:
         comment=f"signal_type={args.signal_type},signal_cycles={args.signal_cycles},signal_window={args.signal_window}",
         vincent_trick=False
     ))
+    if args.save_gram_matrix:
+        if args.svd_method != "gram":
+            raise ValueError("--save_gram_matrix requires --svd_method=gram")
+        if gram_for_svd is not None:
+            gram_to_save = gram_for_svd
+        else:
+            gram_to_save = gram
+        if args.gram_output_path is None:
+            gram_output_path = str(saved_svd_path).replace(".npz", "_gram.npy")
+        else:
+            gram_output_path = args.gram_output_path
+        print(f"Saving Gram matrix to {gram_output_path}")
+        Path(gram_output_path).parent.mkdir(parents=True, exist_ok=True)
+        np.save(gram_output_path, gram_to_save.detach().cpu().numpy())
+        print(f"Saved Gram matrix to {gram_output_path}")
 
     if args.disable_matrix_normalization:
         s_normalized = s
@@ -1441,6 +1524,8 @@ result_record = {
     "bitrate_method": bitrate_method,
     "svd_method": args.svd_method,
     "matrix_size": [int(num_sensors_total * nt), int(len(source_positions))],
+    "gram_output_path": gram_output_path,
+    "gram_side": gram_side_for_svd,
     "bitrate": bitrate_slq if bitrate_slq is not None else bitrate_svd,
     "bitrate_slq": bitrate_slq,
     "bitrate_svd": bitrate_svd,

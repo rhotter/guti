@@ -90,6 +90,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional --svd_device value forwarded to analytical.py.",
     )
     parser.add_argument(
+        "--svd-method",
+        choices=["direct", "gram"],
+        default="direct",
+        help="Optional --svd_method value forwarded to analytical.py.",
+    )
+    parser.add_argument(
+        "--stream-gram",
+        action="store_true",
+        help="Pass --stream_gram through to analytical.py.",
+    )
+    parser.add_argument(
+        "--save-gram-matrix",
+        action="store_true",
+        help=(
+            "Pass --save_gram_matrix through to analytical.py. The Modal wrapper "
+            "stores the Gram matrix in the persistent us-results volume."
+        ),
+    )
+    parser.add_argument(
         "--accumulate-on-cpu",
         action="store_true",
         help="Pass --accumulate_on_cpu through to analytical.py.",
@@ -195,6 +214,9 @@ def build_analytical_args(
     sensor_batch_size: int,
     bitrate_method: str,
     svd_device: str | None,
+    svd_method: str,
+    stream_gram: bool,
+    save_gram_matrix: bool,
     accumulate_on_cpu: bool,
     passthrough_args: list[str],
 ) -> list[str]:
@@ -211,9 +233,15 @@ def build_analytical_args(
         str(sensor_batch_size),
         "--bitrate_method",
         bitrate_method,
+        "--svd_method",
+        svd_method,
     ]
     if svd_device is not None:
         analytical_args.extend(["--svd_device", svd_device])
+    if stream_gram:
+        analytical_args.append("--stream_gram")
+    if save_gram_matrix:
+        analytical_args.append("--save_gram_matrix")
     if accumulate_on_cpu:
         analytical_args.append("--accumulate_on_cpu")
     analytical_args.extend(passthrough_args)
@@ -598,6 +626,9 @@ def main() -> int:
     print("Sensor counts:", sensor_counts)
     print("Frequencies (kHz):", frequencies_khz)
     print("Bitrate method:", args.bitrate_method)
+    print("SVD method:", args.svd_method)
+    print("Stream Gram:", args.stream_gram)
+    print("Save Gram matrix:", args.save_gram_matrix)
     print("Parallel jobs:", args.jobs)
     if args.start_index != 1 or args.end_index is not None:
         selected_end = start_offset + len(runs)
@@ -618,6 +649,9 @@ def main() -> int:
             sensor_batch_size=args.sensor_batch_size,
             bitrate_method=args.bitrate_method,
             svd_device=args.svd_device,
+            svd_method=args.svd_method,
+            stream_gram=args.stream_gram,
+            save_gram_matrix=args.save_gram_matrix,
             accumulate_on_cpu=args.accumulate_on_cpu,
             passthrough_args=effective_passthrough_args,
         )

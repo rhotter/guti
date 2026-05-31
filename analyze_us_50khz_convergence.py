@@ -175,6 +175,9 @@ def load_sweep_rows(input_dir: Path) -> list[dict[str, Any]]:
                 "bitrate_bits_per_s": bitrate,
                 "channel_capacity_bits_per_s": capacity,
                 "modal_json_bitrate": record.get("bitrate"),
+                "modal_gram_output_path": record.get("modal_gram_output_path")
+                or record.get("gram_output_path"),
+                "modal_gram_size_bytes": record.get("modal_gram_size_bytes"),
             }
         )
 
@@ -196,6 +199,8 @@ def write_metrics(rows: list[dict[str, Any]], outdir: Path) -> None:
         "noise_std",
         "bitrate_bits_per_s",
         "channel_capacity_bits_per_s",
+        "modal_gram_output_path",
+        "modal_gram_size_bytes",
         "source_npz",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
@@ -363,6 +368,8 @@ def write_readme(
             f"| rank > 1% first SV | {canonical_row['rank_gt_1pct']} |",
             f"| bitrate | {canonical_row['bitrate_bits_per_s']:.6g} bit/s |",
             f"| water-filled channel capacity | {canonical_row['channel_capacity_bits_per_s']:.6g} bit/s |",
+            f"| Modal Gram path | `{canonical_row.get('modal_gram_output_path')}` |",
+            f"| Modal Gram size | {canonical_row.get('modal_gram_size_bytes')} bytes |",
             "",
             f"Sensor-scaling plots use the largest common realized source count, `{sensor_source_count}`, when available.",
             "",

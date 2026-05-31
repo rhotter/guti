@@ -141,6 +141,7 @@ Here's a table of the equations used for each modality:
 | :--- | :--- | :--- | :--- |
 | EEG | Poisson equation | OpenMEEG | Conductivity of brain = conductivity of scalp = 33× conductivity of skull |
 | MEG | Biot-Savart | Analytical (Sarvas formula) | — |
+| fMRI | Reconstructed BOLD image model | Analytical Gaussian PSF + HRF | 1% BOLD contrast, finite voxel size, temporal HRF |
 | fNIRS | Radiative transfer equation | Analytical Green's function | Homogeneous absorption and scattering coefficients |
 | Ultrasound | Acoustic wave equation | Analytical Green's function | — |
 
@@ -161,8 +162,9 @@ Here's a table of the noise sources for each modality:
 | EEG | Johnson noise | ~90 nV (5 kΩ, 100 Hz BW) | Same — thermodynamic floor |
 | MEG SQUID | SQUID flux noise | 5 fT/√Hz | 0.1 fT/√Hz (body thermal) |
 | MEG OPM | Atomic spin noise | 15 fT/√Hz | 0.5 fT/√Hz (spin projection, 1 cm³ cell) |
+| fMRI | Thermal/reconstruction + physiological noise | BOLD response SNR derived from 1% contrast and tSNR ~80 | high-quality BOLD response SNR floor |
 | fNIRS | Shot noise | 62 ppm (5 mW) | 23 ppm (ANSI max, 35 mW) |
-| Ultrasound | Acoustic thermal (Mellen) | frequency-dependent | Same — thermodynamic floor |
+| Ultrasound | Acoustic thermal modal power | frequency-dependent | Same — thermodynamic floor |
 
 Each of these noise sources are additive, Gaussian, and independent across the sensors.
 
@@ -181,6 +183,8 @@ The SVD gives us a way to decompose the communication into independent channels.
 $$C = \tfrac{1}{2} \sum_i \log_2\!\left(1 + \frac{\sigma_i^2 a_i^2}{n^2}\right)$$
 
 where *n* is the noise at the sensors, and *a_i* is the magnitude of the source's *i*'th singular component. Since we don't make assumptions on which SVD channels the brain will communicate on, we use an algorithm called the [water-filling algorithm](https://en.wikipedia.org/wiki/Water-filling_algorithm) which smartly picks how much of the signal power to put in each component to maximize the information transfer.
+
+For the first-principles estimates below, we use the physical detector-floor path: detector noise divided by source amplitude. The interactive explorer also exposes an empirical observed-SNR mode, which is useful as a sanity check but normalizes away the absolute forward-model gain.
 
 And that's it! That's how we compute the channel capacities for each modality.
 

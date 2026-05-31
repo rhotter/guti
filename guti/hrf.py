@@ -7,15 +7,6 @@ temporal resolution in fMRI and fNIRS bitrate calculations.
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
-from nilearn.glm.first_level import (
-    spm_hrf,
-    glover_hrf,
-    FirstLevelModel,
-)
-from nilearn.datasets import fetch_localizer_first_level
-from nilearn.image import get_data
-import pandas as pd
 
 
 def compute_psd(signal, dt):
@@ -67,6 +58,8 @@ def get_canonical_hrf_spectrum(
 def get_empirical_hrf():
     """Extract an empirical HRF from real fMRI data via FIR deconvolution."""
     from nilearn.maskers import NiftiSpheresMasker
+    from nilearn.datasets import fetch_localizer_first_level
+    import pandas as pd
 
     data = fetch_localizer_first_level()
     fmri_img = data.epi_img
@@ -100,6 +93,9 @@ def get_empirical_hrf():
 
 
 def main():
+    import matplotlib.pyplot as plt
+    from nilearn.glm.first_level import spm_hrf, glover_hrf
+
     tr = 0.01  # 10 ms sampling for smooth curves
 
     hrfs = {
