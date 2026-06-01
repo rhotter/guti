@@ -243,7 +243,7 @@ class ImagingModality(ABC):
             self.save_results(
                 None,
                 default_run=default_run,
-                extra={
+                extra_arrays={
                     "bitrate": bitrate,
                     "bitrate_method": "slq",
                     "noise_level": noise,
@@ -270,7 +270,7 @@ class ImagingModality(ABC):
         self,
         singular_values,
         default_run: bool = False,
-        extra: Optional[dict] = None,
+        extra_arrays: Optional[dict] = None,
     ) -> None:
         """
         Save results with parameter tracking.
@@ -281,7 +281,7 @@ class ImagingModality(ABC):
             Singular values from SVD analysis, or None for the SLQ path.
         default_run : bool, default=False
             Whether to save as default run configuration.
-        extra : dict, optional
+        extra_arrays : dict, optional
             Extra arrays/scalars to store (e.g. an SLQ ``bitrate``).
         """
         from guti.data_utils import save_svd
@@ -291,7 +291,7 @@ class ImagingModality(ABC):
             self.name,
             self.params,
             default_run=default_run,
-            extra=extra,
+            extra_arrays=extra_arrays,
         )
 
     def __repr__(self) -> str:

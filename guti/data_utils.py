@@ -19,7 +19,6 @@ def save_svd(
     modality_name: str,
     params: Optional[Parameters] = None,
     default_run: bool = False,
-    extra: Optional[Dict[str, Any]] = None,
     extra_arrays: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
@@ -28,7 +27,7 @@ def save_svd(
     Supports both bitrate pipelines in one results store:
       - SVD path: pass the singular-value spectrum as ``s``.
       - SLQ path: pass ``s=None`` and the scalar result via
-        ``extra={"bitrate": ..., "bitrate_method": "slq", "noise_level": ...}``.
+        ``extra_arrays={"bitrate": ..., "bitrate_method": "slq", "noise_level": ...}``.
 
     Parameters
     ----------
@@ -40,8 +39,9 @@ def save_svd(
         Parameters object (see guti.parameters.Parameters).
     default_run : bool, default=False
         Save as the modality's default configuration rather than a hashed variant.
-    extra : dict, optional
-        Additional arrays/scalars stored alongside (or instead of) the spectrum.
+    extra_arrays : dict, optional
+        Additional arrays/scalars stored alongside (or instead of) the spectrum
+        (e.g. an SLQ ``bitrate`` when ``s=None``).
     """
     if params is None:
         structured_params = None
@@ -51,8 +51,6 @@ def save_svd(
     save_dict: Dict[str, Any] = {"parameters": structured_params}
     if s is not None:
         save_dict["singular_values"] = s
-    if extra is not None:
-        save_dict.update(extra)
     if extra_arrays is not None:
         save_dict.update(extra_arrays)
 
