@@ -18,9 +18,9 @@ The current completed high-source rows used the very high-SNR default (`1e-3` ou
 ## Inputs
 
 - Exact SVD rows: 15
-- SLQ rows: 11
+- SLQ rows: 13
 - Sensor counts: 1000, 3000, 6000
-- Largest SLQ realized source count: 195147
+- Largest SLQ realized source count: 259867
 
 ## Plots
 
@@ -32,8 +32,8 @@ The current completed high-source rows used the very high-SNR default (`1e-3` ou
 
 | sensors | realized sources | SLQ bitrate bit/s |
 | ---: | ---: | ---: |
-| 3000 | 195147 | 1.47443e+12 |
-| 6000 | 195147 | 1.63663e+12 |
+| 3000 | 259867 | 1.47528e+12 |
+| 6000 | 259867 | 2.15289e+12 |
 
 ## Data
 
