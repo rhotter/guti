@@ -1,0 +1,126 @@
+{
+  "bandwidth_hz": 100.0,
+  "electrode_area_cm2": 1.0,
+  "lmax": 2000,
+  "n_sensors": 256,
+  "rows": [
+    {
+      "label": "volume only",
+      "series_resistance_ohm": null,
+      "summary": {
+        "corr_max": 0.44630361466098617,
+        "corr_min": -0.03949818660629384,
+        "corr_positive_pair_count": 12956,
+        "diag_max": 3.921501775145974e-16,
+        "diag_min": 3.921501775145465e-16,
+        "fits": {
+          "exponential": {
+            "kernel": "exponential",
+            "length_mm": 18.687700287124,
+            "log_rmse": 0.5064068632154409,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          },
+          "gaussian": {
+            "kernel": "gaussian",
+            "length_mm": 27.089699123480656,
+            "log_rmse": 0.6641199476543993,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          }
+        }
+      }
+    },
+    {
+      "label": "volume + 500 ohm independent series",
+      "series_resistance_ohm": 500.0,
+      "summary": {
+        "corr_max": 0.1402216745549274,
+        "corr_min": -0.01240971770310351,
+        "corr_positive_pair_count": 12956,
+        "diag_max": 1.2481525575145976e-15,
+        "diag_min": 1.2481525575145465e-15,
+        "fits": {
+          "exponential": {
+            "kernel": "exponential",
+            "length_mm": 14.304314285978155,
+            "log_rmse": 0.5652939220582209,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          },
+          "gaussian": {
+            "kernel": "gaussian",
+            "length_mm": 23.94786054232282,
+            "log_rmse": 1.221411321459871,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          }
+        }
+      }
+    },
+    {
+      "label": "volume + 1000 ohm independent series",
+      "series_resistance_ohm": 1000.0,
+      "summary": {
+        "corr_max": 0.08317735476335285,
+        "corr_min": -0.007361254921397806,
+        "corr_positive_pair_count": 12956,
+        "diag_max": 2.1041549375145975e-15,
+        "diag_min": 2.1041549375145466e-15,
+        "fits": {
+          "exponential": {
+            "kernel": "exponential",
+            "length_mm": 12.935652804089967,
+            "log_rmse": 0.6744327790196998,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          },
+          "gaussian": {
+            "kernel": "gaussian",
+            "length_mm": 22.8483055213575,
+            "log_rmse": 1.4870002987393511,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          }
+        }
+      }
+    },
+    {
+      "label": "volume + 5000 ohm independent series",
+      "series_resistance_ohm": 5000.0,
+      "summary": {
+        "corr_max": 0.01955033963306672,
+        "corr_min": -0.0017302189309621877,
+        "corr_positive_pair_count": 12956,
+        "diag_max": 8.952173977514598e-15,
+        "diag_min": 8.952173977514548e-15,
+        "fits": {
+          "exponential": {
+            "kernel": "exponential",
+            "length_mm": 10.223501080336888,
+            "log_rmse": 1.0850686179333502,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          },
+          "gaussian": {
+            "kernel": "gaussian",
+            "length_mm": 20.446296246793754,
+            "log_rmse": 2.2367985350093287,
+            "max_distance_mm": 97.57294415372493,
+            "min_correlation": 0.0,
+            "n_pairs": 12956
+          }
+        }
+      }
+    }
+  ],
+  "temperature_k": 310,
+  "volume_impedance_diag_ohm": 229.05904625790726
+}

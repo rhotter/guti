@@ -7,12 +7,15 @@ This directory contains the local analysis for a Modal sweep of the analytical u
 Command:
 
 ```bash
-/Users/nudge/.pyenv/versions/venv/bin/python run_modal_us_analytical_sweep.py --runner sdk --frequencies-khz 50 --source-counts 4000,8000,16000,32000 --sensor-counts 1000,3000,6000 --temporal-sampling 1 --sensor-batch-size 128 --bitrate-method svd --svd-method gram --stream-gram --save-gram-matrix --modal-output-dir results/variants/us_free_field_analytical_50khz_convergence_20260531 --log-dir logs/us_50khz_convergence_20260531 --jobs 1
+Initial sweep: /Users/nudge/.pyenv/versions/venv/bin/python run_modal_us_analytical_sweep.py --runner sdk --frequencies-khz 50 --source-counts 4000,8000,16000,32000 --sensor-counts 1000,3000,6000 --temporal-sampling 1 --sensor-batch-size 128 --bitrate-method svd --svd-method gram --stream-gram --save-gram-matrix --modal-output-dir results/variants/us_free_field_analytical_50khz_convergence_20260531 --log-dir logs/us_50khz_convergence_20260531 --jobs 1
+Extension: /Users/nudge/.pyenv/versions/venv/bin/python run_modal_us_analytical_sweep.py --runner sdk --frequencies-khz 50 --source-counts 44000 --sensor-counts 1000,3000,6000 --temporal-sampling 1 --sensor-batch-size 128 --bitrate-method svd --svd-method gram --stream-gram --modal-output-dir results/variants/us_free_field_analytical_50khz_convergence_20260531 --log-dir logs/us_50khz_convergence_20260531 --jobs 1
 ```
 
-- Completed NPZ results analyzed: 12
+- Completed NPZ results analyzed: 15
 - Sensor counts: 1000, 3000, 6000
-- Realized source counts: 4237, 8385, 16601, 32940
+- Realized source counts: 4237, 8385, 16601, 32940, 45177
+- Input power convention: average_output_power
+- Source power normalization: none
 
 ## Plots
 
@@ -25,28 +28,30 @@ Command:
 
 ## Canonical Result
 
-The canonical result was updated at `results/us_analytical_svd_spectrum.npz` from `results/variants/us_free_field_analytical_50khz_convergence_20260531/012_50khz_32000src_6000sensors__e9dcf4ea.npz`.
+The canonical result was updated at `results/us_analytical_svd_spectrum.npz` from `results/variants/us_free_field_analytical_50khz_convergence_20260531/002_50khz_44000src_6000sensors__5e7ae3d4.npz`.
 
 | quantity | value |
 | --- | ---: |
 | sensors | 6000 |
-| realized source points | 32940 |
-| matrix shape | 366000 x 32940 |
-| singular values | 32940 |
-| first singular value | 0.023958 |
-| rank > 1% first SV | 21963 |
-| bitrate | 2.97379e+11 bit/s |
-| water-filled channel capacity | 2.97379e+11 bit/s |
-| Modal Gram path | `/modal_results/us_analytical_grams/012_50khz_32000src_6000sensors_gram.npy` |
-| Modal Gram size | 4340174528 bytes |
+| realized source points | 45177 |
+| matrix shape | 366000 x 45177 |
+| singular values | 45177 |
+| first singular value | 0.0204732 |
+| rank > 1% first SV | 23582 |
+| source amplitude scale | 1 |
+| total input power | 175956 |
+| bitrate | 3.98789e+11 bit/s |
+| water-filled channel capacity | 3.98789e+11 bit/s |
+| Modal Gram path | `None` |
+| Modal Gram size | None bytes |
 
-Sensor-scaling plots use the largest common realized source count, `32940`, when available.
+Sensor-scaling plots use the largest common realized source count, `45177`, when available.
 
 | sensors | sources | bitrate bit/s | channel capacity bit/s |
 | ---: | ---: | ---: | ---: |
-| 1000 | 32940 | 2.31846e+11 | 2.32034e+11 |
-| 3000 | 32940 | 2.82769e+11 | 2.82769e+11 |
-| 6000 | 32940 | 2.97379e+11 | 2.97379e+11 |
+| 1000 | 45177 | 2.78946e+11 | 2.80185e+11 |
+| 3000 | 45177 | 3.73348e+11 | 3.73349e+11 |
+| 6000 | 45177 | 3.98789e+11 | 3.98789e+11 |
 
 ## Data
 

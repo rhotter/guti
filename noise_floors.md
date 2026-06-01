@@ -40,6 +40,25 @@ V_n = √(4 k_B T R Δf)
 
 **Body thermal voltage:** Thermal currents in brain tissue produce voltage noise, but the effective tissue resistance between scalp electrodes (~tens to hundreds of Ω) is far below the contact impedance (kΩ), so this contribution is negligible.
 
+**Effective spatial covariance length:** A layered-sphere Johnson covariance
+calculation was run in `run_eeg_johnson_length_scale.py` using 256 scalp
+electrodes, 1 cm² circular electrode patches, the GUTI four-layer conductivities,
+310 K, and 100 Hz bandwidth. Fitting the positive off-diagonal Johnson
+correlations to the existing scalar distance kernels gives:
+
+- pure volume-conductor Johnson term: exponential length **18.7 mm**, Gaussian
+  length **27.1 mm**;
+- with an independent 5 kΩ series/contact term: nearest-neighbor correlation is
+  only **0.020**, and the fitted Gaussian length is **20.4 mm** with poor
+  log-fit error.
+
+Interpretation: if a Gaussian length-scale fallback is still needed, **27 mm**
+is the closest match to the pure volume-conductor Johnson covariance. Once
+contact/front-end Johnson noise dominates the diagonal, a single distance
+length scale is not a good physical description; use the direct covariance
+matrix instead. Reproducible output is in
+`results/eeg_johnson_effective_length_scale.md`.
+
 ### MEG SQUID: flux noise
 
 A SQUID transduces magnetic flux to voltage. The noise comes from Johnson noise in the Josephson junction shunt resistors (at 4 K operating temperature):

@@ -24,6 +24,7 @@ from guti.capacity import (
     total_input_power_from_average_output_power,
 )
 from guti.noise_models import compute_average_output_power, compute_output_noise_std
+from guti.noise_models import compute_input_amplitude
 from guti.parameters import Parameters
 
 
@@ -57,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--command",
         default=None,
         help="Optional exact sweep command to include in README.md.",
+    )
+    parser.add_argument(
+        "--input-power-convention",
+        choices=["auto", "average_output_power", "fixed_total_source_power"],
+        default="auto",
+        help="Override input power convention for bitrate/capacity analysis.",
     )
     return parser
 
@@ -109,10 +116,11 @@ def matrix_shape_from_params(params: Parameters, n_singular_values: int) -> tupl
     return max(int(params.num_sensors), n_singular_values), int(params.num_brain_grid_points)
 
 
-def load_sweep_rows(input_dir: Path) -> list[dict[str, Any]]:
+def load_sweep_rows(input_dir: Path, input_power_convention_override: str = "auto") -> list[dict[str, Any]]:
     json_records = load_json_records(input_dir)
     rows: list[dict[str, Any]] = []
     average_output_power = compute_average_output_power("us_analytical")
+    physical_total_source_power = compute_input_amplitude("us_analytical") ** 2
 
     for path in sorted(input_dir.glob("*.npz")):
         data = np.load(path, allow_pickle=True)
@@ -121,6 +129,12 @@ def load_sweep_rows(input_dir: Path) -> list[dict[str, Any]]:
         params_dict = data["parameters"].item() if "parameters" in data.files else {}
         params = Parameters.from_dict(params_dict or {})
         singular_values = np.asarray(data["singular_values"], dtype=np.float64)
+        noise_normalized_singular_values = None
+        if "noise_normalized_singular_values" in data.files:
+            noise_normalized_singular_values = np.asarray(
+                data["noise_normalized_singular_values"],
+                dtype=np.float64,
+            )
         requested_sources, requested_sensors = parse_label_counts(path)
 
         n_sensors = params.num_sensors or requested_sensors
@@ -138,30 +152,60 @@ def load_sweep_rows(input_dir: Path) -> list[dict[str, Any]]:
             n_sensors=int(n_sensors),
             frequency_hz=frequency_hz,
         )
-        total_input_power = total_input_power_from_average_output_power(
-            singular_values,
-            average_output_power=average_output_power,
-            n_sources=n_sources,
-            n_outputs=n_outputs,
-        )
-        bitrate = float(
-            get_bitrate(
-                singular_values,
-                n_sources=n_sources,
-                total_input_power=total_input_power,
-                noise=output_noise,
-                time_resolution=time_resolution,
-            )
-        )
-        capacity = float(
-            get_capacity(
-                singular_values[singular_values > 0],
-                total_input_power=total_input_power,
-                noise=output_noise,
-                time_resolution=time_resolution,
-            )
-        )
         record = json_records.get((int(n_brain), int(n_sensors)), {})
+        source_amplitude_scale = float(record.get("source_amplitude_scale") or 1.0)
+        input_power_convention = record.get("input_power_convention") or "average_output_power"
+        if input_power_convention_override != "auto":
+            input_power_convention = input_power_convention_override
+        if input_power_convention == "fixed_total_source_power":
+            total_input_power = physical_total_source_power / (source_amplitude_scale**2)
+        else:
+            total_input_power = total_input_power_from_average_output_power(
+                singular_values,
+                average_output_power=average_output_power,
+                n_sources=n_sources,
+                n_outputs=n_outputs,
+            )
+        if noise_normalized_singular_values is None:
+            noise_model_type = "scalar_iid"
+            bitrate = float(
+                get_bitrate(
+                    singular_values,
+                    n_sources=n_sources,
+                    total_input_power=total_input_power,
+                    noise=output_noise,
+                    time_resolution=time_resolution,
+                )
+            )
+            capacity = float(
+                get_capacity(
+                    singular_values[singular_values > 0],
+                    total_input_power=total_input_power,
+                    noise=output_noise,
+                    time_resolution=time_resolution,
+                )
+            )
+        else:
+            noise_model_type = "spatial_covariance"
+            bitrate = float(
+                get_bitrate(
+                    noise_normalized_singular_values,
+                    n_sources=n_sources,
+                    total_input_power=total_input_power,
+                    noise=1.0,
+                    time_resolution=time_resolution,
+                )
+            )
+            capacity = float(
+                get_capacity(
+                    noise_normalized_singular_values[
+                        noise_normalized_singular_values > 0
+                    ],
+                    total_input_power=total_input_power,
+                    noise=1.0,
+                    time_resolution=time_resolution,
+                )
+            )
         rows.append(
             {
                 "path": path,
@@ -179,6 +223,13 @@ def load_sweep_rows(input_dir: Path) -> list[dict[str, Any]]:
                 "first_singular_value": float(singular_values[0]),
                 "rank_gt_1pct": int(np.sum(singular_values / singular_values[0] > 0.01)),
                 "noise_std": float(output_noise),
+                "noise_model_type": noise_model_type,
+                "noise_correlation_length_mm": params.noise_correlation_length_mm,
+                "noise_correlation_kernel": params.noise_correlation_kernel,
+                "source_power_normalization": record.get("source_power_normalization") or "none",
+                "source_amplitude_scale": source_amplitude_scale,
+                "input_power_convention": input_power_convention,
+                "total_input_power": float(total_input_power),
                 "bitrate_bits_per_s": bitrate,
                 "channel_capacity_bits_per_s": capacity,
                 "modal_json_bitrate": record.get("bitrate"),
@@ -204,6 +255,13 @@ def write_metrics(rows: list[dict[str, Any]], outdir: Path) -> None:
         "first_singular_value",
         "rank_gt_1pct",
         "noise_std",
+        "noise_model_type",
+        "noise_correlation_length_mm",
+        "noise_correlation_kernel",
+        "source_power_normalization",
+        "source_amplitude_scale",
+        "input_power_convention",
+        "total_input_power",
         "bitrate_bits_per_s",
         "channel_capacity_bits_per_s",
         "modal_gram_output_path",
@@ -357,6 +415,9 @@ def write_readme(
             f"- Completed NPZ results analyzed: {len(rows)}",
             f"- Sensor counts: {', '.join(map(str, sorted({row['num_sensors'] for row in rows})))}",
             f"- Realized source counts: {', '.join(map(str, sorted({row['num_brain_grid_points'] for row in rows})))}",
+            f"- Input power convention: {canonical_row['input_power_convention']}",
+            f"- Source power normalization: {canonical_row['source_power_normalization']}",
+            f"- Noise model type: {canonical_row['noise_model_type']}",
             "",
             "## Plots",
             "",
@@ -379,6 +440,8 @@ def write_readme(
             f"| singular values | {canonical_row['n_singular_values']} |",
             f"| first singular value | {canonical_row['first_singular_value']:.6g} |",
             f"| rank > 1% first SV | {canonical_row['rank_gt_1pct']} |",
+            f"| source amplitude scale | {canonical_row['source_amplitude_scale']:.6g} |",
+            f"| total input power | {canonical_row['total_input_power']:.6g} |",
             f"| bitrate | {canonical_row['bitrate_bits_per_s']:.6g} bit/s |",
             f"| water-filled channel capacity | {canonical_row['channel_capacity_bits_per_s']:.6g} bit/s |",
             f"| Modal Gram path | `{canonical_row.get('modal_gram_output_path')}` |",
@@ -413,7 +476,7 @@ def main() -> int:
     outdir = Path(args.outdir) if args.outdir is not None else input_dir / "analysis"
     outdir.mkdir(parents=True, exist_ok=True)
 
-    rows = load_sweep_rows(input_dir)
+    rows = load_sweep_rows(input_dir, args.input_power_convention)
     if not rows:
         raise SystemExit(f"No 50 kHz sweep NPZ files found in {input_dir}")
 

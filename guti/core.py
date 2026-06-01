@@ -834,6 +834,7 @@ def create_eeg_bem_model(
     n_radial_lines=None,
     n_dipoles_per_line=None,
     use_radial_orientations=False,
+    source_radius_margin_mm=0.0,
 ):
     """Create BEM model specifically for EEG with configurable parameters.
 
@@ -858,6 +859,10 @@ def create_eeg_bem_model(
         If True, creates a single radial dipole at each position pointing outward
         (normal to surface), instead of 3 orthogonal dipoles. Works with both
         radial lines method and grid-based method.
+    source_radius_margin_mm : float, optional
+        Exclude grid sources closer than this distance to the brain boundary.
+        OpenMEEG rejects dipoles exactly on an interface, so clean sweeps can set
+        a tiny positive margin without changing existing default behavior.
 
     Notes
     -----
@@ -917,6 +922,11 @@ def create_eeg_bem_model(
     else:
         # Use grid-based distribution
         brain_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
+        if source_radius_margin_mm > 0:
+            distances = np.linalg.norm(brain_positions - center, axis=1)
+            brain_positions = brain_positions[
+                distances < BRAIN_RADIUS - source_radius_margin_mm
+            ]
 
         if use_radial_orientations:
             # Single radial dipole at each position pointing outward

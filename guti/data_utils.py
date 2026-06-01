@@ -19,6 +19,7 @@ def save_svd(
     modality_name: str,
     params: Optional[Parameters] = None,
     default_run: bool = False,
+    extra_arrays: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Save the singular value spectrum and optional parameters to a file.
@@ -44,11 +45,12 @@ def save_svd(
         structured_params = None
     else:
         structured_params = asdict(params)
+    arrays = {} if extra_arrays is None else dict(extra_arrays)
 
     if default_run:
         # Save as default configuration in main results directory
         filepath = os.path.join(RESULTS_DIR, f"{modality_name}_svd_spectrum.npz")
-        np.savez(filepath, singular_values=s, parameters=structured_params)
+        np.savez(filepath, singular_values=s, parameters=structured_params, **arrays)
         print(f"Saved default SVD spectrum to {filepath}")
     else:
         if params is None:
@@ -59,7 +61,7 @@ def save_svd(
         target_dir = os.path.join(VARIANTS_DIR, modality_name)
         os.makedirs(target_dir, exist_ok=True)
         filepath = os.path.join(target_dir, f"{params_hash}.npz")
-        np.savez(filepath, singular_values=s, parameters=structured_params)  # type: ignore
+        np.savez(filepath, singular_values=s, parameters=structured_params, **arrays)  # type: ignore
     return filepath
 
 

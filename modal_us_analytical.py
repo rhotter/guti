@@ -156,6 +156,13 @@ def _with_result_output_args(
     return sanitized
 
 
+def _requests_gram_save(analytical_args: list[str]) -> bool:
+    return any(
+        arg == "--save_gram_matrix" or arg.startswith("--save_gram_matrix=")
+        for arg in analytical_args
+    )
+
+
 def _snapshot_npzs(results_dir: Path) -> dict[str, int]:
     return {
         str(path.relative_to(results_dir)): path.stat().st_mtime_ns
@@ -247,7 +254,7 @@ def _build_remote_result(job_spec: dict[str, Any]) -> dict[str, Any]:
         analytical_record = _extract_prefixed_json(combined_output, RESULT_JSON_PREFIX)
 
     gram_size_bytes = None
-    if gram_output_path.exists():
+    if _requests_gram_save(job_spec["analytical_args"]) and gram_output_path.exists():
         gram_size_bytes = gram_output_path.stat().st_size
         artifact_volume.commit()
 

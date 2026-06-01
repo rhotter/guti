@@ -8,10 +8,18 @@ from guti.capacity import (
     get_bitrate_from_average_output_power,
     get_capacity,
     get_capacity_from_average_output_power,
+    sensor_noise_normalized_singular_values,
     resolve_total_input_power,
     total_input_power_from_average_output_power,
     total_input_power_from_input_amplitude,
     water_filling_power_allocation,
+)
+from guti.noise_models import (
+    K_B,
+    compute_output_noise_covariance,
+    compute_johnson_noise_covariance,
+    compute_sensor_noise_covariance,
+    estimate_effective_correlation_length_mm,
 )
 
 
@@ -134,6 +142,220 @@ class CapacityPowerTests(unittest.TestCase):
 
         np.testing.assert_allclose(actual, expected, rtol=1e-12)
         np.testing.assert_allclose(allocation, np.array([4.375, 0.625]), rtol=1e-12)
+
+    def test_distance_covariance_uses_sensor_variances_and_kernel(self):
+        positions = np.array(
+            [
+                [172.0, 80.0, 0.0],
+                [80.0, 172.0, 0.0],
+                [80.0, 80.0, 92.0],
+            ]
+        )
+        noise_std = np.array([0.1, 0.2, 0.4])
+
+        covariance = compute_sensor_noise_covariance(
+            positions,
+            noise_std,
+            correlation_length_mm=5.0,
+            kernel="exponential",
+        )
+
+        np.testing.assert_allclose(np.diag(covariance), noise_std**2, rtol=1e-12)
+        self.assertGreater(covariance[0, 1], 0.0)
+        self.assertLess(covariance[0, 1], noise_std[0] * noise_std[1])
+        np.testing.assert_allclose(covariance, covariance.T, rtol=1e-12)
+
+    def test_output_covariance_expands_rows_grouped_by_sensor(self):
+        positions = np.array(
+            [
+                [172.0, 80.0, 0.0],
+                [80.0, 172.0, 0.0],
+            ]
+        )
+        covariance = compute_output_noise_covariance(
+            positions,
+            0.5,
+            correlation_length_mm=5.0,
+            outputs_per_sensor=3,
+        )
+
+        self.assertEqual(covariance.shape, (6, 6))
+        np.testing.assert_allclose(np.diag(covariance), np.full(6, 0.25))
+        np.testing.assert_allclose(covariance[0:3, 0:3], 0.25 * np.eye(3))
+        np.testing.assert_allclose(covariance[0, 4], 0.0, atol=1e-15)
+        self.assertGreater(covariance[0, 3], 0.0)
+
+    def test_johnson_covariance_scales_transfer_resistance(self):
+        resistance = np.array([[5_000.0, 700.0], [700.0, 4_000.0]])
+        temperature_k = 310.0
+        bandwidth_hz = 100.0
+
+        covariance = compute_johnson_noise_covariance(
+            resistance,
+            bandwidth_hz=bandwidth_hz,
+            temperature_k=temperature_k,
+        )
+
+        expected = 4.0 * K_B * temperature_k * bandwidth_hz * resistance
+        np.testing.assert_allclose(covariance, expected, rtol=1e-12)
+
+    def test_johnson_covariance_applies_montage_and_series_resistance(self):
+        terminal_resistance = np.array(
+            [
+                [3.0, 0.4, 0.2],
+                [0.4, 4.0, 0.1],
+                [0.2, 0.1, 5.0],
+            ]
+        )
+        montage = np.array([[1.0, 0.0, -1.0], [0.0, 1.0, -1.0]])
+        contact_resistance = np.array([10.0, 20.0, 30.0])
+        bandwidth_hz = 25.0
+        temperature_k = 300.0
+
+        covariance = compute_johnson_noise_covariance(
+            terminal_resistance,
+            bandwidth_hz=bandwidth_hz,
+            temperature_k=temperature_k,
+            series_resistance_ohm=contact_resistance,
+            montage_matrix=montage,
+        )
+
+        channel_resistance = montage @ (
+            terminal_resistance + np.diag(contact_resistance)
+        ) @ montage.T
+        expected = 4.0 * K_B * temperature_k * bandwidth_hz * channel_resistance
+        np.testing.assert_allclose(covariance, expected, rtol=1e-12)
+
+    def test_johnson_covariance_can_match_existing_noise_std(self):
+        resistance = np.array([[9.0, 3.0], [3.0, 4.0]])
+        noise_std = np.array([0.1, 0.2])
+
+        covariance = compute_johnson_noise_covariance(
+            resistance,
+            bandwidth_hz=10.0,
+            noise_std=noise_std,
+        )
+
+        expected_corr = 3.0 / np.sqrt(9.0 * 4.0)
+        np.testing.assert_allclose(np.diag(covariance), noise_std**2, rtol=1e-12)
+        np.testing.assert_allclose(
+            covariance[0, 1],
+            expected_corr * noise_std[0] * noise_std[1],
+            rtol=1e-12,
+        )
+
+    def test_johnson_covariance_integrates_frequency_dependent_impedance(self):
+        frequencies_hz = np.array([0.0, 10.0, 20.0])
+        impedance = np.array(
+            [
+                [[2.0, 0.2], [0.2, 3.0]],
+                [[4.0, 0.4], [0.4, 5.0]],
+                [[6.0, 0.6], [0.6, 7.0]],
+            ]
+        )
+        temperature_k = 300.0
+
+        covariance = compute_johnson_noise_covariance(
+            impedance,
+            frequencies_hz=frequencies_hz,
+            temperature_k=temperature_k,
+        )
+
+        expected = 4.0 * K_B * temperature_k * np.trapz(
+            impedance,
+            frequencies_hz,
+            axis=0,
+        )
+        np.testing.assert_allclose(covariance, expected, rtol=1e-12)
+
+    def test_estimates_effective_correlation_length(self):
+        positions = np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [15.0, 0.0, 0.0],
+            ]
+        )
+        length_mm = 12.0
+        distances = np.abs(positions[:, 0, None] - positions[None, :, 0])
+        covariance = np.exp(-distances / length_mm)
+
+        fit = estimate_effective_correlation_length_mm(
+            positions,
+            covariance,
+            kernel="exponential",
+            distance_metric="euclidean",
+        )
+
+        np.testing.assert_allclose(fit.length_mm, length_mm, rtol=1e-12)
+        self.assertEqual(fit.n_pairs, 6)
+
+    def test_sensor_whitening_matches_full_output_covariance(self):
+        A = np.array(
+            [
+                [1.0, 0.2],
+                [0.1, 1.2],
+                [0.4, -0.3],
+                [0.7, 0.5],
+            ]
+        )
+        sensor_covariance = np.array([[0.25, 0.05], [0.05, 0.64]])
+        output_covariance = np.kron(sensor_covariance, np.eye(2))
+
+        actual = sensor_noise_normalized_singular_values(
+            A,
+            sensor_noise_covariance=sensor_covariance,
+            outputs_per_sensor=2,
+        )
+        expected_bitrate = get_bitrate(
+            A,
+            n_sources=A.shape[1],
+            total_input_power=1.0,
+            output_noise_covariance=output_covariance,
+        )
+        actual_bitrate = get_bitrate(
+            actual,
+            n_sources=A.shape[1],
+            total_input_power=1.0,
+            noise=1.0,
+        )
+
+        np.testing.assert_allclose(actual_bitrate, expected_bitrate, rtol=1e-12)
+
+    def test_water_filling_ignores_numerical_null_modes(self):
+        gains = np.array([1.0e10, 9.0e9, 1.0e-39])
+        total_input_power = 3.0e-16
+
+        allocation = water_filling_power_allocation(
+            gains,
+            total_input_power=total_input_power,
+            noise=1.0,
+        )
+
+        floors = 1.0 / (gains[:2] ** 2)
+        water_level = (total_input_power + np.sum(floors)) / 2.0
+        expected = np.array([water_level - floors[0], water_level - floors[1], 0.0])
+
+        np.testing.assert_allclose(allocation, expected, rtol=1e-12)
+        np.testing.assert_allclose(np.sum(allocation), total_input_power, rtol=1e-12)
+
+    def test_water_filling_handles_underflowed_noise_floor(self):
+        gains = np.array([1.0, 1.0e-200])
+        total_input_power = 1.0e-6
+
+        allocation = water_filling_power_allocation(
+            gains,
+            total_input_power=total_input_power,
+            noise=1.0,
+        )
+
+        np.testing.assert_allclose(
+            allocation,
+            np.array([total_input_power, 0.0]),
+            rtol=1e-12,
+            atol=0.0,
+        )
 
     def test_output_noise_covariance_requires_channel_matrix(self):
         with self.assertRaises(ValueError):
