@@ -34,4 +34,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
-public/data
+public/data/*
+!public/data/meg_svd_components.json

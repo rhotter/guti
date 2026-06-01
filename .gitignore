@@ -3,6 +3,8 @@
 jacobian_amplitude_arrival.npy
 __pycache__
 data/
+!web/public/data/
+!web/public/data/meg_svd_components.json
 *.msh
 *.vtk
 leadfields/
