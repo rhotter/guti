@@ -54,6 +54,14 @@ class Parameters:
     # for fnirs
     max_dist: Optional[float] = None
 
+    # for us (free-field ultrasound)
+    temporal_sampling: Optional[int] = None
+
+    # bitrate pipeline selection: "svd" (spectrum) or "slq" (matrix-free trace est.)
+    bitrate_method: Optional[str] = None
+    slq_num_probes: Optional[int] = None
+    slq_num_lanczos: Optional[int] = None
+
     # for td_fnirs
     n_time_gates: Optional[int] = None
     forward_model_convention: Optional[str] = None

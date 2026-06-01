@@ -321,8 +321,8 @@ NOISE_MODELS = {
             "noise → field noise ∝ N."
         ),
     ),
-    "fnirs_analytical_cw": NoiseModel(
-        canonical_name="fnirs_analytical_cw",
+    "cw_fnirs": NoiseModel(
+        canonical_name="cw_fnirs",
         noise_source="Shot noise (photon counting)",
         measurement_units="dimensionless (ΔI/I)",
         reference_sensor_count=_FNIRS_CW_N_REF,
@@ -405,7 +405,7 @@ def canonicalize_modality_name(modality_name: str) -> str:
         return "us_analytical"
 
     if modality_name.startswith("fnirs_analytical"):
-        return "fnirs_analytical_cw"
+        return "cw_fnirs"
 
     raise KeyError(f"No noise model registered for modality '{modality_name}'")
 

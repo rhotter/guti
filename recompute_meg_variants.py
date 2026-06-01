@@ -1,70 +1,15 @@
 import os
+
 import numpy as np
 
-from guti.core import get_sensor_positions, get_grid_positions, BRAIN_RADIUS
 from guti.data_utils import list_svd_variants, save_svd
-
-SPHERE_CENTER = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
-
-
-def sarvas_formula(r, r0, center=SPHERE_CENTER):
-    """
-    Correct Sarvas lead-field matrix for a spherical conductor.
-    Returns M such that B = M @ q.
-    """
-    mu0 = 4 * np.pi * 1e-7
-    r = (np.asarray(r) - center) * 1e-3
-    r0 = (np.asarray(r0) - center) * 1e-3
-
-    a_vec = r - r0
-    a = np.linalg.norm(a_vec)
-    r_norm = np.linalg.norm(r)
-
-    if a < 1e-12 or r_norm < 1e-12:
-        return np.zeros((3, 3))
-
-    F = a * (a * r_norm + r_norm**2 - np.dot(r0, r))
-    if abs(F) < 1e-20:
-        return np.zeros((3, 3))
-
-    a_dot_r = np.dot(a_vec, r)
-    nabla_F = (
-        (a**2 / r_norm + a_dot_r / a + 2 * a + 2 * r_norm) * r
-        - (a + 2 * r_norm + a_dot_r / a) * r0
-    )
-
-    r0_cross = np.array(
-        [
-            [0.0, -r0[2], r0[1]],
-            [r0[2], 0.0, -r0[0]],
-            [-r0[1], r0[0], 0.0],
-        ]
-    )
-    r0xr = r0_cross @ r
-    M = (mu0 / (4 * np.pi)) * (-F * r0_cross - np.outer(nabla_F, r0xr)) / (F**2)
-    return M
-
-
-def compute_forward_matrix(n_sensors, grid_spacing_mm, offset_mm):
-    sensors = get_sensor_positions(n_sensors, offset=offset_mm)
-    sources = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
-    n_sources = len(sources)
-    A = np.zeros((3 * n_sensors, 3 * n_sources))
-    print(
-        f"Computing A: sensors={n_sensors}, sources={n_sources}, "
-        f"spacing={grid_spacing_mm}mm, offset={offset_mm}mm"
-    )
-    for i, sensor in enumerate(sensors):
-        for j, source in enumerate(sources):
-            M = sarvas_formula(sensor, source)
-            A[3 * i : 3 * (i + 1), 3 * j : 3 * (j + 1)] = M
-    return A
-
-
-def compute_svd(n_sensors, grid_spacing_mm, offset_mm):
-    A = compute_forward_matrix(n_sensors, grid_spacing_mm, offset_mm)
-    s = np.linalg.svd(A, full_matrices=False, compute_uv=False)
-    return s
+# Canonical Sarvas forward model now lives in the meg package; re-exported here
+# so existing imports (e.g. compute_information_maps) keep working.
+from guti.modalities.meg.meg import (
+    sarvas_formula,
+    compute_forward_matrix,
+    compute_svd,
+)
 
 
 def recompute_modality(modality_name, variants_root=None):

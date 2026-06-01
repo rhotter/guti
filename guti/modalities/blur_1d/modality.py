@@ -23,7 +23,8 @@ class Blur1D(ImagingModality):
         self.L = 0.1 # in meters
         self.sigma = 0.01 # in meters
 
-    def modality_name(self) -> str:
+    @property
+    def name(self) -> str:
         return "blur_1d"
 
     def setup_geometry(self) -> None:
@@ -47,6 +48,18 @@ class Blur1D(ImagingModality):
     
     def _get_default_modality_params(self) -> Parameters:
         return Parameters(input_dim=128, output_dim=128)
+
+    @classmethod
+    def scaled_up_params(cls) -> Parameters:
+        """Asymptotic-bitrate configuration for the 1D blurring toy.
+
+        The Gaussian kernel (sigma=0.01 m over L=0.1 m) band-limits the
+        operator to ~L/sigma resolvable modes, so capacity plateaus once the
+        grid oversamples that band. 1024 in/out points is well past the knee;
+        this is mainly a reference for the scaling machinery, not a physical
+        claim.
+        """
+        return Parameters(input_dim=1024, output_dim=1024)
 
 
 if __name__ == "__main__":

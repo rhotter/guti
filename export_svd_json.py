@@ -50,7 +50,7 @@ MODALITIES = {
     "meg_opm":            "MEG OPM",
     "meg_squid":          "MEG SQUID",
     "eeg_openmeeg":       "EEG (OpenMEEG)",
-    "fnirs_analytical_cw": "fNIRS CW",
+    "cw_fnirs": "fNIRS CW",
 }
 
 # time resolution per modality (seconds)
@@ -58,7 +58,7 @@ TIME_RESOLUTION = {
     "meg_opm":            0.01,   # 100 Hz
     "meg_squid":          0.01,
     "eeg_openmeeg":       0.01,
-    "fnirs_analytical_cw": 1.0,  # 1 Hz hemodynamic
+    "cw_fnirs": 1.0,  # 1 Hz hemodynamic
 }
 
 

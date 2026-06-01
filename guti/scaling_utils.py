@@ -235,7 +235,7 @@ def plot_bitrate_vs_snr(
 
     Example:
         >>> snrs = np.logspace(-1, 2, 50)  # SNR from 0.1 to 100
-        >>> plot_bitrate_vs_snr("fnirs_analytical_cw", "grid_resolution_mm", 5.0, snrs)
+        >>> plot_bitrate_vs_snr("cw_fnirs", "grid_resolution_mm", 5.0, snrs)
     """
     if constant_params is None:
         constant_params = Parameters()
@@ -303,7 +303,7 @@ def show_sweep_results(
         >>> from guti.scaling_utils import show_sweep_results
         >>>
         >>> show_sweep_results(
-        ...     modality_name="fnirs_analytical_cw",
+        ...     modality_name="cw_fnirs",
         ...     param_key="grid_resolution_mm",
         ...     constant_params=Parameters(num_sensors=400)
         ... )

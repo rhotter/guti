@@ -15,41 +15,49 @@ os.makedirs(VARIANTS_DIR, exist_ok=True)
 
 
 def save_svd(
-    s: NDArray,
+    s: Optional[NDArray],
     modality_name: str,
     params: Optional[Parameters] = None,
     default_run: bool = False,
+    extra: Optional[Dict] = None,
 ) -> str:
     """
-    Save the singular value spectrum and optional parameters to a file.
+    Save a bitrate result and optional parameters to a file.
+
+    Supports both bitrate pipelines in one results store:
+      - SVD path: pass the singular-value spectrum as ``s``.
+      - SLQ path: pass ``s=None`` and the scalar result via
+        ``extra={"bitrate": ..., "bitrate_method": "slq", "noise_level": ...}``.
 
     Parameters
     ----------
-    s : ndarray
-        Singular values from SVD
+    s : ndarray or None
+        Singular values from SVD, or None for the SLQ (no-spectrum) path.
     modality_name : str
-        Name of modality, e.g. 'fnirs_cw' or 'eeg'
+        Name of modality, e.g. 'cw_fnirs' or 'eeg_openmeeg'
     params : Parameters, optional
-        Parameters object with the following structure:
-        Parameters(
-            num_sensors: int,
-            grid_resolution: float,
-            num_brain_grid_points: int,
-            time_resolution: float,
-            comment: str,
-            noise_full_brain: float
-        )
+        Parameters object (see guti.parameters.Parameters).
+    default_run : bool, default=False
+        Save as the modality's default configuration rather than a hashed variant.
+    extra : dict, optional
+        Additional arrays/scalars stored alongside (or instead of) the spectrum.
     """
     if params is None:
         structured_params = None
     else:
         structured_params = asdict(params)
 
+    save_dict: Dict[str, Any] = {"parameters": structured_params}
+    if s is not None:
+        save_dict["singular_values"] = s
+    if extra is not None:
+        save_dict.update(extra)
+
     if default_run:
         # Save as default configuration in main results directory
         filepath = os.path.join(RESULTS_DIR, f"{modality_name}_svd_spectrum.npz")
-        np.savez(filepath, singular_values=s, parameters=structured_params)
-        print(f"Saved default SVD spectrum to {filepath}")
+        np.savez(filepath, **save_dict)
+        print(f"Saved default result to {filepath}")
     else:
         if params is None:
             raise ValueError("Params must be provided for non-default runs")
@@ -59,7 +67,7 @@ def save_svd(
         target_dir = os.path.join(VARIANTS_DIR, modality_name)
         os.makedirs(target_dir, exist_ok=True)
         filepath = os.path.join(target_dir, f"{params_hash}.npz")
-        np.savez(filepath, singular_values=s, parameters=structured_params)  # type: ignore
+        np.savez(filepath, **save_dict)  # type: ignore
     return filepath
 
 

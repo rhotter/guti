@@ -46,7 +46,7 @@ const MODALITIES = [
   { key: "meg_opm", label: "MEG OPM" },
   { key: "meg_squid", label: "MEG SQUID" },
   { key: "eeg_openmeeg", label: "EEG" },
-  { key: "fnirs_analytical_cw", label: "fNIRS CW" },
+  { key: "cw_fnirs", label: "fNIRS CW" },
 ];
 
 const PARAM_LABELS: Record<string, string> = {

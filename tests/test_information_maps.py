@@ -60,14 +60,14 @@ class InformationMapMathTests(unittest.TestCase):
         params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
         noise = compute_noise_empirical(
             s_integrated,
-            "fnirs_analytical_cw",
+            "cw_fnirs",
             n_sensors=800,
             tier="today",
         )
 
         actual = compute_bitrate(
             s_integrated,
-            "fnirs_analytical_cw",
+            "cw_fnirs",
             n_sensors=800,
             tier="today",
             time_resolution=1.0,
@@ -81,7 +81,7 @@ class InformationMapMathTests(unittest.TestCase):
 
         np.testing.assert_allclose(actual, expected, rtol=1e-12)
         self.assertEqual(
-            capacity_forward_gain_scale("fnirs_analytical_cw", params=params),
+            capacity_forward_gain_scale("cw_fnirs", params=params),
             1.0,
         )
 

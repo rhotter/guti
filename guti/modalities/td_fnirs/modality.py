@@ -35,6 +35,23 @@ class TDfNIRSAnalytical(ImagingModality):
             n_time_gates=6,
         )
 
+    @classmethod
+    def scaled_up_params(cls) -> Parameters:
+        """Asymptotic-bitrate configuration for time-domain fNIRS.
+
+        Same diffusion-limited spatial plateau as CW fNIRS (dense scalp
+        sampling + sub-blur-scale voxels). Time gates add depth information
+        with diminishing returns under photon starvation; n_time_gates=12
+        sits past the practical knee for the default 0.5-3.0 ns window. Values
+        are a reasonable scaled-up estimate pending a dedicated sweep.
+        """
+        return Parameters(
+            num_sensors=1600,
+            grid_resolution_mm=2.0,
+            max_dist=50.0,
+            n_time_gates=12,
+        )
+
     def __init__(
         self,
         params: Optional[Parameters] = None,

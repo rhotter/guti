@@ -31,7 +31,7 @@ import numpy as np
 from scipy.linalg import cho_factor, cho_solve
 
 from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
-from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
+from guti.modalities.cw_fnirs.modality import CWfNIRS
 from guti.noise_models import (
     compute_detector_noise_std,
     compute_empirical_snr,
@@ -49,7 +49,7 @@ COMPARISON_LABELS = {
     "eeg_homogeneous": "EEG homogeneous",
     "meg_opm": "MEG OPM",
     "meg_squid": "MEG SQUID",
-    "fnirs_analytical_cw": "fNIRS CW",
+    "cw_fnirs": "fNIRS CW",
 }
 MODALITY_COLORS = {
     "EEG homogeneous": "#2563eb",
@@ -558,13 +558,13 @@ def run_fnirs(
     depth_bin_width_mm: float,
     scaling: str,
 ) -> Path:
-    model = get_noise_model("fnirs_analytical_cw")
+    model = get_noise_model("cw_fnirs")
     physical_noise = compute_detector_noise_std(
-        "fnirs_analytical_cw",
+        "cw_fnirs",
         n_sensors=n_sensors,
         tier="today",
     )
-    modality = fNIRSAnalytical(
+    modality = CWfNIRS(
         Parameters(
             num_sensors=n_sensors,
             grid_resolution_mm=grid_spacing_mm,
@@ -578,19 +578,19 @@ def run_fnirs(
     A = np.asarray(A_transfer, dtype=np.float64) * model.source_amplitude
     noise, scaling_params = choose_noise(
         A,
-        "fnirs_analytical_cw",
+        "cw_fnirs",
         n_sensors,
         physical_noise,
         scaling,
     )
     posterior_var, info_bits = posterior_info_scalar(A, noise)
     return save_result(
-        "fnirs_analytical_cw",
+        "cw_fnirs",
         positions,
         info_bits,
         posterior_var,
         {
-            "modality": "fnirs_analytical_cw",
+            "modality": "cw_fnirs",
             "n_sensors": n_sensors,
             "forward_matrix_shape": list(A.shape),
             "n_unique_source_detector_pairs": int(A.shape[0]),

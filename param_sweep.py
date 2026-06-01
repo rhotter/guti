@@ -1,5 +1,5 @@
 from guti.parameters import Parameters
-from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
+from guti.modalities.cw_fnirs.modality import CWfNIRS
 from guti.scaling_utils import show_sweep_results
 from copy import deepcopy
 
@@ -13,7 +13,7 @@ for i, value in enumerate(param_values):
     print(f"-------------------------------- Running {param_name} = {value} ({i+1}/{len(param_values)}) --------------------------------")
     params = deepcopy(default_params)
     setattr(params, param_name, value)
-    modality = fNIRSAnalytical(params=params)
+    modality = CWfNIRS(params=params)
     modality.run(save_results=True)
 
 # After running the sweep, visualize the results:
