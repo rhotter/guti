@@ -125,10 +125,6 @@ print("  Saved comparison data to /tmp/us_comparison_data.npz")
 # ============================================================================
 print("\nRunning MODAL implementation (local simulation of Modal code)...")
 
-# Import the Modal functions (they work locally too)
-import sys
-sys.path.insert(0, '/Users/lev/dev/gut-of-imaging')
-
 # Replicate the Modal geometry functions
 BRAIN_RADIUS = 80  # mm
 SCALP_RADIUS = 92  # mm
