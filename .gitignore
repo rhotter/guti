@@ -1,4 +1,5 @@
 .venv/
+.DS_Store
 jacobian_amplitude_arrival.npy
 __pycache__
 data/

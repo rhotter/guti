@@ -32,7 +32,8 @@ import jax
 
 from scipy.sparse.linalg import LinearOperator, svds
 
-from guti.core import get_bitrate, noise_floor_heuristic
+from guti.capacity import get_bitrate, total_input_power_from_average_output_power
+from guti.noise_models import compute_average_output_power, compute_output_noise_std
 from guti.modalities.us.utils import create_medium, create_sources, create_receivers, plot_medium, find_arrival_time
 import scipy.sparse
 
@@ -375,27 +376,28 @@ for i in range(20):
 u, s, vh = np.linalg.svd(np.array(combined_jacobian))
 
 # Compute bitrate from the SVD spectrum (reference computation).
-s_normalized = s / math.sqrt(n_inputs * n_sensors)
-noise_level = noise_floor_heuristic(s_normalized, heuristic="power", snr=2000.0)
-bitrate_exact = get_bitrate(s_normalized, noise_level, time_resolution=1.0)
+matrix_scale = 1.0 / math.sqrt(n_inputs * n_sensors)
+s_normalized = s * matrix_scale
+noise_level = compute_output_noise_std("us_analytical", n_sensors=n_sensors) * matrix_scale
+average_output_power = compute_average_output_power("us_analytical") * matrix_scale**2
+total_input_power = total_input_power_from_average_output_power(
+    s_normalized,
+    average_output_power=average_output_power,
+    n_sources=n_inputs,
+    n_outputs=combined_jacobian.shape[0],
+)
+bitrate_exact = get_bitrate(
+    s_normalized,
+    n_sources=n_inputs,
+    total_input_power=total_input_power,
+    noise=noise_level,
+    time_resolution=1.0,
+)
 print(f"noise_level: {noise_level}")
 print(f"bitrate (exact, SVD): {bitrate_exact}")
 
 # Approximate bitrate on GPU via Lanczos SLQ without forming Gram matrices.
-if torch.cuda.is_available():
-    bitrate_slq = bitrate_slq_torch_gpu_chunked(
-        combined_jacobian,
-        noise_std_full_brain=noise_level,
-        time_resolution=1.0,
-        s=16,
-        t=40,
-        batch=64,
-        chunk_rows=1024,
-        normalize_scale=1.0 / math.sqrt(n_inputs * n_sensors),
-    )
-    print(f"bitrate (SLQ GPU): {bitrate_slq}")
-else:
-    print("CUDA unavailable; skipping SLQ bitrate approximation.")
+print("SLQ bitrate approximation is disabled until it uses the output-power workflow.")
 
 # Plot singular value spectrum
 plt.figure(figsize=(10, 6))

@@ -1078,6 +1078,20 @@ def get_bitrate(
     )
 
 
+def get_bitrate_temporal_filter(
+    s: np.ndarray,
+    noise: float,
+    freqs: np.ndarray,
+    H_magnitude: np.ndarray,
+) -> float:
+    """Capacity in bits/s for a spatial spectrum followed by a temporal filter."""
+    if len(freqs) < 2:
+        return 0.0
+    df = float(freqs[1] - freqs[0])
+    sigma_eff = np.outer(np.asarray(s), np.asarray(H_magnitude)).ravel()
+    return df * float(np.sum(np.log2(1 + (sigma_eff / noise) ** 2)))
+
+
 def noise_floor_from_total_snr(
     s: np.ndarray,
     total_snr: float,
@@ -1101,43 +1115,43 @@ def water_filling_spectrum(
     """
     # Binary search for water level mu
     # We want: sum_k s_k^2 * max(0, mu_tilde - (1/s_k)^2) = snr^2
-    
+
     # Precompute (noise/s_k)^2 for all k
     reciprocal_s_squared = (1 / s) ** 2
-    
+
     # Sort in ascending order for water-filling
     sorted_indices = np.argsort(reciprocal_s_squared)
     reciprocal_s_squared_sorted = reciprocal_s_squared[sorted_indices]
     s_sorted = s[sorted_indices]
     s_sq_sorted = s_sorted ** 2
-    
+
     # Binary search bounds
     mu_tilde_min = 0.0
     mu_tilde_max = reciprocal_s_squared_sorted[-1] + snr**2 / s_sq_sorted.min()
-    
+
     tolerance = 1e-10
     max_iterations = 1000
-    
+
     for _ in range(max_iterations):
         mu_tilde = (mu_tilde_min + mu_tilde_max) / 2
-        
+
         # Compute total output power for this mu
         power_allocation_tilde = np.maximum(0, mu_tilde - reciprocal_s_squared_sorted)
         output_snr_squared = np.sum(s_sq_sorted * power_allocation_tilde)
-        
+
         if abs(output_snr_squared - snr**2) < tolerance:
             break
-        
+
         if output_snr_squared < snr**2:
             mu_tilde_min = mu_tilde
         else:
             mu_tilde_max = mu_tilde
-    
+
     # Compute final power allocation and unsort
     power_allocation_tilde = np.maximum(0, mu_tilde - reciprocal_s_squared_sorted)
     P_tilde = np.zeros_like(s)
     P_tilde[sorted_indices] = power_allocation_tilde
-    
+
     return P_tilde
 
 def total_iid_input_power(
@@ -1209,7 +1223,7 @@ def get_bitrate_channel_capacity_temporal(
     P_over_N = water_filling_spectrum(sigma_active, snr_bin)
     log_terms = np.log2(1 + (sigma_active ** 2) * P_over_N)
     return df * float(np.sum(log_terms))
-    
+
 
 
 def noise_floor_heuristic(

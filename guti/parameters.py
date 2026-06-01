@@ -68,6 +68,13 @@ class Parameters:
     forward_model_units: Optional[str] = None
     voxel_volume_mm3: Optional[float] = None
 
+    # for reconstructed image modalities such as fMRI
+    psf_fwhm_mm: Optional[float] = None
+    bold_contrast: Optional[float] = None
+    bold_snr: Optional[float] = None
+    tsnr: Optional[float] = None
+    hrf_type: Optional[str] = None
+
     @classmethod
     def from_dict(cls, data: Dict) -> "Parameters":
         """Create Parameters object from dictionary."""

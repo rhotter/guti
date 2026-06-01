@@ -17,6 +17,25 @@ RESULT_JSON_PREFIX = "RESULT_JSON:"
 MODAL_RESULT_JSON_PREFIX = "MODAL_RESULT_JSON:"
 
 
+def _ignore_modal_mount(path: Path) -> bool:
+    ignored_parts = {
+        ".git",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "node_modules",
+        "results",
+        "logs",
+        "plots",
+        "dist",
+    }
+    if any(part in ignored_parts for part in path.parts):
+        return True
+    return path.name == ".DS_Store" or path.suffix in {".pyc", ".pyo"}
+
+
 def _gpu_config():
     gpu_type = os.environ.get("MODAL_GPU_TYPE", "H100")
     gpu_count = int(os.environ.get("MODAL_GPU_COUNT", "1"))
@@ -40,10 +59,11 @@ image = (
         "jwave==0.2.1",
         extra_index_url="https://download.pytorch.org/whl/cu121",
     )
-    .add_local_dir(".", remote_path=MOUNT_PATH)
+    .add_local_dir(".", remote_path=MOUNT_PATH, ignore=_ignore_modal_mount)
 )
 
 app = modal.App(APP_NAME)
+artifact_volume = modal.Volume.from_name("us-results", create_if_missing=True)
 
 
 def _sanitize_json_value(value: Any) -> Any:
@@ -105,9 +125,15 @@ def _normalize_job_spec(job_or_args: Any) -> dict[str, Any]:
     }
 
 
-def _with_result_json_arg(analytical_args: list[str], result_json_path: Path) -> list[str]:
+def _with_result_output_args(
+    analytical_args: list[str],
+    result_json_path: Path,
+    gram_output_path: Path | None,
+) -> list[str]:
     sanitized: list[str] = []
     skip_next = False
+    save_gram_matrix = False
+    has_gram_output_path = False
     for idx, arg in enumerate(analytical_args):
         if skip_next:
             skip_next = False
@@ -117,8 +143,16 @@ def _with_result_json_arg(analytical_args: list[str], result_json_path: Path) ->
             continue
         if arg.startswith("--result_json_path="):
             continue
+        if arg == "--save_gram_matrix":
+            save_gram_matrix = True
+        if arg == "--gram_output_path":
+            has_gram_output_path = True
+        if arg.startswith("--gram_output_path="):
+            has_gram_output_path = True
         sanitized.append(arg)
     sanitized.extend(["--result_json_path", str(result_json_path)])
+    if save_gram_matrix and not has_gram_output_path and gram_output_path is not None:
+        sanitized.extend(["--gram_output_path", str(gram_output_path)])
     return sanitized
 
 
@@ -191,12 +225,14 @@ def _build_remote_result(job_spec: dict[str, Any]) -> dict[str, Any]:
     temp_dir = Path(tempfile.mkdtemp(prefix="us_analytical_job_"))
     result_json_path = temp_dir / f"{label}.json"
     result_json_name = f"{label}.json"
+    gram_output_path = Path("/modal_results/us_analytical_grams") / f"{label}_gram.npy"
     npz_download_name: Optional[str] = None
     npz_payload: Optional[bytes] = None
 
-    cmd = ["python", "-m", "guti.modalities.us.analytical"] + _with_result_json_arg(
+    cmd = ["python", "-m", "guti.modalities.us.analytical"] + _with_result_output_args(
         job_spec["analytical_args"],
         result_json_path,
+        gram_output_path,
     )
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{MOUNT_PATH}:{env.get('PYTHONPATH', '')}"
@@ -209,6 +245,11 @@ def _build_remote_result(job_spec: dict[str, Any]) -> dict[str, Any]:
     analytical_record = _load_json_if_present(result_json_path)
     if analytical_record is None:
         analytical_record = _extract_prefixed_json(combined_output, RESULT_JSON_PREFIX)
+
+    gram_size_bytes = None
+    if gram_output_path.exists():
+        gram_size_bytes = gram_output_path.stat().st_size
+        artifact_volume.commit()
 
     latest_npz = changed_npzs[-1] if changed_npzs else None
     if latest_npz is not None:
@@ -230,6 +271,8 @@ def _build_remote_result(job_spec: dict[str, Any]) -> dict[str, Any]:
             "modal_gpu_type": os.environ.get("MODAL_GPU_TYPE", "H100"),
             "modal_gpu_count": int(os.environ.get("MODAL_GPU_COUNT", "1")),
             "changed_npz_relpaths": [str(path.relative_to(results_dir)) for path in changed_npzs],
+            "modal_gram_output_path": str(gram_output_path) if gram_size_bytes is not None else None,
+            "modal_gram_size_bytes": gram_size_bytes,
             "output_npz_name": latest_npz.name if latest_npz is not None else None,
             "output_npz_relpath": (
                 str(latest_npz.relative_to(results_dir)) if latest_npz is not None else None
@@ -326,6 +369,7 @@ def _failure_result(job_spec: dict[str, Any], exc: Exception) -> dict[str, Any]:
     memory=int(os.environ.get("MODAL_MEMORY", "32768")),
     timeout=int(os.environ.get("MODAL_TIMEOUT", "60")) * 60,
     single_use_containers=True,
+    volumes={"/modal_results": artifact_volume},
 )
 def run_us_analytical(job_or_args: Any) -> dict[str, Any]:
     job_spec = _normalize_job_spec(job_or_args)
