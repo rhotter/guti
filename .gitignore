@@ -16,6 +16,12 @@ results_modal/
 guti/modalities/us/results/
 plots/
 
+# Python tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
 # Jupyter checkpoints
 .ipynb_checkpoints/
 guti/modalities/eeg/_openmeeg_model/
