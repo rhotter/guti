@@ -12,8 +12,9 @@ import numpy as np
 from scipy.special import spherical_jn, spherical_yn
 
 from guti.capacity import (
-    get_bitrate_from_average_output_power,
-    get_capacity_from_average_output_power,
+    get_bitrate,
+    get_capacity,
+    total_input_power_from_average_output_power,
 )
 
 US_ANALYTICAL_SOURCE_RADIUS_M = 0.08
@@ -462,23 +463,26 @@ def evaluate_frequency_at_resolution(
     average_output_power = float(args.average_output_power)
     n_sources = int(args.n_sources) if args.n_sources is not None else int(svals.size)
     n_outputs = int(args.n_outputs) if args.n_outputs is not None else int(svals.size)
+    total_input_power = total_input_power_from_average_output_power(
+        svals,
+        average_output_power=average_output_power,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+    )
     bitrate = float(
-        get_bitrate_from_average_output_power(
+        get_bitrate(
             svals,
-            average_output_power=average_output_power,
-            noise=noise_level,
             n_sources=n_sources,
-            n_outputs=n_outputs,
+            total_input_power=total_input_power,
+            noise=noise_level,
             time_resolution=args.time_resolution,
         )
     )
     channel_capacity = float(
-        get_capacity_from_average_output_power(
+        get_capacity(
             svals.astype(np.float64),
-            average_output_power=average_output_power,
+            total_input_power=total_input_power,
             noise=noise_level,
-            n_sources=n_sources,
-            n_outputs=n_outputs,
             time_resolution=args.time_resolution,
         )
     )

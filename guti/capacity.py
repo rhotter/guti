@@ -150,11 +150,97 @@ def total_input_power_from_average_output_power(
     return float(n_sources * n_outputs * average_output_power / spectrum_power)
 
 
+def total_input_power_from_input_amplitude(
+    input_amplitude: float,
+    *,
+    n_sources: int,
+) -> float:
+    """Return total input power from a per-source/channel input amplitude."""
+    if input_amplitude < 0:
+        raise ValueError("input_amplitude must be non-negative")
+    if not np.isfinite(input_amplitude):
+        raise ValueError("input_amplitude must be finite")
+    if n_sources <= 0:
+        raise ValueError("n_sources must be positive")
+    return float(n_sources * input_amplitude**2)
+
+
+def resolve_total_input_power(
+    s: np.ndarray | None = None,
+    *,
+    n_sources: int | None = None,
+    n_outputs: int | None = None,
+    total_input_power: float | None = None,
+    input_power_per_source: float | None = None,
+    input_amplitude: float | None = None,
+    average_output_power: float | None = None,
+) -> float:
+    """Resolve exactly one input-power convention to total input power.
+
+    Callers may provide an explicit total input power, a per-source input power,
+    a per-source input amplitude, or an average per-output signal power.
+    """
+    provided = [
+        total_input_power is not None,
+        input_power_per_source is not None,
+        input_amplitude is not None,
+        average_output_power is not None,
+    ]
+    if sum(provided) != 1:
+        raise ValueError(
+            "Provide exactly one of total_input_power, input_power_per_source, "
+            "input_amplitude, or average_output_power"
+        )
+
+    if total_input_power is not None:
+        if total_input_power < 0:
+            raise ValueError("total_input_power must be non-negative")
+        if not np.isfinite(total_input_power):
+            raise ValueError("total_input_power must be finite")
+        return float(total_input_power)
+
+    if n_sources is None:
+        raise ValueError(
+            "n_sources is required for input_power_per_source, input_amplitude, "
+            "or average_output_power"
+        )
+    if n_sources <= 0:
+        raise ValueError("n_sources must be positive")
+
+    if input_power_per_source is not None:
+        if input_power_per_source < 0:
+            raise ValueError("input_power_per_source must be non-negative")
+        if not np.isfinite(input_power_per_source):
+            raise ValueError("input_power_per_source must be finite")
+        return float(n_sources * input_power_per_source)
+
+    if input_amplitude is not None:
+        return total_input_power_from_input_amplitude(
+            input_amplitude,
+            n_sources=n_sources,
+        )
+
+    if s is None:
+        raise ValueError("s is required when deriving input power from output power")
+    if n_outputs is None:
+        raise ValueError("n_outputs is required for average_output_power")
+    return total_input_power_from_average_output_power(
+        s,
+        average_output_power=average_output_power,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+    )
+
+
 def get_bitrate(
     s: np.ndarray,
     *,
-    total_input_power: float,
     n_sources: int,
+    total_input_power: float | None = None,
+    input_power_per_source: float | None = None,
+    input_amplitude: float | None = None,
+    average_output_power: float | None = None,
+    n_outputs: int | None = None,
     noise: float | None = None,
     time_resolution: float = 1.0,
     output_noise_covariance: np.ndarray | None = None,
@@ -168,21 +254,28 @@ def get_bitrate(
     channel matrix and the code uses the singular values of
     ``K_N^{-1/2} H``.
     """
-    _validate_optional_matrix_shape(s, n_sources=n_sources)
-    if total_input_power < 0:
-        raise ValueError("total_input_power must be non-negative")
+    _validate_optional_matrix_shape(s, n_sources=n_sources, n_outputs=n_outputs)
     if n_sources <= 0:
         raise ValueError("n_sources must be positive")
     if time_resolution <= 0:
         raise ValueError("time_resolution must be positive")
 
+    resolved_total_input_power = resolve_total_input_power(
+        s,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+        total_input_power=total_input_power,
+        input_power_per_source=input_power_per_source,
+        input_amplitude=input_amplitude,
+        average_output_power=average_output_power,
+    )
     gains = _noise_normalized_spectrum(
         s,
         noise=noise,
         output_noise_covariance=output_noise_covariance,
     )
-    input_power_per_source = total_input_power / n_sources
-    snr_per_mode = (gains**2) * input_power_per_source
+    resolved_power_per_source = resolved_total_input_power / n_sources
+    snr_per_mode = (gains**2) * resolved_power_per_source
     return float(np.sum(np.log2(1.0 + snr_per_mode)) / (2.0 * time_resolution))
 
 
@@ -228,15 +321,30 @@ def water_filling_power_allocation(
 def get_capacity(
     s: np.ndarray,
     *,
-    total_input_power: float,
+    total_input_power: float | None = None,
+    input_power_per_source: float | None = None,
+    input_amplitude: float | None = None,
+    average_output_power: float | None = None,
+    n_sources: int | None = None,
+    n_outputs: int | None = None,
     noise: float | None = None,
     time_resolution: float = 1.0,
     output_noise_covariance: np.ndarray | None = None,
 ) -> float:
     """Return water-filled channel capacity for a linear Gaussian channel."""
+    _validate_optional_matrix_shape(s, n_sources=n_sources, n_outputs=n_outputs)
     if time_resolution <= 0:
         raise ValueError("time_resolution must be positive")
 
+    resolved_total_input_power = resolve_total_input_power(
+        s,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+        total_input_power=total_input_power,
+        input_power_per_source=input_power_per_source,
+        input_amplitude=input_amplitude,
+        average_output_power=average_output_power,
+    )
     gains = _noise_normalized_spectrum(
         s,
         noise=noise,
@@ -244,11 +352,52 @@ def get_capacity(
     )
     input_power_per_mode = water_filling_power_allocation(
         gains,
-        total_input_power=total_input_power,
+        total_input_power=resolved_total_input_power,
         noise=1.0,
     )
     snr_per_mode = (gains**2) * input_power_per_mode
     return float(np.sum(np.log2(1.0 + snr_per_mode)) / (2.0 * time_resolution))
+
+
+def get_bitrate_temporal_filter(
+    s: np.ndarray,
+    freqs: np.ndarray,
+    H_magnitude: np.ndarray,
+    *,
+    n_sources: int,
+    total_input_power: float | None = None,
+    input_power_per_source: float | None = None,
+    input_amplitude: float | None = None,
+    average_output_power: float | None = None,
+    n_outputs: int | None = None,
+    noise: float,
+) -> float:
+    """Return bitrate for a spatial spectrum followed by a temporal filter."""
+    spectrum = _as_spectrum(s)
+    freqs = np.asarray(freqs, dtype=float)
+    H_magnitude = np.asarray(H_magnitude, dtype=float)
+    if freqs.ndim != 1 or H_magnitude.ndim != 1:
+        raise ValueError("freqs and H_magnitude must be 1D arrays")
+    if freqs.shape != H_magnitude.shape:
+        raise ValueError("freqs and H_magnitude must have the same shape")
+    if len(freqs) < 2:
+        return 0.0
+    if noise <= 0:
+        raise ValueError("noise must be positive")
+
+    resolved_total_input_power = resolve_total_input_power(
+        spectrum,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+        total_input_power=total_input_power,
+        input_power_per_source=input_power_per_source,
+        input_amplitude=input_amplitude,
+        average_output_power=average_output_power,
+    )
+    input_power_per_source = resolved_total_input_power / n_sources
+    df = float(freqs[1] - freqs[0])
+    gains = np.outer(spectrum, H_magnitude).ravel() / noise
+    return df * float(np.sum(np.log2(1.0 + (gains**2) * input_power_per_source)))
 
 
 def get_bitrate_from_average_output_power(
@@ -262,16 +411,11 @@ def get_bitrate_from_average_output_power(
     output_noise_covariance: np.ndarray | None = None,
 ) -> float:
     """Return i.i.d.-input bitrate from observed output signal/noise levels."""
-    total_input_power = total_input_power_from_average_output_power(
-        s,
-        average_output_power=average_output_power,
-        n_sources=n_sources,
-        n_outputs=n_outputs,
-    )
     return get_bitrate(
         s,
-        total_input_power=total_input_power,
         n_sources=n_sources,
+        n_outputs=n_outputs,
+        average_output_power=average_output_power,
         noise=noise,
         time_resolution=time_resolution,
         output_noise_covariance=output_noise_covariance,
@@ -289,15 +433,11 @@ def get_capacity_from_average_output_power(
     output_noise_covariance: np.ndarray | None = None,
 ) -> float:
     """Return water-filled capacity from observed output signal/noise levels."""
-    total_input_power = total_input_power_from_average_output_power(
-        s,
-        average_output_power=average_output_power,
-        n_sources=n_sources,
-        n_outputs=n_outputs,
-    )
     return get_capacity(
         s,
-        total_input_power=total_input_power,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+        average_output_power=average_output_power,
         noise=noise,
         time_resolution=time_resolution,
         output_noise_covariance=output_noise_covariance,

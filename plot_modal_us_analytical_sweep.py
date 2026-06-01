@@ -11,8 +11,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from guti.capacity import (
-    get_bitrate_from_average_output_power,
-    get_capacity_from_average_output_power,
+    get_bitrate,
+    get_capacity,
+    total_input_power_from_average_output_power,
 )
 from guti.noise_models import compute_average_output_power, compute_output_noise_std
 from guti.parameters import Parameters
@@ -57,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--capacity-time-resolution",
         type=float,
         default=1.0,
-        help="time_resolution passed to get_capacity_from_average_output_power(). Default: 1.0",
+        help="time_resolution passed to get_capacity(). Default: 1.0",
     )
     return parser
 
@@ -235,26 +236,29 @@ def main() -> int:
                 n_sensors=sensor_count,
                 frequency_hz=freq_hz,
             )
+            total_input_power = total_input_power_from_average_output_power(
+                s,
+                average_output_power=average_output_power,
+                n_sources=int(n_sources),
+                n_outputs=int(n_outputs),
+            )
 
             first_sv_grid[i, j] = float(s_normalized[0])
             bitrate_grid[i, j] = float(
-                get_bitrate_from_average_output_power(
+                get_bitrate(
                     s,
-                    average_output_power=average_output_power,
-                    noise=output_noise,
                     n_sources=int(n_sources),
-                    n_outputs=int(n_outputs),
+                    total_input_power=total_input_power,
+                    noise=output_noise,
                     time_resolution=1.0,
                 )
             )
             s_for_capacity = s[np.abs(s) > 0]
             capacity_grid[i, j] = float(
-                get_capacity_from_average_output_power(
+                get_capacity(
                     s_for_capacity.astype(np.float64),
-                    average_output_power=average_output_power,
+                    total_input_power=total_input_power,
                     noise=output_noise,
-                    n_sources=int(n_sources),
-                    n_outputs=int(n_outputs),
                     time_resolution=args.capacity_time_resolution,
                 )
             )

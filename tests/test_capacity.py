@@ -4,10 +4,13 @@ import numpy as np
 
 from guti.capacity import (
     get_bitrate,
+    get_bitrate_temporal_filter,
     get_bitrate_from_average_output_power,
     get_capacity,
     get_capacity_from_average_output_power,
+    resolve_total_input_power,
     total_input_power_from_average_output_power,
+    total_input_power_from_input_amplitude,
     water_filling_power_allocation,
 )
 
@@ -172,6 +175,77 @@ class CapacityPowerTests(unittest.TestCase):
 
         np.testing.assert_allclose(actual, expected_total_input_power, rtol=1e-12)
 
+    def test_estimates_total_input_power_from_input_amplitude(self):
+        actual = total_input_power_from_input_amplitude(0.25, n_sources=8)
+        np.testing.assert_allclose(actual, 8 * 0.25**2, rtol=1e-12)
+
+    def test_resolve_total_input_power_accepts_exactly_one_convention(self):
+        with self.assertRaises(ValueError):
+            resolve_total_input_power(np.array([1.0]), n_sources=1)
+        with self.assertRaises(ValueError):
+            resolve_total_input_power(
+                np.array([1.0]),
+                n_sources=1,
+                total_input_power=1.0,
+                input_amplitude=0.5,
+            )
+
+        actual = resolve_total_input_power(
+            np.array([2.0]),
+            n_sources=3,
+            input_power_per_source=0.75,
+        )
+        np.testing.assert_allclose(actual, 2.25, rtol=1e-12)
+
+    def test_input_amplitude_workflow_matches_effective_noise_workflow(self):
+        s = np.array([2.0, 0.5, 0.25])
+        input_amplitude = 0.01
+        output_noise = 2e-4
+        n_sources = 12
+        time_resolution = 0.02
+
+        actual = get_bitrate(
+            s,
+            n_sources=n_sources,
+            input_amplitude=input_amplitude,
+            noise=output_noise,
+            time_resolution=time_resolution,
+        )
+        effective_noise = output_noise / input_amplitude
+        expected = np.sum(np.log2(1.0 + (s / effective_noise) ** 2)) / (
+            2.0 * time_resolution
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_direct_average_output_power_argument_matches_wrapper(self):
+        A = np.array(
+            [
+                [1.0, 2.0, 0.5],
+                [-0.5, 1.5, 2.0],
+            ]
+        )
+        n_outputs, n_sources = A.shape
+        average_output_power = 1.1
+        noise = 0.2
+
+        actual = get_bitrate(
+            A,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            average_output_power=average_output_power,
+            noise=noise,
+        )
+        expected = get_bitrate_from_average_output_power(
+            A,
+            average_output_power=average_output_power,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            noise=noise,
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
     def test_get_bitrate_from_average_output_power_matches_explicit_power(self):
         A = np.array(
             [
@@ -201,6 +275,26 @@ class CapacityPowerTests(unittest.TestCase):
             noise=noise,
             time_resolution=time_resolution,
         )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_temporal_filter_input_power_matches_effective_noise_workflow(self):
+        s = np.array([2.0, 0.5])
+        freqs = np.array([0.0, 0.25, 0.5])
+        H = np.array([1.0, 0.5, 0.25])
+        input_amplitude = 0.03
+        output_noise = 0.2
+
+        actual = get_bitrate_temporal_filter(
+            s,
+            freqs,
+            H,
+            n_sources=4,
+            input_amplitude=input_amplitude,
+            noise=output_noise,
+        )
+        gains = np.outer(s, H).ravel() / (output_noise / input_amplitude)
+        expected = 0.25 * np.sum(np.log2(1.0 + gains**2))
 
         np.testing.assert_allclose(actual, expected, rtol=1e-12)
 

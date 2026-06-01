@@ -8,7 +8,7 @@ We replaced this with **physics-based noise floors** that derive from:
 1. A detector noise model (Johnson noise, shot noise, acoustic thermal noise, etc.) expressed in measurement units (V, T, Pa, etc.)
 2. A physiological source amplitude that sets the signal level (e.g., 10 nA·m for a cortical current dipole)
 
-The effective noise, `noise_eff = detector_noise / source_amplitude`, has the same units as the forward model's singular values, making `s_i / noise_eff` dimensionless.
+The current capacity path keeps those pieces separate: the source amplitude is converted to total input power, and detector/output noise is passed directly to the shared bitrate/capacity functions. The equivalent legacy ratio, `noise_eff = detector_noise / source_amplitude`, is still useful for interpreting the tables because `s_i / noise_eff` is dimensionless.
 
 ### Bug fixes included
 
@@ -131,7 +131,8 @@ Referred to forward-model units:
 ```
 p_total = sqrt(p_thermal^2 + (p_electronic_density * sqrt(BW_eff))^2)
 noise_fwd = p_total / P_tx
-noise_eff = noise_fwd / (Delta Z/Z)
+total_input_power = n_sources * (Delta Z/Z)^2
+legacy_noise_eff = noise_fwd / (Delta Z/Z)
 ```
 
 with `P_tx = 10 kPa` and `Delta Z/Z = 0.01`.
@@ -220,30 +221,53 @@ US 2 MHz rows use the 50 kHz SVD spectrum (no 2 MHz simulation exists). The "+ s
 
 **fNIRS** — Zero bits at both tiers. The 7× power increase from ANSI max (35 mW vs 5 mW) only improves shot noise by 2.65×. The fundamental bottleneck is attenuation: OD ≈ 4 at 30 mm means only 1 in 10,000 photons reach the detector. σ₁ = 3.5×10⁻⁴ is 33× below the fundamental noise floor. Reaching SNR₁ = 1 would require ~4.8 kW optical power (138,000× ANSI limit). fNIRS is fundamentally incapable of per-voxel imaging at depth; it measures bulk hemodynamic changes over large volumes.
 
-**Ultrasound** — Today = fundamental (acoustic thermal noise is irreducible at body temperature). At 50 kHz (free-field, no skull): **211k bits/s** with SNR₁ ≈ 4.8M. At 2 MHz (clinical frequency), the modal thermal floor is much higher: `noise_eff` is 250× the 50 kHz value after pulse averaging, giving **96k bits/s** free-field. With skull attenuation (~42 dB round trip at 2 MHz), the same SVD estimate falls to **11.5k bits/s**. That is still above the EEG row in this table, but below the MEG rows.
+**Ultrasound** — Today = fundamental (acoustic thermal noise is irreducible at body temperature). At 50 kHz (free-field, no skull): **211k bits/s** with SNR₁ ≈ 4.8M. At 2 MHz (clinical frequency), the modal thermal floor is much higher: detector noise is 250× the 50 kHz value after pulse averaging, giving **96k bits/s** free-field. With skull attenuation (~42 dB round trip at 2 MHz), the same SVD estimate falls to **11.5k bits/s**. That is still above the EEG row in this table, but below the MEG rows.
 
 ---
 
 ## How to use
 
 ```python
-from guti.noise_models import compute_noise_effective, compute_detector_noise_std
-from guti.core import get_bitrate
+from guti.capacity import get_bitrate
+from guti.noise_models import (
+    compute_detector_noise_std,
+    compute_total_input_power,
+)
 
 # Get noise in measurement units (e.g., Tesla for MEG)
 noise_T = compute_detector_noise_std("meg_opm", n_sensors=500, tier="today")
 
-# Get noise in forward-model units (pass directly to get_bitrate with raw s)
-noise_eff = compute_noise_effective("meg_opm", n_sensors=500, tier="today")
-bitrate = get_bitrate(s_raw, noise_eff, time_resolution=0.01)  # 100 Hz
+# Convert the physical source amplitude to total input power, then use the
+# shared capacity/bitrate functions with detector/output noise.
+total_input_power = compute_total_input_power("meg_opm", n_sources=n_sources)
+bitrate = get_bitrate(
+    s_raw,
+    n_sources=n_sources,
+    total_input_power=total_input_power,
+    noise=noise_T,
+    time_resolution=0.01,  # 100 Hz
+)
 
 # Compare today vs fundamental limit
-br_today = get_bitrate(s, compute_noise_effective("meg_squid", tier="today"), 0.01)
-br_fund  = get_bitrate(s, compute_noise_effective("meg_squid", tier="fundamental"), 0.01)
+total_input_power = compute_total_input_power("meg_squid", n_sources=n_sources)
+br_today = get_bitrate(
+    s,
+    n_sources=n_sources,
+    total_input_power=total_input_power,
+    noise=compute_detector_noise_std("meg_squid", tier="today"),
+    time_resolution=0.01,
+)
+br_fund = get_bitrate(
+    s,
+    n_sources=n_sources,
+    total_input_power=total_input_power,
+    noise=compute_detector_noise_std("meg_squid", tier="fundamental"),
+    time_resolution=0.01,
+)
 
 # Ultrasound at different frequencies (modal thermal power scales through lambda)
-noise_50k = compute_noise_effective("us_analytical", n_sensors=1500, frequency_hz=50e3)
-noise_2M  = compute_noise_effective("us_analytical", n_sensors=1500, frequency_hz=2e6)
+noise_50k = compute_detector_noise_std("us_analytical", n_sensors=1500, frequency_hz=50e3)
+noise_2M = compute_detector_noise_std("us_analytical", n_sensors=1500, frequency_hz=2e6)
 ```
 
 ## Open questions

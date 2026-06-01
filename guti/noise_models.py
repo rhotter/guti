@@ -431,7 +431,8 @@ NOISE_MODELS = {
         physical_floor_noise=_FMRI_HIGH_QUALITY_REL_NOISE,
         source_amplitude=_FMRI_BOLD_CONTRAST,
         source_amplitude_units="fractional BOLD contrast",
-        typical_signal_amplitude=0.0,
+        typical_signal_amplitude=_FMRI_BOLD_CONTRAST,
+        typical_signal_notes="1% fractional BOLD contrast; same response scale used by the physical input-amplitude path.",
         reference_total_snr=_FMRI_TODAY_BOLD_SNR,
         notes=(
             "Reconstructed-BOLD model.  The capacity parameter is BOLD response "
@@ -452,13 +453,13 @@ NOISE_MODELS = {
         physical_floor_noise=_US_NOISE_FWD_50K,  # thermal IS fundamental
         source_amplitude=_US_REFLECTIVITY,
         source_amplitude_units="dimensionless (ΔZ/Z reflectivity)",
-        typical_signal_amplitude=1e-3,  # ~0.1% reflectivity change; in fwd-model units noise_eff is already dimensionless
+        typical_signal_amplitude=1e-3,  # ~0.1% reflectivity change in dimensionless forward-model units
         typical_signal_notes="0.1% acoustic reflectivity change (ΔZ/Z ≈ 0.001). US fwd model is already in "
-                              "dimensionless units so noise is already noise_eff; typical_signal here is "
+                              "dimensionless units; typical_signal here is "
                               "the dimensionless reflectivity contrast expected from brain tissue.",
         reference_total_snr=2000.0,
         notes=(
-            "Frequency-aware: use frequency_hz kwarg in compute_noise_effective. "
+            "Frequency-aware: use frequency_hz kwarg in compute_detector_noise_std. "
             "Acoustic thermal noise uses modal power "
             "P_n=A_elem·2π/λ²·kBT·Δf, converted to pressure with I=p²/(ρc). "
             "Electronic Johnson (~0.93 µPa/√Hz) is added in RSS. "
@@ -590,6 +591,34 @@ def compute_output_noise_std(
     )
 
 
+def compute_input_amplitude(
+    modality_name: str,
+    bold_contrast: float | None = None,
+) -> float:
+    """Return the physical per-source input amplitude for a modality."""
+    canon = canonicalize_modality_name(modality_name)
+    model = NOISE_MODELS[canon]
+    if canon == "fmri_bold" and bold_contrast is not None:
+        return bold_contrast
+    return model.source_amplitude
+
+
+def compute_total_input_power(
+    modality_name: str,
+    *,
+    n_sources: int,
+    bold_contrast: float | None = None,
+) -> float:
+    """Return total input power from the modality's physical source amplitude."""
+    if n_sources <= 0:
+        raise ValueError("n_sources must be positive")
+    input_amplitude = compute_input_amplitude(
+        modality_name,
+        bold_contrast=bold_contrast,
+    )
+    return float(n_sources * input_amplitude**2)
+
+
 def compute_noise_effective(
     modality_name: str,
     n_sensors: int | None = None,
@@ -602,11 +631,11 @@ def compute_noise_effective(
     bold_snr: float | None = None,
 ) -> float:
     """
-    Effective noise in forward-model units: detector_noise / source_amplitude.
+    Compatibility effective noise in forward-model units.
 
-    This is the value to pass directly to ``get_bitrate(s, noise, ...)``,
-    where *s* are the raw (un-normalised) singular values of the forward model.
-    The ratio ``s_i / noise_effective`` is then dimensionless.
+    New code should prefer detector/output noise plus total input power.  This
+    helper preserves the older ``detector_noise / source_amplitude`` convention
+    for tests, notebooks, and historical scripts.
 
     Parameters
     ----------
@@ -617,48 +646,16 @@ def compute_noise_effective(
         Measurement bandwidth.  For ultrasound this overrides the default
         pulse-averaged effective bandwidth.
     """
-    canon = canonicalize_modality_name(modality_name)
-    model = NOISE_MODELS[canon]
     detector_noise = compute_detector_noise_std(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
         tier=tier, frequency_hz=frequency_hz, voxel_size_mm=voxel_size_mm, tr_s=tr_s,
         bold_contrast=bold_contrast, bold_snr=bold_snr,
     )
-    source_amplitude = (
-        bold_contrast
-        if canon == "fmri_bold" and bold_contrast is not None
-        else model.source_amplitude
+    source_amplitude = compute_input_amplitude(
+        modality_name,
+        bold_contrast=bold_contrast,
     )
     return detector_noise / source_amplitude
-
-
-def capacity_forward_gain_scale(
-    modality_name: str,
-    params=None,
-    voxel_size_mm: float | None = None,
-) -> float:
-    """Scale raw saved singular values into capacity forward-model units.
-
-    Saved fNIRS transfer matrices are voxel-integrated before SVD, so no hidden
-    voxel-volume correction is applied in the SNR/capacity path.  This helper is
-    kept as a single hook for future modalities that may need a convention
-    conversion at export time.
-    """
-    return 1.0
-
-
-def scale_singular_values_for_capacity(
-    s: np.ndarray,
-    modality_name: str,
-    params=None,
-    voxel_size_mm: float | None = None,
-) -> np.ndarray:
-    """Apply modality-specific gain scaling before a capacity calculation."""
-    return np.asarray(s) * capacity_forward_gain_scale(
-        modality_name,
-        params=params,
-        voxel_size_mm=voxel_size_mm,
-    )
 
 
 def capacity_forward_gain_scale(
@@ -739,8 +736,9 @@ def compute_noise_empirical(
     output SNR equals SNR_empirical = typical_signal / detector_noise.
     This is useful as an observed-SNR diagnostic, but it normalizes away the
     absolute gain of the forward model.  For first-principles detector-floor
-    capacity estimates, use compute_noise_effective(...), which preserves raw
-    SVD gain through detector_noise / source_amplitude.
+    capacity estimates, use detector/output noise with total input power from
+    compute_total_input_power(...), which preserves raw SVD gain without
+    folding source amplitude into the noise value.
     """
     snr = compute_empirical_snr(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,

@@ -4,7 +4,7 @@ Parameter sweep visualization utilities.
 
 from guti.data_utils import list_svd_variants
 from guti.parameters import Parameters
-from guti.capacity import get_bitrate_from_average_output_power
+from guti.capacity import get_bitrate, total_input_power_from_average_output_power
 from guti.noise_models import (
     compute_average_output_power,
     compute_output_noise_std,
@@ -227,16 +227,22 @@ def plot_bitrate_vs_parameter(
             params,
             len(s_capacity),
         )
-        bitrate = get_bitrate_from_average_output_power(
+        average_output_power = compute_average_output_power(modality_name)
+        total_input_power = total_input_power_from_average_output_power(
             s_capacity,
-            average_output_power=compute_average_output_power(modality_name),
+            average_output_power=average_output_power,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+        )
+        bitrate = get_bitrate(
+            s_capacity,
+            n_sources=n_sources,
+            total_input_power=total_input_power,
             noise=compute_output_noise_std(
                 modality_name,
                 n_sensors=n_sensors,
                 frequency_hz=freq,
             ),
-            n_sources=n_sources,
-            n_outputs=n_outputs,
             time_resolution=time_resolution,
         )
         param_values.append(param_value)

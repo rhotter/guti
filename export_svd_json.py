@@ -36,12 +36,13 @@ import numpy as np
 
 from guti.data_utils import list_svd_variants, load_svd_variant
 from guti.parameters import Parameters
-from guti.core import get_bitrate, get_bitrate_temporal_filter
+from guti.capacity import get_bitrate, get_bitrate_temporal_filter
 from guti.hrf import get_canonical_hrf_spectrum
 from guti.noise_models import (
     capacity_forward_gain_scale,
+    compute_detector_noise_std,
     compute_noise_empirical,
-    compute_noise_effective,
+    compute_total_input_power,
     compute_empirical_snr,
     get_noise_model,
     scale_singular_values_for_capacity,
@@ -55,8 +56,9 @@ DEFAULT_BITRATE_MODE = "physical_detector_floor"
 BITRATE_MODES = {
     "physical_detector_floor": (
         "Physical detector floor",
-        "Uses detector_noise/source_amplitude and preserves raw forward gain. "
-        "Voxel-density modalities are saved as voxel-integrated transfer functions.",
+        "Uses detector output noise with total input power set by source_amplitude² "
+        "per source channel. Voxel-density modalities are saved as voxel-integrated "
+        "transfer functions.",
     ),
     "empirical_observed_snr": (
         "Empirical observed SNR",
@@ -106,6 +108,26 @@ def _noise_kwargs(params, freq):
     }
 
 
+def _infer_n_sources_for_bitrate(modality, params, s_capacity):
+    if params is None:
+        return int(len(s_capacity))
+    if getattr(params, "matrix_size", None) is not None:
+        return int(params.matrix_size[1])
+    if modality.startswith("meg_") and params.source_spacing_mm is not None:
+        from guti.core import get_grid_positions
+
+        return 3 * len(get_grid_positions(grid_spacing_mm=params.source_spacing_mm))
+    if modality.startswith("eeg_") and params.num_brain_grid_points is not None:
+        return 3 * int(params.num_brain_grid_points)
+    if params.num_brain_grid_points is not None:
+        return int(params.num_brain_grid_points)
+
+    # Physical and empirical bitrate modes use a per-source input power, so the
+    # actual source count cancels out.  Keep spectrum-only callers usable by
+    # falling back to one unit-power source per singular value.
+    return int(len(s_capacity))
+
+
 def compute_bitrate(
     s,
     modality,
@@ -124,6 +146,7 @@ def compute_bitrate(
         params=params,
         voxel_size_mm=kwargs["voxel_size_mm"],
     )
+    n_sources = _infer_n_sources_for_bitrate(modality, params, s_capacity)
 
     if noise_mode == "empirical_observed_snr":
         if model.typical_signal_amplitude <= 0.0:
@@ -135,38 +158,62 @@ def compute_bitrate(
             tier=tier,
             **kwargs,
         )
-        return float(get_bitrate(s_capacity, noise, time_resolution=time_resolution))
+        return float(
+            get_bitrate(
+                s_capacity,
+                n_sources=n_sources,
+                total_input_power=float(n_sources),
+                noise=noise,
+                time_resolution=time_resolution,
+            )
+        )
 
     if noise_mode != "physical_detector_floor":
         raise ValueError(f"Unknown noise_mode {noise_mode!r}")
 
+    if modality == "fmri_bold" and kwargs["tr_s"] is None:
+        kwargs = {**kwargs, "tr_s": time_resolution}
+
+    detector_noise = compute_detector_noise_std(
+        modality,
+        n_sensors=n_sensors,
+        tier=tier,
+        **kwargs,
+    )
+    total_input_power = compute_total_input_power(
+        modality,
+        n_sources=n_sources,
+        bold_contrast=kwargs["bold_contrast"],
+    )
+
     if modality == "fmri_bold":
-        voxel_size_mm = getattr(params, "grid_resolution_mm", None)
-        tr_s = getattr(params, "time_resolution", None) or time_resolution
-        noise = compute_noise_effective(
-            modality,
-            n_sensors=n_sensors,
-            tier=tier,
-            voxel_size_mm=voxel_size_mm,
-            tr_s=tr_s,
-            bold_contrast=kwargs["bold_contrast"],
-            bold_snr=kwargs["bold_snr"],
-        )
+        tr_s = kwargs["tr_s"] or time_resolution
         freqs, H = get_canonical_hrf_spectrum(
             f_max=0.5 / tr_s,
             df=0.002,
             hrf_type=getattr(params, "hrf_type", None) or "spm",
             tr=0.01,
         )
-        return float(get_bitrate_temporal_filter(s, noise, freqs, H))
+        return float(
+            get_bitrate_temporal_filter(
+                s_capacity,
+                freqs,
+                H,
+                n_sources=n_sources,
+                total_input_power=total_input_power,
+                noise=detector_noise,
+            )
+        )
 
-    noise = compute_noise_effective(
-        modality,
-        n_sensors=n_sensors,
-        tier=tier,
-        **kwargs,
+    return float(
+        get_bitrate(
+            s_capacity,
+            n_sources=n_sources,
+            total_input_power=total_input_power,
+            noise=detector_noise,
+            time_resolution=time_resolution,
+        )
     )
-    return float(get_bitrate(s_capacity, noise, time_resolution=time_resolution))
 
 
 def export_modality(modality, label):

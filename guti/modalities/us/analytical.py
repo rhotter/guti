@@ -1378,7 +1378,7 @@ t0 = time.perf_counter()
 # s = torch.sqrt(s)
 
 from guti.data_utils import Parameters
-from guti.capacity import get_bitrate_from_average_output_power
+from guti.capacity import get_bitrate, total_input_power_from_average_output_power
 from guti.noise_models import compute_average_output_power, compute_output_noise_std
 from guti.data_utils import save_svd
 
@@ -1400,7 +1400,7 @@ if noise_level is None:
         frequency_hz=center_frequency,
     )
     noise_level = raw_noise_level * matrix_normalization_scale
-    print(f"noise_eff (raw matrix units): {raw_noise_level}")
+    print(f"output_noise (raw matrix units): {raw_noise_level}")
     print(f"noise_level (analysis matrix units): {noise_level}")
 
 if bitrate_method in {"svd", "both"}:
@@ -1488,14 +1488,21 @@ if bitrate_method in {"svd", "both"}:
         s_normalized = s
     else:
         s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
+    average_output_power = (
+        compute_average_output_power("us_analytical") * matrix_normalization_scale**2
+    )
+    total_input_power = total_input_power_from_average_output_power(
+        s_normalized,
+        average_output_power=average_output_power,
+        n_sources=len(source_positions),
+        n_outputs=num_sensors_total * nt,
+    )
     bitrate_svd = float(
-        get_bitrate_from_average_output_power(
+        get_bitrate(
             s_normalized,
-            average_output_power=compute_average_output_power("us_analytical")
-            * matrix_normalization_scale**2,
-            noise=noise_level,
             n_sources=len(source_positions),
-            n_outputs=num_sensors_total * nt,
+            total_input_power=total_input_power,
+            noise=noise_level,
             time_resolution=effective_time_resolution,
         )
     )

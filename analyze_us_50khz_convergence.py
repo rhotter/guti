@@ -19,8 +19,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from guti.capacity import (
-    get_bitrate_from_average_output_power,
-    get_capacity_from_average_output_power,
+    get_bitrate,
+    get_capacity,
+    total_input_power_from_average_output_power,
 )
 from guti.noise_models import compute_average_output_power, compute_output_noise_std
 from guti.parameters import Parameters
@@ -134,23 +135,26 @@ def load_sweep_rows(input_dir: Path) -> list[dict[str, Any]]:
             n_sensors=int(n_sensors),
             frequency_hz=frequency_hz,
         )
+        total_input_power = total_input_power_from_average_output_power(
+            singular_values,
+            average_output_power=average_output_power,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+        )
         bitrate = float(
-            get_bitrate_from_average_output_power(
+            get_bitrate(
                 singular_values,
-                average_output_power=average_output_power,
-                noise=output_noise,
                 n_sources=n_sources,
-                n_outputs=n_outputs,
+                total_input_power=total_input_power,
+                noise=output_noise,
                 time_resolution=time_resolution,
             )
         )
         capacity = float(
-            get_capacity_from_average_output_power(
+            get_capacity(
                 singular_values[singular_values > 0],
-                average_output_power=average_output_power,
+                total_input_power=total_input_power,
                 noise=output_noise,
-                n_sources=n_sources,
-                n_outputs=n_outputs,
                 time_resolution=time_resolution,
             )
         )

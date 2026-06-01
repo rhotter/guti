@@ -27,7 +27,7 @@ from matplotlib.cm import viridis
 
 from guti.data_utils import list_svd_variants
 from guti.parameters import Parameters
-from guti.capacity import get_bitrate_from_average_output_power
+from guti.capacity import get_bitrate, total_input_power_from_average_output_power
 from guti.core import get_grid_positions
 from guti.noise_models import (
     compute_average_output_power,
@@ -56,13 +56,19 @@ def compute_bitrate(s, params, modality, freq=None, time_resolution=0.01):
         n_sensors=n_sensors,
         frequency_hz=freq,
     )
+    average_output_power = compute_average_output_power(modality)
+    total_input_power = total_input_power_from_average_output_power(
+        s,
+        average_output_power=average_output_power,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+    )
     return float(
-        get_bitrate_from_average_output_power(
+        get_bitrate(
             s,
-            average_output_power=compute_average_output_power(modality),
-            noise=noise,
             n_sources=n_sources,
-            n_outputs=n_outputs,
+            total_input_power=total_input_power,
+            noise=noise,
             time_resolution=time_resolution,
         )
     )

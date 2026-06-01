@@ -15,8 +15,13 @@ from compute_information_maps import (
     posterior_info_vector3,
 )
 from export_svd_json import compute_bitrate
-from guti.core import get_bitrate, get_sensor_positions
-from guti.noise_models import capacity_forward_gain_scale, compute_noise_effective
+from guti.capacity import get_bitrate
+from guti.core import get_sensor_positions
+from guti.noise_models import (
+    capacity_forward_gain_scale,
+    compute_detector_noise_std,
+    compute_total_input_power,
+)
 from guti.parameters import Parameters
 from guti.modalities.fnirs_analytical.utils import (
     get_valid_source_detector_pairs as get_cw_pairs,
@@ -161,11 +166,20 @@ class InformationMapMathTests(unittest.TestCase):
 
     def test_fnirs_physical_bitrate_uses_voxel_integrated_transfer_function(self):
         s_integrated = np.array([6.0e-2, 2.0e-2, 1.0e-2])
-        params = Parameters(num_sensors=800, grid_resolution_mm=6.0)
-        noise = compute_noise_effective(
+        params = Parameters(
+            num_sensors=800,
+            grid_resolution_mm=6.0,
+            num_brain_grid_points=3,
+            matrix_size=(3, 3),
+        )
+        noise = compute_detector_noise_std(
             "fnirs_analytical_cw",
             n_sensors=800,
             tier="today",
+        )
+        total_input_power = compute_total_input_power(
+            "fnirs_analytical_cw",
+            n_sources=3,
         )
 
         actual = compute_bitrate(
@@ -179,7 +193,9 @@ class InformationMapMathTests(unittest.TestCase):
         )
         expected = get_bitrate(
             s_integrated,
-            noise,
+            n_sources=3,
+            total_input_power=total_input_power,
+            noise=noise,
             time_resolution=1.0,
         )
 

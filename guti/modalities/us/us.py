@@ -32,7 +32,7 @@ import jax
 
 from scipy.sparse.linalg import LinearOperator, svds
 
-from guti.capacity import get_bitrate_from_average_output_power
+from guti.capacity import get_bitrate, total_input_power_from_average_output_power
 from guti.noise_models import compute_average_output_power, compute_output_noise_std
 from guti.modalities.us.utils import create_medium, create_sources, create_receivers, plot_medium, find_arrival_time
 import scipy.sparse
@@ -379,11 +379,17 @@ u, s, vh = np.linalg.svd(np.array(combined_jacobian))
 matrix_scale = 1.0 / math.sqrt(n_inputs * n_sensors)
 s_normalized = s * matrix_scale
 noise_level = compute_output_noise_std("us_analytical", n_sensors=n_sensors) * matrix_scale
-bitrate_exact = get_bitrate_from_average_output_power(
+average_output_power = compute_average_output_power("us_analytical") * matrix_scale**2
+total_input_power = total_input_power_from_average_output_power(
     s_normalized,
-    average_output_power=compute_average_output_power("us_analytical") * matrix_scale**2,
+    average_output_power=average_output_power,
     n_sources=n_inputs,
     n_outputs=combined_jacobian.shape[0],
+)
+bitrate_exact = get_bitrate(
+    s_normalized,
+    n_sources=n_inputs,
+    total_input_power=total_input_power,
     noise=noise_level,
     time_resolution=1.0,
 )
