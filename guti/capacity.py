@@ -400,6 +400,70 @@ def get_bitrate_temporal_filter(
     return df * float(np.sum(np.log2(1.0 + (gains**2) * input_power_per_source)))
 
 
+def get_capacity_temporal_filter(
+    s: np.ndarray,
+    freqs: np.ndarray,
+    H_magnitude: np.ndarray,
+    *,
+    n_sources: int,
+    total_input_power: float | None = None,
+    input_power_per_source: float | None = None,
+    input_amplitude: float | None = None,
+    average_output_power: float | None = None,
+    n_outputs: int | None = None,
+    noise: float,
+) -> float:
+    """Return water-filled capacity for a spatial spectrum followed by a temporal filter.
+
+    Water-filling counterpart of :func:`get_bitrate_temporal_filter`. The
+    (spatial mode × frequency bin) grid is treated as a bank of independent
+    parallel Gaussian channels with effective gains ``s_k · |H(f_m)| / noise``;
+    the total input power is allocated optimally across them (same convention as
+    :func:`get_capacity`), rather than spread uniformly.
+
+    Power budget matches the equal-power version exactly: the equal-power path
+    puts ``total_input_power / n_sources`` on every one of the
+    ``n_sources × n_freqs`` grid entries, so the aggregate budget water-filled
+    here is ``(total_input_power / n_sources) × n_sources × n_freqs``. On that
+    identical budget capacity is always ≥ the equal-power bitrate, and the
+    result is invariant to the frequency resolution ``df`` (once fine enough to
+    resolve ``H``).
+    """
+    spectrum = _as_spectrum(s)
+    freqs = np.asarray(freqs, dtype=float)
+    H_magnitude = np.asarray(H_magnitude, dtype=float)
+    if freqs.ndim != 1 or H_magnitude.ndim != 1:
+        raise ValueError("freqs and H_magnitude must be 1D arrays")
+    if freqs.shape != H_magnitude.shape:
+        raise ValueError("freqs and H_magnitude must have the same shape")
+    if len(freqs) < 2:
+        return 0.0
+    if noise <= 0:
+        raise ValueError("noise must be positive")
+
+    resolved_total_input_power = resolve_total_input_power(
+        spectrum,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+        total_input_power=total_input_power,
+        input_power_per_source=input_power_per_source,
+        input_amplitude=input_amplitude,
+        average_output_power=average_output_power,
+    )
+    df = float(freqs[1] - freqs[0])
+    gains = np.outer(spectrum, H_magnitude).ravel() / noise
+    # Match the equal-power aggregate budget: per-source power applied to every
+    # (mode × freq) grid entry, then water-filled over the whole grid.
+    power_per_source = resolved_total_input_power / n_sources
+    grid_total_power = power_per_source * gains.size
+    input_power_per_mode = water_filling_power_allocation(
+        gains,
+        total_input_power=grid_total_power,
+        noise=1.0,
+    )
+    return df * float(np.sum(np.log2(1.0 + (gains**2) * input_power_per_mode)))
+
+
 def get_bitrate_from_average_output_power(
     s: np.ndarray,
     *,

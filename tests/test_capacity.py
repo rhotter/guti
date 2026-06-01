@@ -7,6 +7,7 @@ from guti.capacity import (
     get_bitrate_temporal_filter,
     get_bitrate_from_average_output_power,
     get_capacity,
+    get_capacity_temporal_filter,
     get_capacity_from_average_output_power,
     resolve_total_input_power,
     total_input_power_from_average_output_power,
@@ -297,6 +298,37 @@ class CapacityPowerTests(unittest.TestCase):
         expected = 0.25 * np.sum(np.log2(1.0 + gains**2))
 
         np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_temporal_capacity_dominates_bitrate_on_same_budget(self):
+        # Water-filling (get_capacity_temporal_filter) must give >= the
+        # equal-power bitrate (get_bitrate_temporal_filter) on an identical
+        # total-input-power budget, and both must be ~invariant to df.
+        rng = np.random.default_rng(0)
+        s = np.sort(rng.uniform(0.1, 2.0, 6))[::-1]
+        kw = dict(n_sources=6, total_input_power=4.0, noise=0.25)
+
+        prev_br = prev_cap = None
+        for n_freq in (40, 80, 160):
+            freqs = np.linspace(0.0, 1.0, n_freq)
+            H = np.exp(-freqs / 0.3)
+            H = H / H.max()
+            br = get_bitrate_temporal_filter(s, freqs, H, **kw)
+            cap = get_capacity_temporal_filter(s, freqs, H, **kw)
+            self.assertGreaterEqual(cap, br - 1e-9)
+            if prev_br is not None:
+                # both stable as resolution increases (within a few percent)
+                self.assertLess(abs(br - prev_br) / prev_br, 0.05)
+                self.assertLess(abs(cap - prev_cap) / prev_cap, 0.05)
+            prev_br, prev_cap = br, cap
+
+    def test_temporal_capacity_zero_power_is_zero(self):
+        s = np.array([2.0, 0.5])
+        freqs = np.array([0.0, 0.25, 0.5])
+        H = np.array([1.0, 0.5, 0.25])
+        val = get_capacity_temporal_filter(
+            s, freqs, H, n_sources=4, total_input_power=0.0, noise=0.2
+        )
+        self.assertEqual(val, 0.0)
 
     def test_average_output_power_workflow_handles_consistent_global_scaling(self):
         A = np.array(
