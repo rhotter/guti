@@ -133,7 +133,7 @@ def main():
 
     namespace = {"torch": torch, "np": np, "math": math, "time": time}
     bitrate_slq_torch_gpu_chunked = load_function(
-        "guti/modalities/us/analytical.py",
+        "guti/slq.py",
         "bitrate_slq_torch_gpu_chunked",
         namespace,
     )
