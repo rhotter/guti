@@ -84,6 +84,9 @@ def load_json_records(input_dir: Path) -> dict[tuple[int, int], dict[str, Any]]:
             if n_sources is None or n_sensors is None:
                 continue
             records[(int(n_sources), int(n_sensors))] = row
+            matrix_size = row.get("matrix_size")
+            if matrix_size is not None and len(matrix_size) == 2:
+                records[(int(matrix_size[1]), int(n_sensors))] = row
     return records
 
 
@@ -305,9 +308,15 @@ def save_canonical(row: dict[str, Any], canonical_path: Path) -> None:
     canonical_path.parent.mkdir(parents=True, exist_ok=True)
     params = row["params"]
     params.frequency_hz = FREQUENCY_HZ
+    gram_note = ""
+    if row.get("modal_gram_output_path"):
+        gram_note = (
+            f"; modal_gram={row['modal_gram_output_path']} "
+            f"({row.get('modal_gram_size_bytes')} bytes)"
+        )
     params.comment = (
         f"Canonical 50 kHz ultrasound analytical spectrum from Modal convergence sweep; "
-        f"source_npz={row['path']}"
+        f"source_npz={row['path']}{gram_note}"
     )
     np.savez(
         canonical_path,
