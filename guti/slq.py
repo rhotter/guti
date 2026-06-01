@@ -191,23 +191,19 @@ def bitrate_slq(
 # Torch GPU SLQ (production, chunked / streaming / multi-GPU)
 # ===========================================================================
 #
-# These are the heavy, torch-based estimators used for the large ultrasound
-# sweeps (and any future large modality). They were originally written in
-# guti/modalities/us/analytical.py and are kept here, the canonical SLQ home,
-# so they are importable without pulling in jax/jwave (which us.utils requires).
-# guti.modalities.us.analytical re-exports them for backward compatibility.
+# Heavy torch-based estimators for large ultrasound sweeps (and any future
+# large modality). Originally in guti/modalities/us/analytical.py; kept here,
+# the canonical SLQ home, so they import without pulling in jax/jwave (which
+# us.utils requires). guti.modalities.us.analytical re-exports them.
 #
-# They operate matrix-free via a row-chunk builder (compute_chunk_matrix) or a
-# pre-built CPU matrix, mirroring the ChunkedForwardOperator concept above but
-# specialized for GPU throughput. Requires torch; tqdm is optional at import.
+# Requires torch; tqdm optional at import.
 # ---------------------------------------------------------------------------
 
-import time as _time  # noqa: F401  (block below references `time`)
 import time
 try:
     import torch
     import torch.cuda.comm as cuda_comm
-except Exception:  # pragma: no cover - torch is required to call these
+except Exception:  # pragma: no cover - torch required to call these
     torch = None
     cuda_comm = None
 try:
@@ -744,6 +740,7 @@ def bitrate_slq_torch_gpu_streaming(
     noise_std_full_brain: float,
     time_resolution: float = 1.0,
     n_detectors: int | None = None,
+    logdet_alpha: float | None = None,
     s: int = 16,
     t: int = 40,
     batch: int = 256,
@@ -767,11 +764,12 @@ def bitrate_slq_torch_gpu_streaming(
     d = m if left else n
 
     n_eff = n_detectors if n_detectors is not None else 1
-    alpha = torch.tensor(
-        1.0 / (noise_std_full_brain**2 / n_eff),
-        dtype=krylov_dtype,
-        device=device,
+    alpha_value = (
+        float(logdet_alpha)
+        if logdet_alpha is not None
+        else 1.0 / (noise_std_full_brain**2 / n_eff)
     )
+    alpha = torch.tensor(alpha_value, dtype=krylov_dtype, device=device)
     alpha_cpu = alpha.cpu()
     ln2 = torch.tensor(math.log(2.0), dtype=krylov_dtype, device=device)
 
@@ -893,6 +891,7 @@ def bitrate_slq_torch_gpu_streaming_probe_parallel(
     noise_std_full_brain: float,
     time_resolution: float = 1.0,
     n_detectors: int | None = None,
+    logdet_alpha: float | None = None,
     s: int = 16,
     t: int = 40,
     batch: int = 256,
@@ -923,6 +922,7 @@ def bitrate_slq_torch_gpu_streaming_probe_parallel(
             noise_std_full_brain=noise_std_full_brain,
             time_resolution=time_resolution,
             n_detectors=n_detectors,
+            logdet_alpha=logdet_alpha,
             s=s_local,
             t=t,
             batch=batch,
@@ -1105,6 +1105,33 @@ def estimate_frobenius_norm_sq_streaming(
         z = (torch.randint(0, 2, (d, 1), device=device) * 2 - 1).to(krylov_dtype)
         acc += torch.dot(z.squeeze(1), B_mv(z).squeeze(1)).item()
     return acc / n_probes
+
+
+@torch.no_grad()
+def compute_frobenius_norm_sq_streaming_exact(
+    compute_chunk_matrix,
+    num_sensors_total: int,
+    sensor_batch_size: int,
+    normalize_scale: float = 1.0,
+    device: str = "cuda",
+    verbose: bool = False,
+) -> float:
+    acc = torch.zeros((), dtype=torch.float64, device=device)
+    batch_iter = range(0, num_sensors_total, sensor_batch_size)
+    if verbose:
+        batch_iter = tqdm(batch_iter, desc="[slq-power] ||A||_F^2", leave=False)
+    for start in batch_iter:
+        end = min(start + sensor_batch_size, num_sensors_total)
+        chunk_matrix = compute_chunk_matrix(start, end)
+        if normalize_scale != 1.0:
+            chunk_matrix = chunk_matrix * normalize_scale
+        acc += torch.sum(chunk_matrix.square(), dtype=torch.float64)
+        del chunk_matrix
+        if device == "cuda":
+            torch.cuda.empty_cache()
+    if device == "cuda":
+        torch.cuda.synchronize()
+    return float(acc.cpu().item())
 
 
 @torch.no_grad()

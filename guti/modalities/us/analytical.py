@@ -9,11 +9,16 @@ import torch
 import math
 import numpy as np
 import json
+import os
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from guti.data_utils import save_svd
 from guti.modalities.us.utils import create_medium, create_sources_real, create_receivers_real, simulate_free_field_propagation, plot_medium
+from guti.noise_models import (
+    DEFAULT_NOISE_CORRELATION_KERNEL,
+    DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+)
 import time
 from pathlib import Path
 
@@ -23,7 +28,7 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 torch.set_float32_matmul_precision('high')  # allow TF32 on Ampere+
 torch.backends.cuda.matmul.allow_tf32 = True
-cu.preferred_linalg_library("magma")        # robust & fast dense LA
+cu.preferred_linalg_library(os.environ.get("GUTI_TORCH_LINALG_BACKEND", "magma"))
 
 
 def build_source_signal(
@@ -65,9 +70,8 @@ def build_source_signal(
 
 
 # ---------------------------------------------------------------------------
-# SLQ estimators now live in guti.slq (the canonical, jax-free home) so they
-# can be imported without pulling in jwave via us.utils. Re-exported here for
-# backward compatibility with existing callers and the Modal sweep driver.
+# SLQ estimators live in guti.slq (canonical, jax-free home); re-exported here
+# for backward compatibility with existing callers and the Modal sweep driver.
 # ---------------------------------------------------------------------------
 from guti.slq import (
     bitrate_slq_torch_gpu_chunked,
@@ -79,6 +83,7 @@ from guti.slq import (
     bitrate_slq_torch_gpu_streaming_probe_parallel,
     estimate_spectral_norm_streaming,
     estimate_frobenius_norm_sq_streaming,
+    compute_frobenius_norm_sq_streaming_exact,
     estimate_spectral_norm_streaming_probe_parallel,
     estimate_frobenius_norm_sq_streaming_probe_parallel,
 )
@@ -140,8 +145,29 @@ parser.add_argument('--center_frequency', type=float, default=0.05e6, help='Cent
 parser.add_argument('--signal_type', type=str, default='tone_burst', choices=['cw', 'tone_burst'], help='Excitation waveform type')
 parser.add_argument('--signal_cycles', type=float, default=2.0, help='Cycles in the emitted tone burst')
 parser.add_argument('--signal_window', type=str, default='hann', choices=['rect', 'hann'], help='Envelope for tone-burst excitation')
+parser.add_argument(
+    '--source_power_normalization',
+    type=str,
+    default='none',
+    choices=['none', 'fixed_total'],
+    help='Scale per-source waveform amplitude. fixed_total uses 1/sqrt(n_sources).',
+)
+parser.add_argument(
+    '--input_power_convention',
+    type=str,
+    default='average_output_power',
+    choices=['average_output_power', 'fixed_total_source_power'],
+    help='Input power convention for bitrate/capacity estimates.',
+)
 parser.add_argument('--accumulate_on_cpu', action='store_true', help='Accumulate Gram matrix on CPU instead of GPU')
 parser.add_argument('--svd_device', type=str, default='cuda', choices=['cpu', 'cuda'], help='Device to compute eigenvalues/SVD of Gram')
+parser.add_argument(
+    '--linalg_backend',
+    type=str,
+    default=os.environ.get("GUTI_TORCH_LINALG_BACKEND", "magma"),
+    choices=['magma', 'cusolver', 'default'],
+    help='Preferred torch CUDA linear algebra backend for SVD/eigendecomposition.',
+)
 parser.add_argument(
     '--svd_method',
     type=str,
@@ -176,12 +202,43 @@ parser.add_argument('--slq_s', type=int, default=128, help='Number of SLQ probe 
 parser.add_argument('--slq_t', type=int, default=128, help='Lanczos steps for SLQ')
 parser.add_argument('--slq_batch', type=int, default=128, help='SLQ batch size per iteration')
 parser.add_argument('--slq_chunk_rows', type=int, default=65536, help='Row chunk size for SLQ matvecs')
-parser.add_argument('--slq_verbose', action='store_true', default=True, help='Print SLQ progress logs')
+parser.add_argument('--slq_verbose', action='store_true', default=False, help='Print SLQ progress logs')
 parser.add_argument('--slq_multi_gpu', action='store_true', help='Use multi-GPU sharded SLQ')
 parser.add_argument('--slq_devices', type=str, default='', help='Comma-separated CUDA device IDs for SLQ')
 parser.add_argument('--slq_streaming', action='store_true', help='Stream SLQ matvecs without materializing G')
 parser.add_argument('--slq_probe_parallel', action='store_true', help='Parallelize SLQ probes across GPUs (chunked mode)')
 parser.add_argument('--noise_level', type=float, default=None, help='Override noise level (skip estimation)')
+parser.add_argument(
+    '--noise_multiplier',
+    type=float,
+    default=1.0,
+    help='Multiply the modeled output-noise std before matrix normalization.',
+)
+parser.add_argument(
+    '--noise_correlation_length_mm',
+    type=float,
+    default=DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    help='Scalp noise-correlation length in mm for covariance-aware capacity. Default: 5.',
+)
+parser.add_argument(
+    '--noise_correlation_kernel',
+    type=str,
+    default=DEFAULT_NOISE_CORRELATION_KERNEL,
+    choices=['gaussian', 'exponential'],
+    help='Spatial noise-correlation kernel. Default: gaussian.',
+)
+parser.add_argument(
+    '--average_output_signal_amplitude',
+    type=float,
+    default=None,
+    help='Override the typical per-output signal amplitude used by average_output_power.',
+)
+parser.add_argument(
+    '--bitrate_time_resolution',
+    type=float,
+    default=None,
+    help='Override the time resolution in seconds used in bitrate/capacity formulas.',
+)
 parser.add_argument(
     '--disable_matrix_normalization',
     action='store_true',
@@ -195,6 +252,14 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
+if args.noise_multiplier <= 0.0:
+    raise ValueError("--noise_multiplier must be positive")
+if args.noise_correlation_length_mm <= 0.0:
+    raise ValueError("--noise_correlation_length_mm must be positive")
+if args.average_output_signal_amplitude is not None and args.average_output_signal_amplitude < 0.0:
+    raise ValueError("--average_output_signal_amplitude must be non-negative")
+if args.bitrate_time_resolution is not None and args.bitrate_time_resolution <= 0.0:
+    raise ValueError("--bitrate_time_resolution must be positive")
 
 n_sources = args.n_sources
 n_sensors = args.n_sensors
@@ -204,9 +269,14 @@ svd_device = args.svd_device
 center_frequency = args.center_frequency
 bitrate_method = args.bitrate_method
 accumulate_on_cpu = args.accumulate_on_cpu
+if args.linalg_backend == "default":
+    cu.preferred_linalg_library(None)
+else:
+    cu.preferred_linalg_library(args.linalg_backend)
 
 print(f"n_sources: {n_sources}, n_sensors: {n_sensors}, temporal_sampling: {temporal_sampling}, sensor_batch_size: {sensor_batch_size}")
 print(f"matrix_normalization: {'disabled' if args.disable_matrix_normalization else 'enabled'}")
+print(f"torch CUDA linalg backend: {args.linalg_backend}")
 
 # We create a jwave medium object. This is mostly useful for non-free field simulations, but we use it here for convenience/consistency.
 domain, medium_original, time_axis, brain_mask, skull_mask, scalp_mask = create_medium(central_frequency=center_frequency, pad=30)
@@ -228,12 +298,21 @@ source_signal = build_source_signal(
     signal_cycles=args.signal_cycles,
     signal_window=args.signal_window,
 )
-source_signals = source_signal
+if args.source_power_normalization == "fixed_total":
+    source_amplitude_scale = 1.0 / math.sqrt(float(n_sources))
+else:
+    source_amplitude_scale = 1.0
+print(f"source_power_normalization: {args.source_power_normalization}")
+print(f"source_amplitude_scale: {source_amplitude_scale}")
+source_signals = source_signal * source_amplitude_scale
 source_signals = np.tile(source_signals, (n_sources, 1))
 
 nt = math.ceil(time_axis.shape[0] / temporal_sampling)
 voxel_size = np.array(domain.dx)
 effective_time_resolution = time_step * temporal_sampling
+if args.bitrate_time_resolution is not None:
+    effective_time_resolution = args.bitrate_time_resolution
+print(f"effective_time_resolution: {effective_time_resolution}")
 
 #%%
 
@@ -242,8 +321,10 @@ device = "cuda"
 
 use_complex_ampitudes = False
 
-if args.slq_streaming and bitrate_method in {"svd", "both"}:
-    raise ValueError("--slq_streaming cannot be used with bitrate_method=svd or both")
+if args.slq_streaming and bitrate_method == "both":
+    raise ValueError("--slq_streaming currently supports bitrate_method=slq only")
+if args.slq_streaming and bitrate_method == "svd":
+    raise ValueError("--slq_streaming cannot be used with bitrate_method=svd")
 if args.slq_streaming and args.slq_multi_gpu:
     raise ValueError("--slq_streaming currently supports single-GPU SLQ only")
 if args.slq_streaming and args.slq_probe_parallel:
@@ -408,30 +489,58 @@ t0 = time.perf_counter()
 # s = torch.sqrt(s)
 
 from guti.data_utils import Parameters
-from guti.capacity import get_bitrate, total_input_power_from_average_output_power
-from guti.noise_models import compute_average_output_power, compute_output_noise_std
+from guti.capacity import (
+    get_bitrate,
+    sensor_noise_normalized_singular_values,
+    total_input_power_from_average_output_power,
+)
+from guti.noise_models import (
+    DEFAULT_NOISE_CORRELATION_KERNEL,
+    DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    compute_average_output_power,
+    compute_input_amplitude,
+    compute_output_noise_std,
+    compute_sensor_noise_covariance,
+)
 from guti.data_utils import save_svd
 
 noise_level = args.noise_level
+raw_noise_level = None
+average_output_signal_amplitude = (
+    args.average_output_signal_amplitude
+    if args.average_output_signal_amplitude is not None
+    else math.sqrt(compute_average_output_power("us_analytical"))
+)
 s_normalized = None
+s_noise_normalized = None
 bitrate_svd = None
 bitrate_slq = None
 saved_svd_path = None
+total_input_power = None
+physical_total_source_power = compute_input_amplitude("us_analytical") ** 2
+slq_frobenius_norm_sq = None
+slq_logdet_alpha = None
 
 matrix_normalization_scale = (
     1.0
     if args.disable_matrix_normalization
     else 1.0 / math.sqrt(len(source_positions) * len(sensor_positions))
 )
+average_output_power = average_output_signal_amplitude**2 * matrix_normalization_scale**2
 if noise_level is None:
     raw_noise_level = compute_output_noise_std(
         "us_analytical",
         n_sensors=len(sensor_positions),
         frequency_hz=center_frequency,
-    )
+    ) * args.noise_multiplier
     noise_level = raw_noise_level * matrix_normalization_scale
     print(f"output_noise (raw matrix units): {raw_noise_level}")
     print(f"noise_level (analysis matrix units): {noise_level}")
+else:
+    print(f"noise_level override (analysis matrix units): {noise_level}")
+print(f"average_output_signal_amplitude (raw matrix units): {average_output_signal_amplitude}")
+print(f"average_output_power (analysis matrix units): {average_output_power}")
+print(f"noise_multiplier: {args.noise_multiplier}")
 
 if bitrate_method in {"svd", "both"}:
     if G is None and gram_for_svd is None:
@@ -475,6 +584,28 @@ if bitrate_method in {"svd", "both"}:
     print(f"Ratio of sums: {np.sum(s[:10])}")
     print("Done!")
 
+    if G is not None:
+        print("Computing noise-normalized singular values with spatial noise covariance")
+        noise_std_for_covariance = noise_level / matrix_normalization_scale
+        sensor_noise_covariance = compute_sensor_noise_covariance(
+            sensor_positions * 1e3,
+            noise_std_for_covariance,
+            correlation_length_mm=float(args.noise_correlation_length_mm),
+            kernel=args.noise_correlation_kernel,
+        )
+        G_cpu = G.detach().cpu().numpy() if isinstance(G, torch.Tensor) else np.asarray(G)
+        s_noise_normalized = sensor_noise_normalized_singular_values(
+            G_cpu,
+            sensor_noise_covariance=sensor_noise_covariance,
+            outputs_per_sensor=nt,
+        )
+        print(f"First 10 noise-normalized singular values: {s_noise_normalized[:10]}")
+    else:
+        print(
+            "Skipping spatial noise covariance spectrum: stream_gram does not "
+            "materialize the sensor-time matrix"
+        )
+
     plt.semilogy(s)
     ax = plt.gca()
     ax.set_xlabel("Singular value index")
@@ -495,8 +626,35 @@ if bitrate_method in {"svd", "both"}:
         time_resolution=effective_time_resolution,
         frequency_hz=center_frequency,
         matrix_size=(num_sensors_total * nt, len(source_positions)),
-        comment=f"signal_type={args.signal_type},signal_cycles={args.signal_cycles},signal_window={args.signal_window}",
+        noise_correlation_length_mm=float(args.noise_correlation_length_mm),
+        noise_correlation_kernel=args.noise_correlation_kernel,
+        noise_distance_metric="geodesic",
+        comment=(
+            f"signal_type={args.signal_type},signal_cycles={args.signal_cycles},"
+            f"signal_window={args.signal_window},"
+            f"source_power_normalization={args.source_power_normalization},"
+            f"source_amplitude_scale={source_amplitude_scale},"
+            f"input_power_convention={args.input_power_convention},"
+            f"matrix_normalization={'disabled' if args.disable_matrix_normalization else 'enabled'}"
+        ),
         vincent_trick=False
+    ), extra_arrays=(
+        {
+            "noise_normalized_singular_values": s_noise_normalized,
+            "noise_correlation_length_mm": np.array(
+                args.noise_correlation_length_mm,
+                dtype=np.float64,
+            ),
+            "noise_correlation_kernel": np.array(args.noise_correlation_kernel),
+        }
+        if s_noise_normalized is not None
+        else {
+            "noise_correlation_length_mm": np.array(
+                args.noise_correlation_length_mm,
+                dtype=np.float64,
+            ),
+            "noise_correlation_kernel": np.array(args.noise_correlation_kernel),
+        }
     ))
     if args.save_gram_matrix:
         if args.svd_method != "gram":
@@ -518,35 +676,96 @@ if bitrate_method in {"svd", "both"}:
         s_normalized = s
     else:
         s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
-    average_output_power = (
-        compute_average_output_power("us_analytical") * matrix_normalization_scale**2
-    )
-    total_input_power = total_input_power_from_average_output_power(
-        s_normalized,
-        average_output_power=average_output_power,
-        n_sources=len(source_positions),
-        n_outputs=num_sensors_total * nt,
-    )
+    if args.input_power_convention == "fixed_total_source_power":
+        total_input_power = physical_total_source_power / (source_amplitude_scale**2)
+    else:
+        total_input_power = total_input_power_from_average_output_power(
+            s_normalized,
+            average_output_power=average_output_power,
+            n_sources=len(source_positions),
+            n_outputs=num_sensors_total * nt,
+        )
     bitrate_svd = float(
         get_bitrate(
-            s_normalized,
+            s_noise_normalized if s_noise_normalized is not None else s_normalized,
             n_sources=len(source_positions),
             total_input_power=total_input_power,
-            noise=noise_level,
+            noise=1.0 if s_noise_normalized is not None else noise_level,
             time_resolution=effective_time_resolution,
         )
     )
     print(f"noise_level: {noise_level}")
+    print(f"input_power_convention: {args.input_power_convention}")
+    print(f"total_input_power: {total_input_power}")
     print(f"bitrate: {bitrate_svd}")
     print(n_sensors)
     # Channel capacity uses the same output-power/noise workflow as bitrate.
 
 if bitrate_method in {"slq", "both"}:
-    raise NotImplementedError(
-        "SLQ bitrate is disabled until its matvec paths derive per-source input "
-        "power from per-output average power and pass that scaling into the "
-        "trace-log estimate."
+    if not args.slq_streaming:
+        raise NotImplementedError("Use --slq_streaming for source sweeps that avoid materializing G.")
+    print("Computing streaming SLQ bitrate estimate...")
+    t0 = time.perf_counter()
+    slq_frobenius_norm_sq = compute_frobenius_norm_sq_streaming_exact(
+        compute_chunk_matrix,
+        num_sensors_total=num_sensors_total,
+        sensor_batch_size=sensor_batch_size,
+        normalize_scale=matrix_normalization_scale,
+        device=device,
+        verbose=args.slq_verbose,
     )
+    if args.input_power_convention == "fixed_total_source_power":
+        total_input_power = physical_total_source_power / (source_amplitude_scale**2)
+    else:
+        total_input_power = total_input_power_from_average_output_power(
+            np.asarray([math.sqrt(slq_frobenius_norm_sq)], dtype=np.float64),
+            average_output_power=average_output_power,
+            n_sources=len(source_positions),
+            n_outputs=num_sensors_total * nt,
+        )
+    input_power_per_source = total_input_power / len(source_positions)
+    slq_logdet_alpha = input_power_per_source / (noise_level**2)
+    print(f"slq_frobenius_norm_sq: {slq_frobenius_norm_sq}")
+    print(f"input_power_convention: {args.input_power_convention}")
+    print(f"total_input_power: {total_input_power}")
+    print(f"slq_logdet_alpha: {slq_logdet_alpha}")
+    if args.slq_probe_parallel:
+        bitrate_slq = bitrate_slq_torch_gpu_streaming_probe_parallel(
+            make_compute_chunk_matrix_for_device,
+            device_ids=slq_device_ids or [0],
+            num_sensors_total=num_sensors_total,
+            num_sources_total=num_sources_total,
+            nt=nt,
+            sensor_batch_size=sensor_batch_size,
+            noise_std_full_brain=noise_level,
+            time_resolution=effective_time_resolution,
+            logdet_alpha=slq_logdet_alpha,
+            s=args.slq_s,
+            t=args.slq_t,
+            batch=args.slq_batch,
+            normalize_scale=matrix_normalization_scale,
+            verbose=args.slq_verbose,
+        )
+    else:
+        bitrate_slq = bitrate_slq_torch_gpu_streaming(
+            compute_chunk_matrix,
+            num_sensors_total=num_sensors_total,
+            num_sources_total=num_sources_total,
+            nt=nt,
+            sensor_batch_size=sensor_batch_size,
+            noise_std_full_brain=noise_level,
+            time_resolution=effective_time_resolution,
+            logdet_alpha=slq_logdet_alpha,
+            s=args.slq_s,
+            t=args.slq_t,
+            batch=args.slq_batch,
+            normalize_scale=matrix_normalization_scale,
+            verbose=args.slq_verbose,
+        )
+    if device == "cuda":
+        torch.cuda.synchronize()
+    print(f"slq_elapsed: {time.perf_counter() - t0:.3f}s")
+    print(f"bitrate_slq: {bitrate_slq}")
 
 result_record = {
     "status": "ok",
@@ -567,7 +786,28 @@ result_record = {
     "bitrate_slq": bitrate_slq,
     "bitrate_svd": bitrate_svd,
     "noise_level": noise_level,
+    "raw_noise_level": float(raw_noise_level) if raw_noise_level is not None else None,
+    "noise_multiplier": float(args.noise_multiplier),
+    "noise_model_type": (
+        "spatial_covariance" if s_noise_normalized is not None else "scalar_iid"
+    ),
+    "noise_correlation_length_mm": float(args.noise_correlation_length_mm),
+    "noise_correlation_kernel": args.noise_correlation_kernel,
+    "noise_normalized_first_singular_value": (
+        float(s_noise_normalized[0]) if s_noise_normalized is not None else None
+    ),
+    "average_output_signal_amplitude": float(average_output_signal_amplitude),
+    "average_output_power": float(average_output_power),
     "matrix_normalization": "disabled" if args.disable_matrix_normalization else "enabled",
+    "source_power_normalization": args.source_power_normalization,
+    "source_amplitude_scale": float(source_amplitude_scale),
+    "input_power_convention": args.input_power_convention,
+    "physical_total_source_power": float(physical_total_source_power),
+    "total_input_power": float(total_input_power) if total_input_power is not None else None,
+    "slq_frobenius_norm_sq": (
+        float(slq_frobenius_norm_sq) if slq_frobenius_norm_sq is not None else None
+    ),
+    "slq_logdet_alpha": float(slq_logdet_alpha) if slq_logdet_alpha is not None else None,
     "slq_streaming": bool(args.slq_streaming),
     "slq_probe_parallel": bool(args.slq_probe_parallel),
     "slq_multi_gpu": bool(args.slq_multi_gpu),

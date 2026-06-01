@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
-from guti.core import get_bitrate_channel_capacity, noise_floor_from_total_snr
+from guti.core import (
+    BRAIN_RADIUS,
+    get_bitrate_channel_capacity,
+    noise_floor_from_total_snr,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +57,26 @@ class NoiseModel:
     reference_total_snr: float = 100.0
 
     notes: str = ""
+
+
+@dataclass(frozen=True)
+class NoiseCorrelationLengthFit:
+    """Summary of a distance-kernel fit to a covariance matrix."""
+
+    kernel: str
+    length_mm: float
+    log_rmse: float
+    n_pairs: int
+    min_correlation: float
+    max_distance_mm: float
+
+
+NoiseCorrelationKernel = Literal["gaussian", "exponential"]
+NoiseDistanceMetric = Literal["geodesic", "euclidean"]
+
+
+DEFAULT_NOISE_CORRELATION_LENGTH_MM = 5.0
+DEFAULT_NOISE_CORRELATION_KERNEL: NoiseCorrelationKernel = "gaussian"
 
 
 # ---------------------------------------------------------------------------
@@ -308,13 +333,531 @@ def _fmri_relative_noise(
     return math.sqrt(thermal**2 + _FMRI_HIGH_QUALITY_REL_NOISE**2)
 
 
+def scalp_geodesic_distance_matrix(
+    sensor_positions_mm: np.ndarray,
+    *,
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return pairwise arc distances between scalp sensor positions in mm."""
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("sensor_positions_mm must have shape (n_sensors, 3)")
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("sensor_positions_mm must contain finite entries")
+
+    center = (
+        np.asarray(center_mm, dtype=float)
+        if center_mm is not None
+        else np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0], dtype=float)
+    )
+    if center.shape != (3,):
+        raise ValueError("center_mm must have shape (3,)")
+
+    radial = positions - center[None, :]
+    radii = np.linalg.norm(radial, axis=1)
+    if np.any(radii <= 0.0):
+        raise ValueError("sensor positions must not coincide with the scalp center")
+
+    unit = radial / radii[:, None]
+    cos_angles = np.clip(unit @ unit.T, -1.0, 1.0)
+    angles = np.arccos(cos_angles)
+    radius = float(np.mean(radii))
+    return radius * angles
+
+
+def sensor_distance_matrix(
+    sensor_positions_mm: np.ndarray,
+    *,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return pairwise sensor distances in mm using a scalp-aware metric."""
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    if distance_metric == "geodesic":
+        return scalp_geodesic_distance_matrix(positions, center_mm=center_mm)
+    if distance_metric == "euclidean":
+        delta = positions[:, None, :] - positions[None, :, :]
+        return np.linalg.norm(delta, axis=2)
+    raise ValueError(f"Unsupported distance_metric {distance_metric!r}")
+
+
+def distance_correlation_matrix(
+    distances_mm: np.ndarray,
+    *,
+    correlation_length_mm: float,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+) -> np.ndarray:
+    """Return a unit-diagonal correlation matrix from pairwise distances."""
+    distances = np.asarray(distances_mm, dtype=float)
+    if distances.ndim != 2 or distances.shape[0] != distances.shape[1]:
+        raise ValueError("distances_mm must be a square matrix")
+    if correlation_length_mm <= 0.0 or not math.isfinite(correlation_length_mm):
+        raise ValueError("correlation_length_mm must be positive and finite")
+    if not np.all(np.isfinite(distances)):
+        raise ValueError("distances_mm must contain finite entries")
+    if np.any(distances < -1e-12):
+        raise ValueError("distances_mm must be non-negative")
+
+    clipped = np.maximum(distances, 0.0)
+    if kernel == "gaussian":
+        corr = np.exp(-0.5 * (clipped / correlation_length_mm) ** 2)
+    elif kernel == "exponential":
+        corr = np.exp(-clipped / correlation_length_mm)
+    else:
+        raise ValueError(f"Unsupported correlation kernel {kernel!r}")
+    np.fill_diagonal(corr, 1.0)
+    return 0.5 * (corr + corr.T)
+
+
+def covariance_to_correlation_matrix(covariance: np.ndarray) -> np.ndarray:
+    """Return the normalized correlation matrix for a covariance matrix."""
+    cov = np.asarray(covariance, dtype=float)
+    if cov.ndim != 2 or cov.shape[0] != cov.shape[1]:
+        raise ValueError("covariance must be a square matrix")
+    if not np.all(np.isfinite(cov)):
+        raise ValueError("covariance must contain finite entries")
+    cov = 0.5 * (cov + cov.T)
+    variance = np.diag(cov)
+    if np.any(variance <= 0.0):
+        raise ValueError("covariance must have positive diagonal entries")
+    corr = cov / np.sqrt(np.outer(variance, variance))
+    np.fill_diagonal(corr, 1.0)
+    return 0.5 * (corr + corr.T)
+
+
+def estimate_effective_correlation_length_mm(
+    sensor_positions_mm: np.ndarray,
+    covariance: np.ndarray,
+    *,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    center_mm: np.ndarray | None = None,
+    min_correlation: float = 0.0,
+    max_distance_mm: float | None = None,
+) -> NoiseCorrelationLengthFit:
+    """Fit a scalar distance-kernel length to positive covariance correlations.
+
+    The fit is least squares in log-correlation over off-diagonal sensor pairs:
+    ``log(rho) ~= -d/L`` for ``kernel='exponential'`` and
+    ``log(rho) ~= -0.5 * (d/L)^2`` for ``kernel='gaussian'``.  Non-positive
+    correlations cannot be represented by these kernels, so they are excluded.
+    """
+    if min_correlation < 0.0 or not math.isfinite(min_correlation):
+        raise ValueError("min_correlation must be non-negative and finite")
+    if max_distance_mm is not None:
+        _validate_positive_finite(max_distance_mm, "max_distance_mm")
+
+    corr = covariance_to_correlation_matrix(covariance)
+    distances = sensor_distance_matrix(
+        sensor_positions_mm,
+        distance_metric=distance_metric,
+        center_mm=center_mm,
+    )
+    if distances.shape != corr.shape:
+        raise ValueError("sensor_positions_mm and covariance dimensions must match")
+
+    mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+    mask &= distances > 0.0
+    mask &= corr > min_correlation
+    if max_distance_mm is not None:
+        mask &= distances <= max_distance_mm
+
+    d = distances[mask]
+    rho = corr[mask]
+    if d.size == 0:
+        raise ValueError("no positive off-diagonal correlations are available to fit")
+
+    y = -np.log(rho)
+    if kernel == "exponential":
+        x = d
+        beta = float(np.dot(x, y) / np.dot(x, x))
+        length = 1.0 / beta
+        predicted = np.exp(-d / length)
+    elif kernel == "gaussian":
+        x = d**2
+        beta = float(np.dot(x, y) / np.dot(x, x))
+        length = math.sqrt(0.5 / beta)
+        predicted = np.exp(-0.5 * (d / length) ** 2)
+    else:
+        raise ValueError(f"Unsupported correlation kernel {kernel!r}")
+
+    if length <= 0.0 or not math.isfinite(length):
+        raise ValueError("estimated correlation length is not positive and finite")
+    log_rmse = float(np.sqrt(np.mean((np.log(rho) - np.log(predicted)) ** 2)))
+    return NoiseCorrelationLengthFit(
+        kernel=kernel,
+        length_mm=float(length),
+        log_rmse=log_rmse,
+        n_pairs=int(d.size),
+        min_correlation=float(min_correlation),
+        max_distance_mm=float(np.max(d)),
+    )
+
+
+def _validate_positive_finite(value: float, name: str) -> float:
+    value = float(value)
+    if value <= 0.0 or not math.isfinite(value):
+        raise ValueError(f"{name} must be positive and finite")
+    return value
+
+
+def _coerce_noise_std_vector(noise_std: float | np.ndarray, n_ports: int) -> np.ndarray:
+    std = np.asarray(noise_std, dtype=float)
+    if std.ndim == 0:
+        std = np.full(n_ports, float(std))
+    elif std.shape != (n_ports,):
+        raise ValueError("noise_std must be scalar or have shape (n_ports,)")
+    if np.any(std <= 0.0) or not np.all(np.isfinite(std)):
+        raise ValueError("noise_std values must be positive and finite")
+    return std
+
+
+def _add_series_resistance(
+    impedance: np.ndarray,
+    series_resistance_ohm: float | np.ndarray | None,
+) -> np.ndarray:
+    if series_resistance_ohm is None:
+        return impedance
+
+    n_terminals = impedance.shape[-1]
+    resistance = np.asarray(series_resistance_ohm, dtype=float)
+    if resistance.ndim == 0:
+        resistance = np.full(n_terminals, float(resistance))
+    elif resistance.shape != (n_terminals,):
+        raise ValueError(
+            "series_resistance_ohm must be scalar or have shape (n_terminals,)"
+        )
+    if np.any(resistance < 0.0) or not np.all(np.isfinite(resistance)):
+        raise ValueError("series_resistance_ohm values must be non-negative and finite")
+
+    series_matrix = np.diag(resistance)
+    if impedance.ndim == 2:
+        return impedance + series_matrix
+    return impedance + series_matrix[None, :, :]
+
+
+def _apply_montage_to_impedance(
+    impedance: np.ndarray,
+    montage_matrix: np.ndarray | None,
+) -> np.ndarray:
+    if montage_matrix is None:
+        return impedance
+
+    montage_dtype = np.result_type(
+        impedance.dtype,
+        np.asarray(montage_matrix).dtype,
+        float,
+    )
+    impedance = np.asarray(impedance, dtype=montage_dtype)
+    montage = np.asarray(montage_matrix, dtype=montage_dtype)
+    if montage.ndim != 2:
+        raise ValueError("montage_matrix must be a 2D array")
+    if montage.shape[1] != impedance.shape[-1]:
+        raise ValueError(
+            "montage_matrix columns must match the impedance terminal dimension"
+        )
+    if not np.all(np.isfinite(montage)):
+        raise ValueError("montage_matrix must contain finite entries")
+
+    if impedance.ndim == 2:
+        return montage @ impedance @ np.conjugate(montage).T
+    return np.einsum(
+        "pi,fij,qj->fpq",
+        montage,
+        impedance,
+        np.conjugate(montage),
+        optimize=True,
+    )
+
+
+def _dissipative_impedance_part(impedance: np.ndarray) -> np.ndarray:
+    if impedance.ndim == 2:
+        return 0.5 * (impedance + np.conjugate(impedance).T)
+    return 0.5 * (impedance + np.swapaxes(np.conjugate(impedance), -1, -2))
+
+
+def _as_real_covariance(covariance: np.ndarray) -> np.ndarray:
+    real_covariance = np.real_if_close(covariance, tol=1000)
+    if np.iscomplexobj(real_covariance):
+        imag_scale = float(np.max(np.abs(np.imag(real_covariance))))
+        real_scale = float(np.max(np.abs(np.real(real_covariance))))
+        if imag_scale > 1e-10 * max(real_scale, 1.0):
+            raise ValueError(
+                "Johnson covariance has a non-negligible imaginary part; "
+                "capacity.py expects a real covariance matrix"
+            )
+        real_covariance = np.real(real_covariance)
+
+    real_covariance = np.asarray(real_covariance, dtype=float)
+    return 0.5 * (real_covariance + real_covariance.T)
+
+
+def _frequency_independent_bandwidth(
+    *,
+    bandwidth_hz: float | None,
+    frequency_band_hz: tuple[float, float] | None,
+) -> float:
+    if frequency_band_hz is not None:
+        if bandwidth_hz is not None:
+            raise ValueError("Pass either bandwidth_hz or frequency_band_hz, not both")
+        if len(frequency_band_hz) != 2:
+            raise ValueError("frequency_band_hz must be a (f1, f2) pair")
+        f1, f2 = (float(frequency_band_hz[0]), float(frequency_band_hz[1]))
+        if not (math.isfinite(f1) and math.isfinite(f2)) or f2 <= f1:
+            raise ValueError("frequency_band_hz must satisfy finite f2 > f1")
+        return f2 - f1
+
+    if bandwidth_hz is None:
+        raise ValueError(
+            "bandwidth_hz or frequency_band_hz is required for a "
+            "frequency-independent impedance"
+        )
+    return _validate_positive_finite(bandwidth_hz, "bandwidth_hz")
+
+
+def compute_johnson_noise_covariance(
+    transfer_impedance: np.ndarray,
+    *,
+    bandwidth_hz: float | None = None,
+    frequency_band_hz: tuple[float, float] | None = None,
+    frequencies_hz: np.ndarray | None = None,
+    temperature_k: float = BODY_TEMP_K,
+    series_resistance_ohm: float | np.ndarray | None = None,
+    montage_matrix: np.ndarray | None = None,
+    noise_std: float | np.ndarray | None = None,
+    outputs_per_sensor: int = 1,
+) -> np.ndarray:
+    """Return Johnson-Nyquist output covariance from a passive port impedance.
+
+    Implements the one-sided fluctuation-dissipation relation
+    ``S_v(f) = 4 k_B T Re_H[Z(f)]`` and its band integral.  For a real
+    frequency-independent transfer resistance ``R``, this reduces to
+    ``C_v = 4 k_B T bandwidth_hz R``.
+
+    ``transfer_impedance`` can be either a square frequency-independent matrix
+    or a stack with shape ``(n_frequencies, n_ports, n_ports)``.  Use
+    ``montage_matrix`` for a congruence transform from terminal coordinates to
+    measured channels; use ``series_resistance_ohm`` to add passive contact or
+    front-end series resistance before that transform.
+
+    If ``noise_std`` is supplied, the Johnson matrix is used only for its
+    normalized correlation structure and the diagonal is replaced by
+    ``noise_std ** 2``.  This is useful when a modality already has a trusted
+    scalar detector-noise model but the spatial covariance should come from
+    deterministic unit-current transfer overlaps rather than a distance
+    length-scale.
+    """
+    temperature = _validate_positive_finite(temperature_k, "temperature_k")
+    impedance = np.asarray(transfer_impedance)
+    if impedance.ndim not in (2, 3):
+        raise ValueError(
+            "transfer_impedance must be a square matrix or a frequency stack"
+        )
+    if impedance.shape[-1] != impedance.shape[-2]:
+        raise ValueError("transfer_impedance matrices must be square")
+    if not np.all(np.isfinite(impedance)):
+        raise ValueError("transfer_impedance must contain finite entries")
+
+    if frequencies_hz is None:
+        if impedance.ndim != 2:
+            raise ValueError(
+                "frequencies_hz is required when transfer_impedance is a stack"
+            )
+        bandwidth = _frequency_independent_bandwidth(
+            bandwidth_hz=bandwidth_hz,
+            frequency_band_hz=frequency_band_hz,
+        )
+        impedance = _add_series_resistance(impedance, series_resistance_ohm)
+        impedance = _apply_montage_to_impedance(impedance, montage_matrix)
+        covariance = 4.0 * K_B * temperature * bandwidth * _dissipative_impedance_part(
+            impedance
+        )
+    else:
+        if bandwidth_hz is not None or frequency_band_hz is not None:
+            raise ValueError(
+                "frequency-dependent integration uses frequencies_hz; do not "
+                "also pass bandwidth_hz or frequency_band_hz"
+            )
+        if impedance.ndim != 3:
+            raise ValueError(
+                "transfer_impedance must have shape "
+                "(n_frequencies, n_ports, n_ports) with frequencies_hz"
+            )
+        frequencies = np.asarray(frequencies_hz, dtype=float)
+        if frequencies.ndim != 1 or frequencies.shape[0] != impedance.shape[0]:
+            raise ValueError(
+                "frequencies_hz must be 1D and match transfer_impedance.shape[0]"
+            )
+        if not np.all(np.isfinite(frequencies)):
+            raise ValueError("frequencies_hz must contain finite entries")
+        if np.any(np.diff(frequencies) <= 0.0):
+            raise ValueError("frequencies_hz must be strictly increasing")
+        impedance = _add_series_resistance(impedance, series_resistance_ohm)
+        impedance = _apply_montage_to_impedance(impedance, montage_matrix)
+        spectral_density = (
+            4.0 * K_B * temperature * _dissipative_impedance_part(impedance)
+        )
+        # np.trapezoid (np.trapz was removed in NumPy 2.0)
+        _trapezoid = getattr(np, "trapezoid", None) or np.trapz
+        covariance = _trapezoid(spectral_density, frequencies, axis=0)
+
+    covariance = _as_real_covariance(covariance)
+    diag = np.diag(covariance)
+    if np.any(diag <= 0.0) or not np.all(np.isfinite(diag)):
+        raise ValueError(
+            "Johnson covariance must have positive finite diagonal entries"
+        )
+
+    if noise_std is not None:
+        std = _coerce_noise_std_vector(noise_std, covariance.shape[0])
+        corr = covariance / np.sqrt(np.outer(diag, diag))
+        np.fill_diagonal(corr, 1.0)
+        covariance = corr * np.outer(std, std)
+        covariance = 0.5 * (covariance + covariance.T)
+
+    return expand_sensor_noise_covariance(
+        covariance,
+        outputs_per_sensor=outputs_per_sensor,
+    )
+
+
+def compute_sensor_noise_covariance(
+    sensor_positions_mm: np.ndarray,
+    noise_std: float | np.ndarray,
+    *,
+    correlation_length_mm: float = DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return correlated sensor-noise covariance from geometry and variances.
+
+    ``noise_std`` may be a scalar per-sensor standard deviation or one value per
+    sensor.  Off-diagonal covariance is ``corr(distance) * sigma_i * sigma_j``.
+    """
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("sensor_positions_mm must have shape (n_sensors, 3)")
+    n_sensors = positions.shape[0]
+    std = np.asarray(noise_std, dtype=float)
+    if std.ndim == 0:
+        std = np.full(n_sensors, float(std))
+    elif std.shape != (n_sensors,):
+        raise ValueError("noise_std must be scalar or have shape (n_sensors,)")
+    if np.any(std <= 0.0) or not np.all(np.isfinite(std)):
+        raise ValueError("noise_std values must be positive and finite")
+
+    distances = sensor_distance_matrix(
+        positions,
+        distance_metric=distance_metric,
+        center_mm=center_mm,
+    )
+    corr = distance_correlation_matrix(
+        distances,
+        correlation_length_mm=correlation_length_mm,
+        kernel=kernel,
+    )
+    covariance = corr * np.outer(std, std)
+    return 0.5 * (covariance + covariance.T)
+
+
+def expand_sensor_noise_covariance(
+    sensor_covariance: np.ndarray,
+    *,
+    outputs_per_sensor: int = 1,
+) -> np.ndarray:
+    """Expand a sensor covariance to rows grouped by sensor then output index."""
+    covariance = np.asarray(sensor_covariance, dtype=float)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+        raise ValueError("sensor_covariance must be a square matrix")
+    if outputs_per_sensor <= 0:
+        raise ValueError("outputs_per_sensor must be positive")
+    if outputs_per_sensor == 1:
+        return covariance
+    return np.kron(covariance, np.eye(outputs_per_sensor, dtype=float))
+
+
+def compute_output_noise_covariance(
+    sensor_positions_mm: np.ndarray,
+    noise_std: float | np.ndarray,
+    *,
+    correlation_length_mm: float = DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    outputs_per_sensor: int = 1,
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return output covariance for rows grouped by sensor then output index."""
+    sensor_covariance = compute_sensor_noise_covariance(
+        sensor_positions_mm,
+        noise_std,
+        correlation_length_mm=correlation_length_mm,
+        kernel=kernel,
+        distance_metric=distance_metric,
+        center_mm=center_mm,
+    )
+    return expand_sensor_noise_covariance(
+        sensor_covariance,
+        outputs_per_sensor=outputs_per_sensor,
+    )
+
+
+def compute_modality_output_noise_covariance(
+    modality_name: str,
+    sensor_positions_mm: np.ndarray,
+    *,
+    n_sensors: int | None = None,
+    outputs_per_sensor: int = 1,
+    correlation_length_mm: float = DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    tier: str = "today",
+    bandwidth_hz: float | None = None,
+    frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
+    noise_multiplier: float = 1.0,
+    noise_scale: float = 1.0,
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return correlated output-noise covariance for a registered modality."""
+    if noise_multiplier <= 0.0 or not math.isfinite(noise_multiplier):
+        raise ValueError("noise_multiplier must be positive and finite")
+    if noise_scale <= 0.0 or not math.isfinite(noise_scale):
+        raise ValueError("noise_scale must be positive and finite")
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    sensor_count = n_sensors if n_sensors is not None else positions.shape[0]
+    noise_std = compute_output_noise_std(
+        modality_name,
+        n_sensors=sensor_count,
+        bandwidth_hz=bandwidth_hz,
+        tier=tier,
+        frequency_hz=frequency_hz,
+        voxel_size_mm=voxel_size_mm,
+        tr_s=tr_s,
+        bold_contrast=bold_contrast,
+        bold_snr=bold_snr,
+    )
+    return compute_output_noise_covariance(
+        positions,
+        noise_std * noise_multiplier * noise_scale,
+        correlation_length_mm=correlation_length_mm,
+        kernel=kernel,
+        distance_metric=distance_metric,
+        outputs_per_sensor=outputs_per_sensor,
+        center_mm=center_mm,
+    )
+
+
 NOISE_MODELS = {
     "eeg_openmeeg": NoiseModel(
         canonical_name="eeg_openmeeg",
         noise_source="Johnson noise at the electrode-contact / front-end",
         measurement_units="V",
         reference_sensor_count=256,
-        sensor_count_noise_exponent=0.5,
+        sensor_count_noise_exponent=0.25, # because resistance scales with square root of area
         reference_bandwidth_hz=100.0,
         today_best_noise=_EEG_NOISE_TODAY,
         physical_floor_noise=_EEG_NOISE_TODAY,  # Johnson IS fundamental
@@ -362,7 +905,7 @@ NOISE_MODELS = {
         noise_source="SQUID flux noise mapped to field noise",
         measurement_units="T",
         reference_sensor_count=1000,
-        sensor_count_noise_exponent=1.0,
+        sensor_count_noise_exponent=0.0,
         reference_bandwidth_hz=100.0,
         today_best_noise=_MEG_SQUID_NOISE_TODAY,
         physical_floor_noise=_MEG_SQUID_NOISE_FUND,
@@ -374,8 +917,9 @@ NOISE_MODELS = {
                               "field amplitudes are somewhat lower, but 100 fT is a good midpoint.",
         reference_total_snr=100.0,
         notes=(
-            "Fixed helmet coverage, loop area ∝ 1/N.  Area-independent flux "
-            "noise → field noise ∝ N."
+            "Sensor-count sweeps hold the quoted per-channel field sensitivity "
+            "fixed.  This represents adding comparable SQUID channels rather "
+            "than splitting a fixed pickup area into smaller loops."
         ),
     ),
     "cw_fnirs": NoiseModel(

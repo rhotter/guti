@@ -113,6 +113,69 @@ def _noise_normalized_spectrum(
     )
 
 
+def noise_normalized_singular_values(
+    channel_or_spectrum: np.ndarray,
+    *,
+    noise: float | None = None,
+    output_noise_covariance: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return singular values after output-noise whitening.
+
+    With scalar ``noise`` this is simply ``s / noise``.  With a full output
+    covariance, ``channel_or_spectrum`` must be the output-by-input channel
+    matrix and the result is the spectrum of ``K_N^{-1/2} H``.
+    """
+    return _noise_normalized_spectrum(
+        channel_or_spectrum,
+        noise=noise,
+        output_noise_covariance=output_noise_covariance,
+    )
+
+
+def sensor_noise_normalized_singular_values(
+    channel: np.ndarray,
+    *,
+    sensor_noise_covariance: np.ndarray,
+    outputs_per_sensor: int = 1,
+) -> np.ndarray:
+    """Return spectrum of ``K_N^{-1/2} H`` for separable sensor noise.
+
+    The channel rows must be grouped by sensor, then by output index within
+    each sensor.  This is equivalent to a full output covariance of
+    ``kron(sensor_noise_covariance, I_outputs_per_sensor)`` without explicitly
+    forming that larger matrix.
+    """
+    matrix = _as_channel_matrix(channel)
+    covariance = np.asarray(sensor_noise_covariance, dtype=float)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+        raise ValueError("sensor_noise_covariance must be a square matrix")
+    if outputs_per_sensor <= 0:
+        raise ValueError("outputs_per_sensor must be positive")
+    n_sensors = covariance.shape[0]
+    if matrix.shape[0] != n_sensors * outputs_per_sensor:
+        raise ValueError(
+            "channel output rows must equal "
+            "sensor_noise_covariance.shape[0] * outputs_per_sensor"
+        )
+
+    covariance = 0.5 * (covariance + covariance.T)
+    noise_eigenvalues, noise_eigenvectors = np.linalg.eigh(covariance)
+    if noise_eigenvalues[0] <= 0.0:
+        raise ValueError("sensor_noise_covariance must be positive definite")
+    blocks = matrix.reshape(n_sensors, outputs_per_sensor, matrix.shape[1])
+    rotated = np.einsum("ji,jok->iok", noise_eigenvectors, blocks, optimize=True)
+    whitened = rotated / np.sqrt(noise_eigenvalues)[:, None, None]
+    whitened_matrix = whitened.reshape(matrix.shape)
+    m, n = whitened_matrix.shape
+    if m <= n:
+        gram = whitened_matrix @ whitened_matrix.T
+    else:
+        gram = whitened_matrix.T @ whitened_matrix
+    gram = 0.5 * (gram + gram.T)
+    eigenvalues = np.linalg.eigvalsh(gram)
+    return np.sqrt(np.clip(eigenvalues[::-1], 0.0, None))
+
+
 def total_input_power_from_average_output_power(
     s: np.ndarray,
     *,
@@ -289,6 +352,8 @@ def water_filling_power_allocation(
     """Allocate input power across independent SVD modes by water filling."""
     if total_input_power < 0:
         raise ValueError("total_input_power must be non-negative")
+    if not np.isfinite(total_input_power):
+        raise ValueError("total_input_power must be finite")
 
     gains = _noise_normalized_spectrum(
         s,
@@ -300,21 +365,46 @@ def water_filling_power_allocation(
     if total_input_power == 0 or not np.any(active):
         return allocation
 
-    floors = 1.0 / (gains[active] ** 2)
-    lo = float(np.min(floors))
-    hi = float(np.max(floors) + total_input_power)
+    active_indices = np.flatnonzero(active)
+    active_gains = gains[active_indices]
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        floors = 1.0 / (active_gains**2)
 
-    # Monotone solve for mu where sum(max(0, mu - floor_i)) = P_total.
-    for _ in range(100):
-        mu = 0.5 * (lo + hi)
-        power = float(np.sum(np.maximum(0.0, mu - floors)))
-        if power < total_input_power:
-            lo = mu
+    finite = np.isfinite(floors)
+    if not np.any(finite):
+        allocation[int(active_indices[np.argmax(active_gains)])] = total_input_power
+        return allocation
+
+    finite_indices = active_indices[finite]
+    finite_floors = floors[finite]
+    order = np.argsort(finite_floors)
+    sorted_floors = finite_floors[order]
+    prefix = np.cumsum(sorted_floors, dtype=float)
+
+    active_count = len(sorted_floors)
+    for k in range(1, len(sorted_floors) + 1):
+        water_level = (total_input_power + prefix[k - 1]) / k
+        if k == len(sorted_floors) or water_level <= sorted_floors[k]:
+            active_count = k
+            break
+
+    sorted_allocation = np.zeros_like(sorted_floors)
+    if active_count == 1:
+        sorted_allocation[0] = total_input_power
+    else:
+        active_floors = sorted_floors[:active_count]
+        mean_floor = prefix[active_count - 1] / active_count
+        sorted_allocation[:active_count] = np.maximum(
+            0.0,
+            total_input_power / active_count + (mean_floor - active_floors),
+        )
+        allocated = float(np.sum(sorted_allocation[:active_count]))
+        if allocated > 0.0 and np.isfinite(allocated):
+            sorted_allocation[:active_count] *= total_input_power / allocated
         else:
-            hi = mu
+            sorted_allocation[0] = total_input_power
 
-    mu = hi
-    allocation[active] = np.maximum(0.0, mu - floors)
+    allocation[finite_indices[order]] = sorted_allocation
     return allocation
 
 

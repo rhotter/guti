@@ -19,7 +19,8 @@ def save_svd(
     modality_name: str,
     params: Optional[Parameters] = None,
     default_run: bool = False,
-    extra: Optional[Dict] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    extra_arrays: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Save a bitrate result and optional parameters to a file.
@@ -52,6 +53,8 @@ def save_svd(
         save_dict["singular_values"] = s
     if extra is not None:
         save_dict.update(extra)
+    if extra_arrays is not None:
+        save_dict.update(extra_arrays)
 
     if default_run:
         # Save as default configuration in main results directory
