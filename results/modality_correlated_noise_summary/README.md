@@ -2,13 +2,15 @@
 
 Rows select the largest available voxel count, then the largest available
 sensor count within that voxel count. Bitrate and capacity are recomputed
-from saved SVD spectra, except EEG, which uses the merged empirically
-anchored lead-field calibration. Neural rows use the output temporal
-power-spectrum workflow; EEG uses beta=1.4 over 1--100 Hz by default.
+from saved SVD spectra. EEG uses the merged empirically anchored lead-field
+calibration when the cached lead field is available; otherwise it falls
+back to the saved Johnson covariance spectrum row. Neural rows use the
+output temporal power-spectrum workflow; EEG uses beta=1.4 over 1--100 Hz
+by default.
 
 | Modality | BW Hz | Freq spectrum model | Covariance computation | Output unit | Output amp | Output noise | SNR | Bit-rate | Capacity |
 | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| EEG OpenMEEG | 100 | power law beta=1.4, 1-100 Hz | Layered spherical Johnson impedance covariance | uV | 5 | 0.156 | 32.1 | 49.8k | 55.4k |
+| EEG | 100 | power law beta=1.4, 1-100 Hz | Layered spherical Johnson impedance covariance | uV | 5 | 0.156 | 32.1 | 19.4k | 67.9k |
 | MEG OPM | 100 | power law beta=1.7, 1-100 Hz | EEG spherical Johnson correlation + OPM scalar diagonal | fT | 100 | 50 | 2 | 10.3k | 60.9k |
 | MEG SQUID | 100 | power law beta=1.7, 1-100 Hz | EEG spherical Johnson correlation + SQUID scalar diagonal | fT | 100 | 10 | 10 | 17k | 63k |
 | fNIRS CW | 10 | none; scalar 10 Hz band | Scalar IID diagonal from photon shot noise | 1e-3 rel. | 1 | 0.0619 | 16.2 | 49.3k | 61.3k |
@@ -16,7 +18,7 @@ power-spectrum workflow; EEG uses beta=1.4 over 1--100 Hz by default.
 
 ## Selection Notes
 
-- EEG uses the empirically anchored EEG calibration from the merged EEG fix, with output power-law beta=1.4 over 1--100 Hz; output amplitude reports the typical EEG signal amplitude, and the saved Johnson covariance row supplies the detector-noise scale.
+- EEG uses the selected saved Johnson covariance spectrum row because the empirical lead-field calibration cache is not available in this checkout; output amplitude reports the typical EEG signal amplitude, and the saved Johnson covariance row supplies the detector-noise scale.
 - MEG OPM and MEG SQUID use the same EEG layered spherical Johnson covariance correlation, with each modality's scalar field-noise diagonal. MEG uses the default neural output power-law beta=1.7 over 1--100 Hz.
 - fNIRS does not currently have a saved spatial covariance sweep, so its row uses the scalar detector-noise spectrum.
 - US uses the previous 50 kHz SVD spectrum, 2 MHz RBC output/noise, `1 Hz` bitrate bandwidth, and lambda-cubed spatial scaling.
@@ -40,7 +42,7 @@ over the row bandwidth; each frequency bin uses
 
 | Modality | Output amplitude basis | Output noise basis |
 | --- | --- | --- |
-| EEG OpenMEEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise, and bitrate/capacity use that same SNR through the anchored EEG mode-gain calculation with output power-law beta=1.4 over 1--100 Hz. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |
+| EEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise. When the cached empirical lead field is available, bitrate/capacity use that SNR through the anchored EEG mode-gain calculation with output power-law beta=1.4 over 1--100 Hz; otherwise they use the selected saved Johnson covariance spectrum row. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |
 | MEG OPM | `100 fT` typical evoked MEG field amplitude | `5 fT/sqrt(Hz)` OPM field noise integrated over `B=100 Hz`; Johnson covariance correlation reused from EEG; diagonal set by the MEG scalar detector noise. |
 | MEG SQUID | `100 fT` typical evoked MEG field amplitude | `1 fT/sqrt(Hz)` SQUID field noise integrated over `B=100 Hz`; Johnson covariance correlation reused from EEG; diagonal set by the MEG scalar detector noise. |
 | fNIRS CW | `0.001` relative-intensity hemodynamic response (`1000 ppm`) | Photon shot noise from `P=5 mW`, `lambda=830 nm`, `OD=4`, divided over channels and bandwidth. |
@@ -106,19 +108,22 @@ $$
 Here `Z` is built from `guti/modalities/eeg/scalp_resistance.py`,
 `B_J=100 Hz`, electrode area is `1 cm^2`, and `lmax=2000`.
 
-For bitrate/capacity, EEG uses the merged empirically anchored
-calibration instead of trusting the absolute OpenMEEG/BEM gain. The
-cached lead-field shape is cleaned with a boundary margin and scaled so
-a reference source has the displayed single-channel amplitude SNR:
+When the cached lead field is available, EEG uses the merged
+empirically anchored calibration instead of trusting the absolute
+OpenMEEG/BEM gain. The cached lead-field shape is cleaned with a
+boundary margin and scaled so a reference source has the displayed
+single-channel amplitude SNR:
 
 $$
 g_i = \mathrm{SNR}_{ref}\frac{\sigma_i(A_{clean})}{p_{ref}},
 \qquad \mathrm{SNR}_{ref}=A_{out}/\sigma_{out}.
 $$
 
-The table's EEG bitrate is the equal-power sum over `g_i`; EEG capacity
-water-fills the same anchored mode gains. In this summary those gains
-are evaluated through the output temporal-spectrum workflow with:
+In anchored mode, the table's EEG bitrate is the equal-power sum over
+`g_i`; EEG capacity water-fills the same anchored mode gains. If the
+cache is unavailable, the generated row falls back to the selected
+saved Johnson covariance spectrum's bitrate/capacity. In this summary
+the EEG frequency weighting is:
 
 $$
 S_{out}(f) \propto f^{-1.4},\qquad 1\le f\le 100\,\mathrm{Hz}.

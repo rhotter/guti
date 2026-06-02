@@ -1,12 +1,17 @@
 # Grand unified theory of imaging
 
-### Channel Capacities
+<!-- BEGIN GENERATED MODALITY CAPACITY SUMMARY -->
+### Capacity Summary
 
-![Birate](./results/bitrate.png)
+| Modality | Sample rate (Hz) | Freq spectrum model | Covariance computation | Output amp | Output noise | SNR | Bit-rate (bits/s) | Capacity / sample (bits) | Total capacity (bits/s) |
+| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| US 2 MHz RBC | 1 | none; 1 Hz brain-state band | Scalar IID diagonal from receiver pressure noise | 0.529 mPa | 5.22 mPa | 0.101 | 64.3M | 219M | 219M |
+| EEG | 100 | power law beta=1.4, 1-100 Hz | Layered spherical Johnson impedance covariance | 5 uV | 0.156 uV | 32.1 | 19.4k | 679 | 67.9k |
+| MEG SQUID | 100 | power law beta=1.7, 1-100 Hz | EEG spherical Johnson correlation + SQUID scalar diagonal | 100 fT | 10 fT | 10 | 17k | 630 | 63k |
+| fNIRS CW | 10 | none; scalar 10 Hz band | Scalar IID diagonal from photon shot noise | 0.001 Delta I / I | 6.188e-05 Delta I / I | 16.2 | 49.3k | 6.13k | 61.3k |
+| MEG OPM | 100 | power law beta=1.7, 1-100 Hz | EEG spherical Johnson correlation + OPM scalar diagonal | 100 fT | 50 fT | 2 | 10.3k | 609 | 60.9k |
 
-### Spatial Channel Capacities
-
-![Spatial Channel Capacities](./results/spatial_channel_capacity.png?v=2)
+<!-- END GENERATED MODALITY CAPACITY SUMMARY -->
 
 ### SVD Spectrum
 
