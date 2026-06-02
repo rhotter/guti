@@ -25,12 +25,12 @@ print()
 # ============================================================================
 print("Running LOCAL implementation...")
 
-from guti.modalities.us.utils import (
+from guti.modalities._legacy.us_jwave.utils import (
     create_medium,
     create_sources_real,
     create_receivers_real,
-    simulate_free_field_propagation
 )
+from guti.modalities.us.utils import simulate_free_field_propagation
 
 # Create medium (for domain parameters)
 domain, medium, time_axis_jwave, brain_mask, skull_mask, scalp_mask = create_medium(

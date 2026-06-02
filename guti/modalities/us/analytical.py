@@ -14,7 +14,8 @@ import os
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from guti.data_utils import save_svd
-from guti.modalities.us.utils import create_medium, create_sources_real, create_receivers_real, simulate_free_field_propagation, plot_medium
+from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
+from guti.modalities.us.utils import simulate_free_field_propagation
 from guti.noise_models import (
     DEFAULT_NOISE_CORRELATION_KERNEL,
     DEFAULT_NOISE_CORRELATION_LENGTH_MM,
@@ -28,7 +29,26 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 torch.set_float32_matmul_precision('high')  # allow TF32 on Ampere+
 torch.backends.cuda.matmul.allow_tf32 = True
-cu.preferred_linalg_library(os.environ.get("GUTI_TORCH_LINALG_BACKEND", "magma"))
+
+
+def set_torch_linalg_backend(backend: str) -> str:
+    """Set the preferred CUDA linalg backend if this PyTorch build supports it."""
+    if backend == "default":
+        cu.preferred_linalg_library(None)
+        return "default"
+    try:
+        cu.preferred_linalg_library(backend)
+        return backend
+    except RuntimeError as exc:
+        print(
+            f"WARNING: could not set torch CUDA linalg backend to {backend!r}: {exc}. "
+            "Using default backend."
+        )
+        try:
+            cu.preferred_linalg_library(None)
+        except RuntimeError:
+            pass
+        return "default"
 
 
 def build_source_signal(
@@ -66,6 +86,26 @@ def build_source_signal(
     signal = np.zeros_like(carrier)
     signal[:active_samples] = carrier[:active_samples] * envelope
     return signal
+
+
+def create_free_field_sources_real(n_sources: int) -> np.ndarray:
+    """Return approximately ``n_sources`` brain-grid positions in meters."""
+    grid_spacing_mm = ((2.0 / 3.0) * np.pi * BRAIN_RADIUS**3 / n_sources) ** (
+        1.0 / 3.0
+    )
+    return get_grid_positions(grid_spacing_mm=grid_spacing_mm) * 1e-3
+
+
+def create_free_field_receivers_real(n_sensors: int) -> np.ndarray:
+    """Return ultrasound receiver positions in meters."""
+    return get_sensor_positions(n_sensors=n_sensors, offset=8.0) * 1e-3
+
+
+def free_field_voxel_size(center_frequency: float) -> np.ndarray:
+    min_speed_of_sound = 1500.0
+    points_per_wavelength = 24
+    dx_m = min_speed_of_sound / (points_per_wavelength * center_frequency)
+    return np.array([dx_m, dx_m, dx_m])
 
 
 
@@ -269,21 +309,15 @@ svd_device = args.svd_device
 center_frequency = args.center_frequency
 bitrate_method = args.bitrate_method
 accumulate_on_cpu = args.accumulate_on_cpu
-if args.linalg_backend == "default":
-    cu.preferred_linalg_library(None)
-else:
-    cu.preferred_linalg_library(args.linalg_backend)
+active_linalg_backend = set_torch_linalg_backend(args.linalg_backend)
 
 print(f"n_sources: {n_sources}, n_sensors: {n_sensors}, temporal_sampling: {temporal_sampling}, sensor_batch_size: {sensor_batch_size}")
 print(f"matrix_normalization: {'disabled' if args.disable_matrix_normalization else 'enabled'}")
-print(f"torch CUDA linalg backend: {args.linalg_backend}")
-
-# We create a jwave medium object. This is mostly useful for non-free field simulations, but we use it here for convenience/consistency.
-domain, medium_original, time_axis, brain_mask, skull_mask, scalp_mask = create_medium(central_frequency=center_frequency, pad=30)
+print(f"torch CUDA linalg backend: {active_linalg_backend}")
 
 # Create the source and receiver positions in real space (meters).
-source_positions = create_sources_real(domain, time_axis, freq_Hz=center_frequency, n_sources=n_sources, inside=True, pad=30)
-sensor_positions = create_receivers_real(domain, time_axis, freq_Hz=center_frequency, n_sensors=n_sensors, pad=30)
+source_positions = create_free_field_sources_real(n_sources)
+sensor_positions = create_free_field_receivers_real(n_sensors)
 
 n_sources = source_positions.shape[0]
 
@@ -308,7 +342,7 @@ source_signals = source_signal * source_amplitude_scale
 source_signals = np.tile(source_signals, (n_sources, 1))
 
 nt = math.ceil(time_axis.shape[0] / temporal_sampling)
-voxel_size = np.array(domain.dx)
+voxel_size = free_field_voxel_size(center_frequency)
 effective_time_resolution = time_step * temporal_sampling
 if args.bitrate_time_resolution is not None:
     effective_time_resolution = args.bitrate_time_resolution

@@ -16,9 +16,7 @@ remains the heavy multi-GPU runner for large sweeps — this class is the
 in-process, single-machine entry point sharing the same physics and the same
 shared SLQ estimator.
 
-Requires torch (and jax, pulled in by ``us.utils``); imported lazily so the
-class can be inspected without them. The propagation build has not been
-executed in this environment (no torch/jax/GPU).
+Requires torch; imported lazily so the class can be inspected without it.
 """
 
 import numpy as np
@@ -85,8 +83,10 @@ class USModality(ImagingModality):
         )
 
     def setup_geometry(self) -> None:
-        self.sources = get_grid_positions(self.params.source_spacing_mm)
-        self.sensors = get_sensor_positions(self.params.num_sensors)
+        # Match the production free-field pipeline: source/sensor helpers return
+        # mm, while propagation physics is in meters.
+        self.sources = get_grid_positions(self.params.source_spacing_mm) * 1e-3
+        self.sensors = get_sensor_positions(self.params.num_sensors, offset=8.0) * 1e-3
         self.params.num_brain_grid_points = len(self.sources)
 
     def forward_operator(self):
@@ -99,7 +99,7 @@ class USModality(ImagingModality):
 
         time_step = 1e-1 / center_freq
         time_axis = np.arange(0, _TIME_DURATION_S, time_step)
-        nt = time_axis.shape[0] // ts + 1  # matches Modal row accounting
+        nt = len(range(0, time_axis.shape[0], ts))
 
         n_sources = len(self.sources)
         source_signals = np.tile(
@@ -118,7 +118,7 @@ class USModality(ImagingModality):
             (min(s + _RECEIVER_BATCH, n_recv) - s) * nt for s in starts
         ]
 
-        self.params.time_resolution = time_step
+        self.params.time_resolution = time_step * ts
 
         def block_builder(i, _starts=starts):
             s = _starts[i]

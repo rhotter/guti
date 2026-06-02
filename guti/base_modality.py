@@ -44,11 +44,15 @@ class ImagingModality(ABC):
         ----------
         params : Parameters, optional
             Parameters object. If None, uses defaults from _get_default_modality_params().
+            When provided, non-None fields override the modality defaults.
         """
-        # Use provided params or defaults
-        self.params = (
-            params if params is not None else self._get_default_modality_params()
-        )
+        defaults = self._get_default_modality_params()
+        if params is None:
+            self.params = defaults
+        else:
+            merged = defaults.to_dict()
+            merged.update(params.to_dict())
+            self.params = Parameters.from_dict(merged)
 
     @property
     @abstractmethod

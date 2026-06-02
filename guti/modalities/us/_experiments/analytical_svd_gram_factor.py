@@ -14,7 +14,13 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from guti.data_utils import save_svd
-from guti.modalities.us.utils import create_medium, create_sources_real, create_receivers_real, simulate_free_field_propagation, plot_medium
+from guti.modalities._legacy.us_jwave.utils import (
+    create_medium,
+    create_sources_real,
+    create_receivers_real,
+    plot_medium,
+)
+from guti.modalities.us.utils import simulate_free_field_propagation
 import time
 
 import torch, torch.backends.cuda as cu

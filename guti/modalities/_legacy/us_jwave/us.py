@@ -34,7 +34,13 @@ from scipy.sparse.linalg import LinearOperator, svds
 
 from guti.capacity import get_bitrate, total_input_power_from_average_output_power
 from guti.noise_models import compute_average_output_power, compute_output_noise_std
-from guti.modalities.us.utils import create_medium, create_sources, create_receivers, plot_medium, find_arrival_time
+from guti.modalities._legacy.us_jwave.utils import (
+    create_medium,
+    create_sources,
+    create_receivers,
+    plot_medium,
+    find_arrival_time,
+)
 import scipy.sparse
 
 
