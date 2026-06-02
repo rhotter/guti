@@ -41,7 +41,18 @@ def normalize_singular_values(s: np.ndarray, params: Parameters, method: Literal
             Noutput = getattr(params, "num_sensors", None)
             if Noutput is None:
                 raise ValueError("Cannot normalize: missing num_sensors in parameters.")
-        return s / np.sqrt(Ninput * Noutput)
+        # Forward models stored as voxel-integrated transfer functions
+        # (J = density * voxel_volume, units mm^-1) have singular values that
+        # scale as sqrt(voxel_volume) under grid refinement. Since the number of
+        # grid points Ninput ~ V_brain / voxel_volume, normalizing by sqrt(Ninput)
+        # would leave a residual factor ~ voxel_volume ~ grid^3, so spectra would
+        # not overlap across a grid sweep. Use the quadrature weight
+        # sqrt(voxel_volume) on the input side instead: it is grid-convergent and
+        # constant across non-grid sweeps (where it reduces to the old behaviour
+        # up to a fixed constant).
+        voxel_volume_mm3 = getattr(params, "voxel_volume_mm3", None)
+        input_scale = voxel_volume_mm3 if voxel_volume_mm3 is not None else Ninput
+        return s / np.sqrt(input_scale * Noutput)
     else:
         raise ValueError(f"Invalid normalization method: {method}")
 

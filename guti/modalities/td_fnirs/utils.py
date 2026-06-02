@@ -224,7 +224,9 @@ def get_valid_source_detector_pairs(
     d_mat = torch.norm(
         sensor_positions_mm[:, None, :] - sensor_positions_mm[None, :, :], dim=2
     )
-    mask = (d_mat <= max_dist) & (d_mat > 0)
+    # Count each reciprocal S-D pair once (matches the CW fNIRS convention).
+    # Including both (i, j) and (j, i) would double-count channels.
+    mask = torch.triu((d_mat <= max_dist) & (d_mat > 0), diagonal=1)
     src_idx, det_idx = torch.nonzero(mask, as_tuple=True)
 
     return (
