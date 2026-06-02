@@ -147,6 +147,48 @@ def _infer_n_sources_for_bitrate(modality, params, s_capacity):
     return int(len(s_capacity))
 
 
+def _optional_np_scalar(data, name):
+    if name not in data.files:
+        return None
+    value = data[name]
+    try:
+        value = value.item()
+    except ValueError:
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _load_saved_noise_normalized_singular_values(modality, hash_key):
+    path = os.path.join("results", "variants", modality, f"{hash_key}.npz")
+    if not os.path.exists(path):
+        return None, {}
+    data = np.load(path, allow_pickle=True)
+    if "noise_normalized_singular_values" not in data.files:
+        return None, {}
+    metadata = {
+        "noise_covariance_model": _optional_np_scalar(data, "noise_covariance_model"),
+        "noise_detector_std_t": _optional_np_scalar(data, "noise_detector_std_t"),
+        "noise_absolute_scale": _optional_np_scalar(data, "noise_absolute_scale"),
+        "johnson_voxel_resolution_mm": _optional_np_scalar(
+            data,
+            "johnson_voxel_resolution_mm",
+        ),
+        "johnson_solver": _optional_np_scalar(data, "johnson_solver"),
+        "johnson_sensor_components": _optional_np_scalar(
+            data,
+            "johnson_sensor_components",
+        ),
+        "johnson_n_voxels": _optional_np_scalar(data, "johnson_n_voxels"),
+        "johnson_raw_body_noise_median_T_per_sqrtHz": _optional_np_scalar(
+            data,
+            "johnson_raw_body_noise_median_T_per_sqrtHz",
+        ),
+    }
+    return np.asarray(data["noise_normalized_singular_values"], dtype=float), metadata
+
+
 def compute_bitrate(
     s,
     modality,
@@ -156,6 +198,9 @@ def compute_bitrate(
     time_resolution=0.01,
     params=None,
     noise_mode=DEFAULT_BITRATE_MODE,
+    s_noise_normalized=None,
+    noise_normalized_detector_std=None,
+    noise_absolute_scale=False,
 ):
     model = get_noise_model(modality)
 
@@ -230,6 +275,29 @@ def compute_bitrate(
     if is_hemodynamic(modality):
         tr_for_bitrate = kwargs["tr_s"] or time_resolution
 
+    if s_noise_normalized is not None:
+        capacity_scale = capacity_forward_gain_scale(
+            modality,
+            params=params,
+            voxel_size_mm=kwargs["voxel_size_mm"],
+        )
+        noise_scale = 1.0
+        if not noise_absolute_scale and noise_normalized_detector_std is not None:
+            noise_scale = float(noise_normalized_detector_std) / detector_noise
+        return float(
+            get_modality_bitrate(
+                np.asarray(s_noise_normalized, dtype=float)
+                * capacity_scale
+                * noise_scale,
+                modality,
+                n_sources=n_sources,
+                total_input_power=total_input_power,
+                noise=1.0,
+                time_resolution=tr_for_bitrate,
+                hrf_type=getattr(params, "hrf_type", None),
+            )
+        )
+
     return float(
         get_modality_bitrate(
             s_capacity,
@@ -260,6 +328,13 @@ def export_modality(modality, label):
         params = v["params"]
         n_sensors = params.num_sensors
         freq = getattr(params, "frequency_hz", None)
+        s_noise_normalized, noise_metadata = _load_saved_noise_normalized_singular_values(
+            modality,
+            hash_key,
+        )
+        noise_model_type = (
+            "spatial_covariance" if s_noise_normalized is not None else "scalar_iid"
+        )
         capacity_sv_scale = capacity_forward_gain_scale(
             modality,
             params=params,
@@ -278,6 +353,9 @@ def export_modality(modality, label):
             br_physical_today = compute_bitrate(
                 s, modality, n_sensors, freq, "today", tr, params,
                 noise_mode="physical_detector_floor",
+                s_noise_normalized=s_noise_normalized,
+                noise_normalized_detector_std=noise_metadata.get("noise_detector_std_t"),
+                noise_absolute_scale=bool(noise_metadata.get("noise_absolute_scale")),
             )
         except Exception as e:
             br_physical_today = None
@@ -287,6 +365,9 @@ def export_modality(modality, label):
             br_physical_fund = compute_bitrate(
                 s, modality, n_sensors, freq, "fundamental", tr, params,
                 noise_mode="physical_detector_floor",
+                s_noise_normalized=s_noise_normalized,
+                noise_normalized_detector_std=noise_metadata.get("noise_detector_std_t"),
+                noise_absolute_scale=bool(noise_metadata.get("noise_absolute_scale")),
             )
         except Exception as e:
             br_physical_fund = None
@@ -363,6 +444,12 @@ def export_modality(modality, label):
             "bitrate_empirical_fundamental": br_emp_fund,
             "bitrate_anchored_today": br_anchored_today,
             "bitrate_anchored_fundamental": br_anchored_fund,
+            "noise_model_type": noise_model_type,
+            **{
+                key: value
+                for key, value in noise_metadata.items()
+                if value is not None
+            },
             "snr_empirical_today": snr_emp,
         }
         records.append(rec)

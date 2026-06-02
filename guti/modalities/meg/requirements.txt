@@ -1,3 +1,4 @@
 # MEG modality (analytic Sarvas forward model)
 numpy
+scipy              # finite-volume Johnson-noise scalar-potential solve
 matplotlib        # MEG.ipynb exploration notebook only
