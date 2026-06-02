@@ -47,6 +47,19 @@ interface ViewState {
   elevationDeg: number;
 }
 
+type SampleMode = "volume" | "shell";
+
+interface FieldSample {
+  x: number;
+  y: number;
+  z: number;
+  vx: number;
+  vy: number;
+  vz: number;
+  amp: number;
+  signed: number;
+}
+
 const panelStyle: CSSProperties = {
   border: "1px solid #e4e4e0",
   borderRadius: 8,
@@ -88,12 +101,8 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function signedColor(value: number, alpha = 1) {
-  const t = Math.min(1, Math.abs(value));
-  if (value >= 0) {
-    return `rgba(181, 58, 42, ${0.22 + alpha * (0.3 + 0.48 * t)})`;
-  }
-  return `rgba(30, 101, 136, ${0.22 + alpha * (0.3 + 0.48 * t)})`;
+function signedRgb(value: number): [number, number, number] {
+  return value >= 0 ? [181, 58, 42] : [30, 101, 136];
 }
 
 function project3d(
@@ -124,29 +133,7 @@ function project3d(
   };
 }
 
-function shellLine(
-  points: Array<{ x: number; y: number; z: number }>,
-  radiusMm: number,
-  azimuthDeg: number,
-  elevationDeg: number,
-  size: number,
-  margin: number,
-) {
-  return points
-    .map((point) => {
-      const projected = project3d(point, radiusMm, azimuthDeg, elevationDeg, size, margin);
-      return `${projected.x.toFixed(1)},${projected.y.toFixed(1)}`;
-    })
-    .join(" ");
-}
-
-function hemisphereGuides(
-  radiusMm: number,
-  azimuthDeg: number,
-  elevationDeg: number,
-  size: number,
-  margin: number,
-) {
+function hemisphereGuideLines(radiusMm: number) {
   const angles = Array.from({ length: 73 }, (_, idx) => (idx / 72) * Math.PI * 2);
   const base = angles.map((theta) => ({
     x: radiusMm * Math.cos(theta),
@@ -170,9 +157,144 @@ function hemisphereGuides(
     });
   });
 
-  return [base, ...latitude, ...meridians].map((line) =>
-    shellLine(line, radiusMm, azimuthDeg, elevationDeg, size, margin),
+  return [base, ...latitude, ...meridians];
+}
+
+function volumeFieldPoints(radiusMm: number) {
+  const points: Array<{ x: number; y: number; z: number }> = [];
+  const xyCount = 25;
+  const zLevels = [0.04, 0.13, 0.22, 0.31, 0.4, 0.49, 0.58, 0.67, 0.76, 0.85, 0.93];
+
+  for (const zFrac of zLevels) {
+    const z = radiusMm * zFrac;
+    const sliceRadius = Math.sqrt(Math.max(0, radiusMm * radiusMm - z * z));
+    for (let ix = 0; ix < xyCount; ix += 1) {
+      for (let iy = 0; iy < xyCount; iy += 1) {
+        const x = radiusMm * (-0.92 + (1.84 * ix) / (xyCount - 1));
+        const y = radiusMm * (-0.92 + (1.84 * iy) / (xyCount - 1));
+        if (x * x + y * y <= sliceRadius * sliceRadius) {
+          points.push({ x, y, z });
+        }
+      }
+    }
+  }
+
+  return points;
+}
+
+function shellFieldPoints(radiusMm: number) {
+  const points: Array<{ x: number; y: number; z: number }> = [];
+  const rings = [
+    { zFrac: 0.03, count: 96 },
+    { zFrac: 0.12, count: 96 },
+    { zFrac: 0.21, count: 92 },
+    { zFrac: 0.3, count: 88 },
+    { zFrac: 0.39, count: 84 },
+    { zFrac: 0.48, count: 76 },
+    { zFrac: 0.57, count: 68 },
+    { zFrac: 0.66, count: 58 },
+    { zFrac: 0.75, count: 48 },
+    { zFrac: 0.84, count: 36 },
+    { zFrac: 0.92, count: 24 },
+    { zFrac: 0.97, count: 12 },
+  ];
+
+  for (const ring of rings) {
+    const z = radiusMm * ring.zFrac;
+    const r = Math.sqrt(Math.max(0, radiusMm * radiusMm - z * z));
+    for (let idx = 0; idx < ring.count; idx += 1) {
+      const theta = (idx / ring.count) * Math.PI * 2;
+      points.push({
+        x: r * Math.cos(theta),
+        y: r * Math.sin(theta),
+        z,
+      });
+    }
+  }
+
+  return points;
+}
+
+function interpolateNodeVector(
+  point: { x: number; y: number; z: number },
+  nodes: MegNode[],
+  vectorKeys: [keyof MegNode, keyof MegNode, keyof MegNode],
+) {
+  const [xKey, yKey, zKey] = vectorKeys;
+  let weightSum = 0;
+  let vx = 0;
+  let vy = 0;
+  let vz = 0;
+
+  for (const node of nodes) {
+    const dx = point.x - node.x;
+    const dy = point.y - node.y;
+    const dz = point.z - node.z;
+    const dist2 = dx * dx + dy * dy + dz * dz + 64;
+    const weight = 1 / Math.pow(dist2, 1.65);
+    weightSum += weight;
+    vx += weight * Number(node[xKey] ?? 0);
+    vy += weight * Number(node[yKey] ?? 0);
+    vz += weight * Number(node[zKey] ?? 0);
+  }
+
+  return { vx: vx / weightSum, vy: vy / weightSum, vz: vz / weightSum };
+}
+
+function buildFieldSamples(
+  nodes: MegNode[],
+  vectorKeys: [keyof MegNode, keyof MegNode, keyof MegNode],
+  radiusMm: number,
+  sampleMode: SampleMode,
+) {
+  const points = sampleMode === "volume" ? volumeFieldPoints(radiusMm) : shellFieldPoints(radiusMm);
+  const samples: FieldSample[] = points.map((point) => {
+    const vector = interpolateNodeVector(point, nodes, vectorKeys);
+    const radius = Math.max(1e-9, Math.hypot(point.x, point.y, point.z));
+    return {
+      ...point,
+      ...vector,
+      amp: Math.hypot(vector.vx, vector.vy, vector.vz),
+      signed: (vector.vx * point.x + vector.vy * point.y + vector.vz * point.z) / radius,
+    };
+  });
+  const maxAmp = Math.max(1e-12, ...samples.map((sample) => sample.amp));
+  const maxSigned = Math.max(1e-12, ...samples.map((sample) => Math.abs(sample.signed)));
+
+  return samples.map((sample) => ({
+    ...sample,
+    amp: sample.amp / maxAmp,
+    signed: sample.signed / maxSigned,
+  }));
+}
+
+function drawArrow(
+  context: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  headSize: number,
+) {
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+
+  context.beginPath();
+  context.moveTo(x1, y1);
+  context.lineTo(x2, y2);
+  context.stroke();
+
+  context.beginPath();
+  context.moveTo(x2, y2);
+  context.lineTo(
+    x2 - Math.cos(angle - Math.PI / 7) * headSize,
+    y2 - Math.sin(angle - Math.PI / 7) * headSize,
   );
+  context.lineTo(
+    x2 - Math.cos(angle + Math.PI / 7) * headSize,
+    y2 - Math.sin(angle + Math.PI / 7) * headSize,
+  );
+  context.closePath();
+  context.fill();
 }
 
 function SvdPlot3D({
@@ -186,6 +308,7 @@ function SvdPlot3D({
   onPointerUp,
   vectorKeys,
   dotScale,
+  sampleMode,
 }: {
   title: string;
   nodes: MegNode[];
@@ -197,11 +320,13 @@ function SvdPlot3D({
   onPointerUp: (event: PointerEvent<HTMLDivElement>) => void;
   vectorKeys: [keyof MegNode, keyof MegNode, keyof MegNode];
   dotScale: number;
+  sampleMode: SampleMode;
 }) {
   const margin = 14;
   const size = 320;
   const { azimuthDeg, elevationDeg } = view;
   const [xKey, yKey, zKey] = vectorKeys;
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const projectedNodes = useMemo(() => {
     const projected = nodes.map((node, idx) => ({
@@ -222,22 +347,142 @@ function SvdPlot3D({
       .sort((a, b) => a.projected.depth - b.projected.depth);
   }, [nodes, radiusMm, azimuthDeg, elevationDeg]);
 
+  const fieldSamples = useMemo(
+    () => buildFieldSamples(nodes, [xKey, yKey, zKey], radiusMm, sampleMode),
+    [nodes, xKey, yKey, zKey, radiusMm, sampleMode],
+  );
+
+  const projectedField = useMemo(() => {
+    const projected = fieldSamples.map((sample, idx) => ({
+      sample,
+      idx,
+      projected: project3d(sample, radiusMm, azimuthDeg, elevationDeg, size, margin),
+    }));
+    const depths = projected.map((item) => item.projected.depth);
+    const minDepth = Math.min(...depths);
+    const maxDepth = Math.max(...depths);
+    const span = Math.max(1e-9, maxDepth - minDepth);
+
+    return projected
+      .map((item) => ({
+        ...item,
+        depthT: (item.projected.depth - minDepth) / span,
+      }))
+      .sort((a, b) => a.projected.depth - b.projected.depth);
+  }, [fieldSamples, radiusMm, azimuthDeg, elevationDeg]);
+
   const maxVector = useMemo(() => {
     return Math.max(
       1e-12,
-      ...nodes.map((node) => {
-        const vx = Number(node[xKey] ?? 0);
-        const vy = Number(node[yKey] ?? 0);
-        const vz = Number(node[zKey] ?? 0);
-        return Math.hypot(vx, vy, vz);
-      }),
+      ...fieldSamples.map((sample) => Math.hypot(sample.vx, sample.vy, sample.vz)),
     );
-  }, [nodes, xKey, yKey, zKey]);
+  }, [fieldSamples]);
 
-  const guides = useMemo(
-    () => hemisphereGuides(radiusMm, azimuthDeg, elevationDeg, size, margin),
-    [radiusMm, azimuthDeg, elevationDeg],
-  );
+  const guides = useMemo(() => hemisphereGuideLines(radiusMm), [radiusMm]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = size * dpr;
+    canvas.height = size * dpr;
+    canvas.style.width = "100%";
+    canvas.style.height = "auto";
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, size, size);
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, size, size);
+
+    guides.forEach((line, idx) => {
+      context.beginPath();
+      line.forEach((point, pointIdx) => {
+        const projected = project3d(point, radiusMm, azimuthDeg, elevationDeg, size, margin);
+        if (pointIdx === 0) context.moveTo(projected.x, projected.y);
+        else context.lineTo(projected.x, projected.y);
+      });
+      context.strokeStyle =
+        sampleMode === "shell" ? (idx === 0 ? "rgba(217,214,203,0.55)" : "rgba(236,233,223,0.48)") : idx === 0 ? "#d9d6cb" : "#ece9df";
+      context.lineWidth = idx === 0 ? 1 : 0.7;
+      context.stroke();
+    });
+
+    for (const { sample, projected, depthT } of projectedField) {
+      const [r, g, b] = signedRgb(sample.signed);
+      const blobRadius = (sampleMode === "volume" ? 9.5 : 18) * (0.82 + sample.amp * 0.5);
+      const alpha =
+        sampleMode === "volume"
+          ? (0.045 + depthT * 0.065) * (0.45 + sample.amp * 0.55)
+          : (0.032 + depthT * 0.052) * (0.6 + sample.amp * 0.4);
+      const gradient = context.createRadialGradient(
+        projected.x,
+        projected.y,
+        0,
+        projected.x,
+        projected.y,
+        blobRadius,
+      );
+      gradient.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${alpha})`);
+      gradient.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+      context.fillStyle = gradient;
+      context.beginPath();
+      context.arc(projected.x, projected.y, blobRadius, 0, Math.PI * 2);
+      context.fill();
+    }
+
+    const textureStep = sampleMode === "volume" ? 3 : 1;
+    projectedField.forEach(({ sample, idx, projected, depthT }) => {
+      if (idx % textureStep !== 0) return;
+      const end = project3d(
+        {
+          x: sample.x + (sample.vx / maxVector) * radiusMm * 0.16,
+          y: sample.y + (sample.vy / maxVector) * radiusMm * 0.16,
+          z: sample.z + (sample.vz / maxVector) * radiusMm * 0.16,
+        },
+        radiusMm,
+        azimuthDeg,
+        elevationDeg,
+        size,
+        margin,
+      );
+      const dx = end.x - projected.x;
+      const dy = end.y - projected.y;
+      const [r, g, b] = signedRgb(sample.signed);
+      const alpha = sampleMode === "volume" ? 0.28 + depthT * 0.3 : 0.38 + depthT * 0.34;
+      const x1 = projected.x - dx * 0.43;
+      const y1 = projected.y - dy * 0.43;
+      const x2 = projected.x + dx * 0.43;
+      const y2 = projected.y + dy * 0.43;
+
+      context.strokeStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      context.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      context.lineWidth = sampleMode === "volume" ? 0.7 + sample.amp * 0.45 : 0.85 + sample.amp * 0.5;
+      context.lineCap = "round";
+      drawArrow(context, x1, y1, x2, y2, sampleMode === "volume" ? 2.4 : 2.8);
+    });
+
+    for (const { node, projected, depthT } of projectedNodes) {
+      const [r, g, b] = signedRgb(node.signed);
+      context.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.06 + depthT * 0.08})`;
+      context.beginPath();
+      context.arc(projected.x, projected.y, 0.4 + node.amp * 0.8, 0, Math.PI * 2);
+      context.fill();
+    }
+  }, [
+    azimuthDeg,
+    dotScale,
+    elevationDeg,
+    guides,
+    margin,
+    maxVector,
+    projectedField,
+    projectedNodes,
+    radiusMm,
+    sampleMode,
+    size,
+  ]);
 
   return (
     <div
@@ -255,65 +500,12 @@ function SvdPlot3D({
       <div style={{ fontFamily: "var(--sans)", fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
         {title}
       </div>
-      <svg viewBox={`0 0 ${size} ${size}`} style={{ display: "block", width: "100%", height: "auto" }}>
-        <rect x={0} y={0} width={size} height={size} fill="#fff" />
-        {guides.map((points, idx) => (
-          <polyline
-            key={`guide-${idx}`}
-            points={points}
-            fill="none"
-            stroke={idx === 0 ? "#d9d6cb" : "#ece9df"}
-            strokeWidth={idx === 0 ? 1.1 : 0.8}
-          />
-        ))}
-        {projectedNodes.map(({ node, idx, projected, depthT }) => {
-          const r = 0.75 + node.amp * dotScale * (0.82 + depthT * 0.28);
-          const opacity = 0.45 + depthT * 0.42;
-          return (
-            <circle
-              key={`dot-${idx}`}
-              cx={projected.x}
-              cy={projected.y}
-              r={r}
-              fill={signedColor(node.signed, opacity)}
-              stroke="rgba(25,25,25,0.2)"
-              strokeWidth={0.25}
-            />
-          );
-        })}
-        {projectedNodes.map(({ node, idx, projected }) => {
-          if (node.amp < 0.5) return null;
-          const vx = Number(node[xKey] ?? 0);
-          const vy = Number(node[yKey] ?? 0);
-          const vz = Number(node[zKey] ?? 0);
-          const end = project3d(
-            {
-              x: node.x + (vx / maxVector) * radiusMm * 0.12,
-              y: node.y + (vy / maxVector) * radiusMm * 0.12,
-              z: node.z + (vz / maxVector) * radiusMm * 0.12,
-            },
-            radiusMm,
-            azimuthDeg,
-            elevationDeg,
-            size,
-            margin,
-          );
-          const dx = end.x - projected.x;
-          const dy = end.y - projected.y;
-          return (
-            <line
-              key={`vec-${idx}`}
-              x1={projected.x - dx * 0.5}
-              y1={projected.y - dy * 0.5}
-              x2={projected.x + dx * 0.5}
-              y2={projected.y + dy * 0.5}
-              stroke={signedColor(node.signed, 0.85)}
-              strokeWidth={1}
-              strokeLinecap="round"
-            />
-          );
-        })}
-      </svg>
+      <canvas
+        ref={canvasRef}
+        width={size}
+        height={size}
+        style={{ display: "block", width: "100%", height: "auto" }}
+      />
     </div>
   );
 }
@@ -487,6 +679,7 @@ export default function MegSVDExplorer() {
             onPointerUp={handlePointerUp}
             vectorKeys={["vx", "vy", "vz"]}
             dotScale={3.4}
+            sampleMode="volume"
           />
         </div>
         <div
@@ -521,6 +714,7 @@ export default function MegSVDExplorer() {
             onPointerUp={handlePointerUp}
             vectorKeys={["bx", "by", "bz"]}
             dotScale={3.6}
+            sampleMode="shell"
           />
         </div>
       </div>
