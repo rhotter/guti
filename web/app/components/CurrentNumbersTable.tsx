@@ -33,7 +33,7 @@ interface ModalityConfig {
 const MODALITIES: ModalityConfig[] = [
   { key: "meg_opm", label: "MEG OPM" },
   { key: "meg_squid", label: "MEG SQUID" },
-  { key: "eeg_openmeeg", label: "EEG" },
+  { key: "eeg", label: "EEG" },
   { key: "cw_fnirs", label: "fNIRS CW" },
   { key: "fmri_bold", label: "fMRI BOLD" },
   { key: "us_free_field_analytical_frequency_sweep", label: "Ultrasound" },

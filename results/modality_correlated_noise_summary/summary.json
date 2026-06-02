@@ -5,7 +5,7 @@
     "capacity_bits_per_s": 55370.57239396578,
     "covariance_computation": "Layered spherical Johnson impedance covariance",
     "frequency_spectrum_model": "power law beta=1.4, 1-100 Hz",
-    "modality": "EEG OpenMEEG",
+    "modality": "EEG",
     "n_sensors": 2048,
     "n_voxels": 14355,
     "noise_correlation_kernel": "spherical_johnson",

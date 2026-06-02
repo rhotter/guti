@@ -7,27 +7,27 @@ import argparse
 import math
 import os
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/matplotlib-guti")
 os.environ.setdefault("XDG_CACHE_HOME", "/private/tmp")
 
-from guti.capacity import sensor_noise_normalized_singular_values
+from guti.capacity import (
+    noise_normalized_singular_values,
+    sensor_noise_normalized_singular_values,
+)
 from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
 from guti.data_utils import save_svd
-from guti.modalities.eeg.scalp_resistance import (
-    DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
-    DEFAULT_JOHNSON_LMAX,
-    surface_impedance_kernel_matrix,
+from guti.modalities.meg.johnson_noise import (
+    compute_meg_johnson_noise_covariance,
 )
 from guti.noise_models import (
     DEFAULT_NOISE_CORRELATION_KERNEL,
     DEFAULT_NOISE_CORRELATION_LENGTH_MM,
-    compute_johnson_noise_covariance,
     compute_output_noise_std,
     compute_sensor_noise_covariance,
+    get_noise_model,
 )
 from guti.parameters import Parameters
 
@@ -37,18 +37,6 @@ MEG_OFFSETS_MM = {
     "meg_opm": 7.0,
     "meg_squid": 25.0,
 }
-DEFAULT_JOHNSON_BANDWIDTH_HZ = 100.0
-JOHNSON_COVARIANCE_MODELS = {"spherical_johnson", "johnson_volume"}
-
-
-def is_johnson_covariance_model(model: str) -> bool:
-    return model in JOHNSON_COVARIANCE_MODELS
-
-
-def saved_noise_kernel(model: str) -> str:
-    if is_johnson_covariance_model(model):
-        return "spherical_johnson"
-    return model
 
 
 def parse_int_csv(value: str) -> list[int]:
@@ -115,13 +103,53 @@ def build_parser() -> argparse.ArgumentParser:
         "--noise-correlation-length-mm",
         type=float,
         default=DEFAULT_NOISE_CORRELATION_LENGTH_MM,
-        help="Scalp noise-correlation length in mm. Default: 5.",
+        help=(
+            "Scalp noise-correlation length in mm for "
+            "--noise-covariance-model=distance_kernel. Default: 5."
+        ),
     )
     parser.add_argument(
         "--noise-correlation-kernel",
         choices=("gaussian", "exponential"),
         default=DEFAULT_NOISE_CORRELATION_KERNEL,
-        help="Spatial noise-correlation kernel. Default: gaussian.",
+        help=(
+            "Spatial distance-correlation kernel for "
+            "--noise-covariance-model=distance_kernel. Default: gaussian."
+        ),
+    )
+    parser.add_argument(
+        "--noise-covariance-model",
+        choices=("meg_johnson_radial", "meg_johnson_xyz", "distance_kernel"),
+        default="meg_johnson_radial",
+        help=(
+            "Noise covariance used for saved noise-normalized spectra. "
+            "meg_johnson_radial uses the finite-volume MEG body-Johnson "
+            "correlation for radial point sensors and expands it across x/y/z "
+            "components; meg_johnson_xyz uses the full 3-component covariance; "
+            "distance_kernel keeps the older phenomenological model. "
+            "Default: meg_johnson_radial."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-voxel-resolution-mm",
+        type=float,
+        default=4.0,
+        help="Voxel size for MEG Johnson covariance. Default: 4.",
+    )
+    parser.add_argument(
+        "--johnson-solver",
+        choices=("finite_volume", "vector_potential"),
+        default="finite_volume",
+        help="MEG Johnson reciprocal solver. Default: finite_volume.",
+    )
+    parser.add_argument(
+        "--johnson-absolute-scale",
+        action="store_true",
+        help=(
+            "Use the absolute body-Johnson covariance diagonal. By default the "
+            "Johnson matrix supplies the correlation structure and the diagonal "
+            "is matched to the existing MEG detector-noise model."
+        ),
     )
     parser.add_argument(
         "--skip-noise-normalized",
@@ -129,40 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Save only the raw forward singular values. Use this for compatibility "
             "with existing scalar-noise convergence sweeps."
-        ),
-    )
-    parser.add_argument(
-        "--noise-covariance-model",
-        choices=("distance_kernel", "spherical_johnson", "johnson_volume"),
-        default="distance_kernel",
-        help=(
-            "Sensor covariance model used unless --skip-noise-normalized is set. "
-            "distance_kernel uses the length-scale kernel; spherical_johnson "
-            "uses the same layered spherical EEG Johnson covariance correlation "
-            "structure and applies the MEG scalar detector-noise diagonal. "
-            "johnson_volume is accepted as a legacy alias."
-        ),
-    )
-    parser.add_argument(
-        "--johnson-electrode-area-cm2",
-        type=float,
-        default=DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
-        help="Circular scalp electrode area for spherical_johnson covariance.",
-    )
-    parser.add_argument(
-        "--johnson-lmax",
-        type=int,
-        default=DEFAULT_JOHNSON_LMAX,
-        help="Spherical-harmonic truncation for spherical_johnson covariance.",
-    )
-    parser.add_argument(
-        "--johnson-bandwidth-hz",
-        type=float,
-        default=DEFAULT_JOHNSON_BANDWIDTH_HZ,
-        help=(
-            "Bandwidth used to form the Johnson covariance. With the MEG scalar "
-            "noise diagonal applied, this only affects the intermediate "
-            "correlation normalization."
         ),
     )
     parser.add_argument(
@@ -244,64 +238,6 @@ def compute_meg_forward_matrix(
     return A
 
 
-def build_sensor_noise_covariance(
-    args: argparse.Namespace,
-    *,
-    modality: str,
-    params: Parameters,
-    cache: dict[tuple[Any, ...], np.ndarray],
-) -> np.ndarray:
-    n_sensors = int(params.num_sensors)
-    noise_std = compute_output_noise_std(modality, n_sensors=n_sensors)
-    if args.noise_covariance_model == "distance_kernel":
-        key = (
-            modality,
-            n_sensors,
-            "distance_kernel",
-            float(params.sensor_offset_mm),
-            float(args.noise_correlation_length_mm),
-            args.noise_correlation_kernel,
-        )
-        cached = cache.get(key)
-        if cached is not None:
-            return cached
-        sensors = get_sensor_positions(n_sensors, offset=float(params.sensor_offset_mm))
-        covariance = compute_sensor_noise_covariance(
-            sensors,
-            noise_std,
-            correlation_length_mm=float(args.noise_correlation_length_mm),
-            kernel=args.noise_correlation_kernel,
-        )
-    elif args.noise_covariance_model in JOHNSON_COVARIANCE_MODELS:
-        key = (
-            modality,
-            n_sensors,
-            "spherical_johnson",
-            float(args.johnson_electrode_area_cm2),
-            int(args.johnson_lmax),
-            float(args.johnson_bandwidth_hz),
-        )
-        cached = cache.get(key)
-        if cached is not None:
-            return cached
-        scalp_sensors = get_sensor_positions(n_sensors)
-        impedance = surface_impedance_kernel_matrix(
-            scalp_sensors,
-            electrode_area_cm2=float(args.johnson_electrode_area_cm2),
-            lmax=int(args.johnson_lmax),
-        )
-        covariance = compute_johnson_noise_covariance(
-            impedance,
-            bandwidth_hz=float(args.johnson_bandwidth_hz),
-            noise_std=noise_std,
-        )
-    else:
-        raise ValueError(f"Unsupported noise covariance model {args.noise_covariance_model!r}")
-
-    cache[key] = covariance
-    return covariance
-
-
 def singular_values(A: np.ndarray, method: str) -> np.ndarray:
     if method == "direct":
         return np.linalg.svd(A, full_matrices=False, compute_uv=False)
@@ -374,6 +310,135 @@ def selected_modalities(value: str) -> list[str]:
     return requested
 
 
+def noise_params_for_args(args: argparse.Namespace) -> dict[str, object]:
+    if args.noise_covariance_model == "distance_kernel":
+        return {
+            "noise_covariance_model": args.noise_covariance_model,
+            "noise_correlation_length_mm": float(args.noise_correlation_length_mm),
+            "noise_correlation_kernel": args.noise_correlation_kernel,
+            "noise_distance_metric": "geodesic",
+            "noise_voxel_resolution_mm": None,
+            "noise_solver": None,
+            "noise_absolute_scale": None,
+            "noise_sensor_components": None,
+        }
+
+    sensor_components = (
+        "xyz" if args.noise_covariance_model == "meg_johnson_xyz" else "radial"
+    )
+    return {
+        "noise_covariance_model": args.noise_covariance_model,
+        "noise_correlation_length_mm": None,
+        "noise_correlation_kernel": "meg_johnson",
+        "noise_distance_metric": "finite_volume_head",
+        "noise_voxel_resolution_mm": float(args.johnson_voxel_resolution_mm),
+        "noise_solver": args.johnson_solver,
+        "noise_absolute_scale": bool(args.johnson_absolute_scale),
+        "noise_sensor_components": sensor_components,
+    }
+
+
+def apply_noise_params(params: Parameters, noise_params: dict[str, object]) -> None:
+    params.noise_covariance_model = noise_params["noise_covariance_model"]
+    params.noise_correlation_length_mm = noise_params["noise_correlation_length_mm"]
+    params.noise_correlation_kernel = noise_params["noise_correlation_kernel"]
+    params.noise_distance_metric = noise_params["noise_distance_metric"]
+    params.noise_voxel_resolution_mm = noise_params["noise_voxel_resolution_mm"]
+    params.noise_solver = noise_params["noise_solver"]
+    params.noise_absolute_scale = noise_params["noise_absolute_scale"]
+    params.noise_sensor_components = noise_params["noise_sensor_components"]
+
+
+def compute_noise_normalized_spectrum_for_args(
+    A: np.ndarray,
+    sensor_positions: np.ndarray,
+    *,
+    modality: str,
+    args: argparse.Namespace,
+) -> tuple[np.ndarray, dict[str, np.ndarray], str]:
+    detector_noise = compute_output_noise_std(
+        modality,
+        n_sensors=int(sensor_positions.shape[0]),
+    )
+    if args.noise_covariance_model == "distance_kernel":
+        sensor_noise_covariance = compute_sensor_noise_covariance(
+            sensor_positions,
+            detector_noise,
+            correlation_length_mm=float(args.noise_correlation_length_mm),
+            kernel=args.noise_correlation_kernel,
+        )
+        s_noise_normalized = sensor_noise_normalized_singular_values(
+            A,
+            sensor_noise_covariance=sensor_noise_covariance,
+            outputs_per_sensor=3,
+        )
+        extra_arrays = {
+            "noise_covariance_model": np.array(args.noise_covariance_model),
+            "noise_detector_std_t": np.array(detector_noise, dtype=np.float64),
+            "noise_absolute_scale": np.array(False, dtype=bool),
+        }
+        return (
+            s_noise_normalized,
+            extra_arrays,
+            f", noise_normalized_s0={s_noise_normalized[0]:.6g}",
+        )
+
+    bandwidth_hz = get_noise_model(modality).reference_bandwidth_hz
+    noise_std = None if args.johnson_absolute_scale else detector_noise
+    sensor_components = (
+        "xyz" if args.noise_covariance_model == "meg_johnson_xyz" else "radial"
+    )
+    covariance, metadata, scale_info = compute_meg_johnson_noise_covariance(
+        sensor_positions,
+        noise_std=noise_std,
+        sensor_components=sensor_components,
+        voxel_resolution_mm=float(args.johnson_voxel_resolution_mm),
+        bandwidth_hz=bandwidth_hz,
+        solver=args.johnson_solver,
+        return_metadata=True,
+    )
+    if sensor_components == "radial":
+        s_noise_normalized = sensor_noise_normalized_singular_values(
+            A,
+            sensor_noise_covariance=covariance,
+            outputs_per_sensor=3,
+        )
+    else:
+        s_noise_normalized = noise_normalized_singular_values(
+            A,
+            output_noise_covariance=covariance,
+        )
+
+    extra_arrays = {
+        "noise_covariance_model": np.array(args.noise_covariance_model),
+        "noise_detector_std_t": np.array(detector_noise, dtype=np.float64),
+        "noise_absolute_scale": np.array(bool(args.johnson_absolute_scale), dtype=bool),
+        "johnson_voxel_resolution_mm": np.array(
+            args.johnson_voxel_resolution_mm,
+            dtype=np.float64,
+        ),
+        "johnson_solver": np.array(args.johnson_solver),
+        "johnson_sensor_components": np.array(sensor_components),
+        "johnson_n_voxels": np.array(metadata.n_voxels, dtype=np.int64),
+        "johnson_bandwidth_hz": np.array(bandwidth_hz, dtype=np.float64),
+        "johnson_raw_body_noise_median_T_per_sqrtHz": np.array(
+            scale_info["raw_body_noise_median_T_per_sqrtHz"],
+            dtype=np.float64,
+        ),
+        "johnson_regularization_jitter_T2": np.array(
+            scale_info["regularization_jitter_T2"],
+            dtype=np.float64,
+        ),
+    }
+    noise_text = (
+        f", noise_normalized_s0={s_noise_normalized[0]:.6g}, "
+        "johnson_raw_median="
+        f"{scale_info['raw_body_noise_median_T_per_sqrtHz'] * 1e15:.4g} "
+        "fT/sqrtHz"
+    )
+    return s_noise_normalized, extra_arrays, noise_text
+
+
 def main() -> int:
     args = build_parser().parse_args()
     modalities = selected_modalities(args.modalities)
@@ -382,15 +447,11 @@ def main() -> int:
             "--extrapolate-from-sensors is only defined for scalar-noise spectra; "
             "pass --skip-noise-normalized"
         )
-    if is_johnson_covariance_model(args.noise_covariance_model):
-        if args.johnson_electrode_area_cm2 <= 0.0:
-            raise SystemExit("--johnson-electrode-area-cm2 must be positive")
-        if args.johnson_lmax <= 1:
-            raise SystemExit("--johnson-lmax must be greater than 1")
-        if args.johnson_bandwidth_hz <= 0.0:
-            raise SystemExit("--johnson-bandwidth-hz must be positive")
+    if args.johnson_voxel_resolution_mm <= 0.0:
+        raise SystemExit("--johnson-voxel-resolution-mm must be positive")
 
     jobs = []
+    noise_params = noise_params_for_args(args)
     for modality in modalities:
         for n_sensors in args.sensor_counts:
             for spacing in args.source_spacing_mm:
@@ -400,28 +461,13 @@ def main() -> int:
                     sensor_offset_mm=MEG_OFFSETS_MM[modality],
                 )
                 if not args.skip_noise_normalized:
-                    params.noise_correlation_length_mm = (
-                        None
-                        if is_johnson_covariance_model(args.noise_covariance_model)
-                        else float(args.noise_correlation_length_mm)
-                    )
-                    params.noise_correlation_kernel = (
-                        saved_noise_kernel(args.noise_covariance_model)
-                        if is_johnson_covariance_model(args.noise_covariance_model)
-                        else args.noise_correlation_kernel
-                    )
-                    params.noise_distance_metric = (
-                        "spherical_harmonic"
-                        if is_johnson_covariance_model(args.noise_covariance_model)
-                        else "geodesic"
-                    )
+                    apply_noise_params(params, noise_params)
                 n_outputs, n_sources, n_voxels, size_gb = matrix_size_gb(
                     n_sensors,
                     spacing,
                 )
                 jobs.append((modality, params, n_outputs, n_sources, n_voxels, size_gb))
 
-    noise_covariance_cache: dict[tuple[Any, ...], np.ndarray] = {}
     for modality, params, n_outputs, n_sources, n_voxels, size_gb in jobs:
         if args.extrapolate_from_sensors is not None:
             params.comment = (
@@ -497,47 +543,22 @@ def main() -> int:
         extra_arrays = None
         noise_text = ""
         if not args.skip_noise_normalized:
-            sensor_noise_covariance = build_sensor_noise_covariance(
-                args,
-                modality=modality,
-                params=params,
-                cache=noise_covariance_cache,
+            sensors = get_sensor_positions(
+                int(params.num_sensors),
+                offset=float(params.sensor_offset_mm),
             )
-            s_noise_normalized = sensor_noise_normalized_singular_values(
-                A,
-                sensor_noise_covariance=sensor_noise_covariance,
-                outputs_per_sensor=3,
+            s_noise_normalized, extra_arrays, noise_text = (
+                compute_noise_normalized_spectrum_for_args(
+                    A,
+                    sensors,
+                    modality=modality,
+                    args=args,
+                )
             )
             extra_arrays = {
+                **extra_arrays,
                 "noise_normalized_singular_values": s_noise_normalized,
-                "noise_covariance_model": np.array(
-                    saved_noise_kernel(args.noise_covariance_model)
-                ),
-                "noise_correlation_kernel": np.array(params.noise_correlation_kernel),
             }
-            if params.noise_correlation_length_mm is not None:
-                extra_arrays["noise_correlation_length_mm"] = np.array(
-                    params.noise_correlation_length_mm,
-                    dtype=np.float64,
-                )
-            if is_johnson_covariance_model(args.noise_covariance_model):
-                extra_arrays.update(
-                    {
-                        "johnson_electrode_area_cm2": np.array(
-                            args.johnson_electrode_area_cm2,
-                            dtype=np.float64,
-                        ),
-                        "johnson_lmax": np.array(args.johnson_lmax, dtype=np.int64),
-                        "johnson_bandwidth_hz": np.array(
-                            args.johnson_bandwidth_hz,
-                            dtype=np.float64,
-                        ),
-                        "johnson_noise_diagonal": np.array(
-                            f"{modality}_scalar_noise_std"
-                        ),
-                    }
-                )
-            noise_text = f", noise_normalized_s0={s_noise_normalized[0]:.6g}"
         save_svd(s, modality, params, extra_arrays=extra_arrays)
         print(
             f"Saved {out_path} with {len(s)} singular values "

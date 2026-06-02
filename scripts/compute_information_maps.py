@@ -61,7 +61,7 @@ SCALING_LABELS = {
     "empirical": "empirical observed-SNR",
 }
 TIME_RESOLUTION_S = {
-    "eeg_openmeeg": 0.01,
+    "eeg": 0.01,
     "eeg_homogeneous": 0.01,
     "meg_opm": 0.01,
     "meg_squid": 0.01,
@@ -69,13 +69,13 @@ TIME_RESOLUTION_S = {
     "td_fnirs": 0.1,
 }
 TABLE_DEFAULTS = {
-    "eeg_openmeeg": {
+    "eeg": {
         "n_sensors": 256,
         "grid_spacing_mm": 5.0,
         "mesh_resolution_mm": 10.0,
         "leadfield_path": "guti/modalities/leadfields/eeg/eeg_leadfield.mat",
         "dipoles_path": "guti/modalities/bem_model/eeg/dipole_locations.txt",
-        "reference": "results/variants/eeg_openmeeg/cedd0dd5.npz",
+        "reference": "results/variants/eeg/cedd0dd5.npz",
     },
     "eeg_homogeneous": {
         "n_sensors": 256,
@@ -113,8 +113,7 @@ TABLE_DEFAULTS = {
 }
 MODALITY_ALIASES = {
     "all": "all",
-    "eeg": "eeg_openmeeg",
-    "eeg_openmeeg": "eeg_openmeeg",
+    "eeg": "eeg",
     "eeg_homogeneous": "eeg_homogeneous",
     "homogeneous_eeg": "eeg_homogeneous",
     "meg_opm": "meg_opm",
@@ -124,26 +123,25 @@ MODALITY_ALIASES = {
     "fnirs": "cw_fnirs",
     "fnirs_cw": "cw_fnirs",
     "cw_fnirs": "cw_fnirs",
-    "cw_fnirs": "cw_fnirs",
     "td_fnirs": "td_fnirs",
     "td-fnirs": "td_fnirs",
     "td_fnirs_analytical": "td_fnirs",
 }
 DEFAULT_MODALITIES = (
-    "eeg_openmeeg",
+    "eeg",
     "meg_opm",
     "meg_squid",
     "cw_fnirs",
     "td_fnirs",
 )
 CAPACITY_ATTRIBUTION_DEFAULT_MODALITIES = (
-    "eeg_openmeeg",
+    "eeg",
     "meg_opm",
     "meg_squid",
     "cw_fnirs",
 )
 MODALITY_ORDER = (
-    "eeg_openmeeg",
+    "eeg",
     "eeg_homogeneous",
     "meg_opm",
     "meg_squid",
@@ -151,7 +149,7 @@ MODALITY_ORDER = (
     "td_fnirs",
 )
 COMPARISON_LABELS = {
-    "eeg_openmeeg": "EEG OpenMEEG",
+    "eeg": "EEG",
     "eeg_homogeneous": "EEG homogeneous",
     "meg_opm": "MEG OPM",
     "meg_squid": "MEG SQUID",
@@ -159,7 +157,7 @@ COMPARISON_LABELS = {
     "td_fnirs": "TD-fNIRS",
 }
 MODALITY_COLORS = {
-    "EEG OpenMEEG": "#2563eb",
+    "EEG": "#2563eb",
     "EEG homogeneous": "#60a5fa",
     "MEG OPM": "#ea580c",
     "MEG SQUID": "#16a34a",
@@ -216,7 +214,7 @@ def depth_mm(positions: np.ndarray) -> np.ndarray:
     return BRAIN_RADIUS - radius
 
 
-def compute_eeg_forward_matrix(
+def compute_eeg_homogeneous_forward_matrix(
     n_sensors: int,
     grid_spacing_mm: float,
     conductivity_s_per_m: float = 0.33,
@@ -261,7 +259,7 @@ def load_openmeeg_leadfield(leadfield_path: str | Path) -> np.ndarray:
         )
 
 
-def compute_eeg_openmeeg_forward_matrix(
+def compute_eeg_forward_matrix(
     leadfield_path: str | Path,
     dipoles_path: str | Path,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1168,43 +1166,43 @@ def run_meg_capacity_attribution(
     )
 
 
-def run_eeg_openmeeg(
+def run_eeg(
     n_sensors: int,
     depth_bin_width_mm: float,
     scaling: str,
 ) -> Path:
-    defaults = TABLE_DEFAULTS["eeg_openmeeg"]
-    model = get_noise_model("eeg_openmeeg")
+    defaults = TABLE_DEFAULTS["eeg"]
+    model = get_noise_model("eeg")
     if n_sensors != defaults["n_sensors"]:
         raise ValueError(
             "The saved OpenMEEG EEG leadfield has "
             f"{defaults['n_sensors']} sensors; got --eeg-sensors={n_sensors}."
         )
     physical_noise = compute_detector_noise_std(
-        "eeg_openmeeg",
+        "eeg",
         n_sensors=n_sensors,
         tier="today",
     )
-    A_raw, positions = compute_eeg_openmeeg_forward_matrix(
+    A_raw, positions = compute_eeg_forward_matrix(
         defaults["leadfield_path"],
         defaults["dipoles_path"],
     )
     A = A_raw * model.source_amplitude
     noise, scaling_params = choose_noise(
         A,
-        "eeg_openmeeg",
+        "eeg",
         n_sensors,
         physical_noise,
         scaling,
     )
     posterior_det, info_bits = posterior_info_vector3(A, noise, len(positions))
     return save_result(
-        "eeg_openmeeg",
+        "eeg",
         positions,
         info_bits,
         posterior_det,
         {
-            "modality": "eeg_openmeeg",
+            "modality": "eeg",
             "n_sensors": n_sensors,
             "forward_matrix_shape": list(A.shape),
             "n_source_locations": int(len(positions)),
@@ -1227,31 +1225,31 @@ def run_eeg_openmeeg(
     )
 
 
-def run_eeg_openmeeg_capacity_attribution(
+def run_eeg_capacity_attribution(
     n_sensors: int,
     depth_bin_width_mm: float,
     scaling: str,
 ) -> Path:
-    defaults = TABLE_DEFAULTS["eeg_openmeeg"]
-    model = get_noise_model("eeg_openmeeg")
+    defaults = TABLE_DEFAULTS["eeg"]
+    model = get_noise_model("eeg")
     if n_sensors != defaults["n_sensors"]:
         raise ValueError(
             "The saved OpenMEEG EEG leadfield has "
             f"{defaults['n_sensors']} sensors; got --eeg-sensors={n_sensors}."
         )
     physical_noise = compute_detector_noise_std(
-        "eeg_openmeeg",
+        "eeg",
         n_sensors=n_sensors,
         tier="today",
     )
-    A_raw, positions = compute_eeg_openmeeg_forward_matrix(
+    A_raw, positions = compute_eeg_forward_matrix(
         defaults["leadfield_path"],
         defaults["dipoles_path"],
     )
     A = A_raw * model.source_amplitude
     noise, scaling_params = choose_noise(
         A,
-        "eeg_openmeeg",
+        "eeg",
         n_sensors,
         physical_noise,
         scaling,
@@ -1262,13 +1260,13 @@ def run_eeg_openmeeg_capacity_attribution(
         len(positions),
     )
     return save_capacity_attribution_result(
-        "eeg_openmeeg",
+        "eeg",
         positions,
         capacity_bits,
         singular_values,
         mode_bits,
         {
-            "modality": "eeg_openmeeg",
+            "modality": "eeg",
             "n_sensors": n_sensors,
             "forward_matrix_shape": list(A.shape),
             "n_source_locations": int(len(positions)),
@@ -1293,23 +1291,26 @@ def run_eeg_openmeeg_capacity_attribution(
     )
 
 
-def run_eeg(
+def run_eeg_homogeneous(
     n_sensors: int,
     grid_spacing_mm: float,
     depth_bin_width_mm: float,
     scaling: str,
 ) -> Path:
     physical_noise = compute_detector_noise_std(
-        "eeg_openmeeg",
+        "eeg",
         n_sensors=n_sensors,
         tier="today",
     )
     source_amplitude_a_m = 10e-9
-    A_raw, positions = compute_eeg_forward_matrix(n_sensors, grid_spacing_mm)
+    A_raw, positions = compute_eeg_homogeneous_forward_matrix(
+        n_sensors,
+        grid_spacing_mm,
+    )
     A = A_raw * source_amplitude_a_m
     noise, scaling_params = choose_noise(
         A,
-        "eeg_openmeeg",
+        "eeg",
         n_sensors,
         physical_noise,
         scaling,
@@ -1332,7 +1333,7 @@ def run_eeg(
                 "homogeneous quasi-static dipole potential; OpenMEEG is not "
                 "used because leadfields/OpenMEEG binaries are unavailable"
             ),
-            "calibration_modality": "eeg_openmeeg",
+            "calibration_modality": "eeg",
             **scaling_params,
         },
         "posterior_cov_det",
@@ -1537,7 +1538,7 @@ def main() -> None:
         "--modalities",
         default="all",
         help=(
-            "Comma-separated subset to compute: eeg/eeg_openmeeg, "
+            "Comma-separated subset to compute: eeg, "
             "eeg_homogeneous, meg_opm, meg_squid, fnirs_cw, td_fnirs, or all."
         ),
     )
@@ -1550,13 +1551,13 @@ def main() -> None:
     parser.add_argument(
         "--eeg-sensors",
         type=int,
-        default=TABLE_DEFAULTS["eeg_openmeeg"]["n_sensors"],
+        default=TABLE_DEFAULTS["eeg"]["n_sensors"],
     )
     parser.add_argument(
         "--eeg-grid-spacing-mm",
         type=float,
         default=TABLE_DEFAULTS["eeg_homogeneous"]["grid_spacing_mm"],
-        help="Only affects eeg_homogeneous; eeg_openmeeg uses the saved BEM grid.",
+        help="Only affects eeg_homogeneous; eeg uses the saved BEM grid.",
     )
     parser.add_argument(
         "--meg-sensors",
@@ -1652,9 +1653,9 @@ def main() -> None:
     selected = [name for name in MODALITY_ORDER if name in set(selected)]
 
     posterior_outputs = []
-    if args.map_kind in ("posterior", "both") and "eeg_openmeeg" in selected:
+    if args.map_kind in ("posterior", "both") and "eeg" in selected:
         posterior_outputs.append(
-            run_eeg_openmeeg(
+            run_eeg(
                 args.eeg_sensors,
                 args.depth_bin_width_mm,
                 args.scaling,
@@ -1662,7 +1663,7 @@ def main() -> None:
         )
     if args.map_kind in ("posterior", "both") and "eeg_homogeneous" in selected:
         posterior_outputs.append(
-            run_eeg(
+            run_eeg_homogeneous(
                 args.eeg_sensors,
                 eeg_grid_spacing_mm,
                 args.depth_bin_width_mm,
@@ -1729,9 +1730,9 @@ def main() -> None:
         )
 
     capacity_outputs = []
-    if args.map_kind in ("capacity", "both") and "eeg_openmeeg" in capacity_selected:
+    if args.map_kind in ("capacity", "both") and "eeg" in capacity_selected:
         capacity_outputs.append(
-            run_eeg_openmeeg_capacity_attribution(
+            run_eeg_capacity_attribution(
                 args.eeg_sensors,
                 args.depth_bin_width_mm,
                 args.scaling,

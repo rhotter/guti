@@ -42,6 +42,9 @@ from guti.parameters import Parameters  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = Path("results/modality_correlated_noise_summary")
+DEFAULT_MAIN_README = REPO_ROOT / "README.md"
+MAIN_README_TABLE_BEGIN = "<!-- BEGIN GENERATED MODALITY CAPACITY SUMMARY -->"
+MAIN_README_TABLE_END = "<!-- END GENERATED MODALITY CAPACITY SUMMARY -->"
 US_RBC_FREQ_HZ = 2_000_000.0
 US_RBC_REFERENCE_SVD_FREQ_HZ = 50_000.0
 US_RBC_RATE_BANDWIDTH_HZ = 1.0
@@ -80,6 +83,17 @@ US_N_SENSORS = 6000
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--main-readme",
+        type=Path,
+        default=DEFAULT_MAIN_README,
+        help="Main README.md to update with the high-level capacity table.",
+    )
+    parser.add_argument(
+        "--no-main-readme",
+        action="store_true",
+        help="Only write the detailed summary outputs; do not update the root README.",
+    )
     return parser
 
 
@@ -458,15 +472,44 @@ def _us_rbc_cone_slice_row(_: dict[str, Any]) -> dict[str, Any]:
 
 
 def _eeg_anchored_row(row: dict[str, Any]) -> dict[str, Any]:
-    model = get_noise_model("eeg_openmeeg")
+    model = get_noise_model("eeg")
     output_noise = _float(row, "output_noise")
     output_amplitude = float(model.typical_signal_amplitude)
     output_snr = output_amplitude / output_noise
     bandwidth_hz = _float(row, "bandwidth_hz")
     time_resolution = 1.0 / bandwidth_hz
-    spectrum_kwargs = default_output_frequency_spectrum_kwargs("eeg_openmeeg")
+    spectrum_kwargs = default_output_frequency_spectrum_kwargs("eeg")
+    try:
+        bitrate = anchored_eeg_bitrate(
+            output_snr,
+            time_resolution=time_resolution,
+            spectrum_kwargs=spectrum_kwargs,
+        )
+        capacity = anchored_eeg_capacity(
+            output_snr,
+            time_resolution=time_resolution,
+            spectrum_kwargs=spectrum_kwargs,
+        )
+        note = (
+            "EEG bitrate/capacity use the empirically anchored lead-field "
+            "calibration from guti/modalities/eeg/calibration.py with the "
+            "default EEG output power-law spectrum beta=1.4; output amplitude "
+            "reports the typical EEG signal amplitude from guti/noise_models.py, "
+            "and bitrate/capacity use the displayed output SNR; the saved "
+            "Johnson covariance row supplies the detector-noise scale."
+        )
+    except FileNotFoundError:
+        bitrate = _float(row, "bitrate_bits_per_s")
+        capacity = _float(row, "channel_capacity_bits_per_s")
+        note = (
+            "EEG anchored lead-field cache is unavailable in this checkout, so "
+            "bitrate/capacity fall back to the selected saved Johnson covariance "
+            "spectrum row; output amplitude reports the typical EEG signal "
+            "amplitude from guti/noise_models.py, and the saved Johnson "
+            "covariance row supplies the detector-noise scale."
+        )
     return {
-        "modality": "EEG OpenMEEG",
+        "modality": "EEG",
         "bandwidth_hz": bandwidth_hz,
         "frequency_spectrum_model": "power law beta=1.4, 1-100 Hz",
         "covariance_computation": "Layered spherical Johnson impedance covariance",
@@ -474,16 +517,8 @@ def _eeg_anchored_row(row: dict[str, Any]) -> dict[str, Any]:
         "output_amplitude": output_amplitude * 1e6,
         "output_noise": output_noise * 1e6,
         "snr": output_snr,
-        "bitrate_bits_per_s": anchored_eeg_bitrate(
-            output_snr,
-            time_resolution=time_resolution,
-            spectrum_kwargs=spectrum_kwargs,
-        ),
-        "capacity_bits_per_s": anchored_eeg_capacity(
-            output_snr,
-            time_resolution=time_resolution,
-            spectrum_kwargs=spectrum_kwargs,
-        ),
+        "bitrate_bits_per_s": bitrate,
+        "capacity_bits_per_s": capacity,
         "n_voxels": _int(row, "n_voxels"),
         "n_sensors": _int(row, "n_sensors"),
         "noise_model_type": row["noise_model_type"],
@@ -491,22 +526,15 @@ def _eeg_anchored_row(row: dict[str, Any]) -> dict[str, Any]:
         "noise_covariance_model": row.get("noise_covariance_model"),
         "noise_plot_tag": noise_plot_tag(row),
         "source_path": row["path"],
-        "note": (
-            "EEG bitrate/capacity use the empirically anchored lead-field "
-            "calibration from guti/modalities/eeg/calibration.py with the "
-            "default EEG output power-law spectrum beta=1.4; output amplitude "
-            "reports the typical EEG signal amplitude from guti/noise_models.py, "
-            "and bitrate/capacity use the displayed output SNR; the saved "
-            "Johnson covariance row supplies the detector-noise scale."
-        ),
+        "note": note,
     }
 
 
 def build_summary(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     selections = [
         {
-            "modality": "eeg_openmeeg",
-            "label": "EEG OpenMEEG",
+            "modality": "eeg",
+            "label": "EEG",
             "output_units": "uV",
             "output_scale": 1e6,
             "frequency_spectrum_model": "power law beta=1.4, 1-100 Hz",
@@ -651,9 +679,66 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "note",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _fmt_with_unit(value: float, unit: str) -> str:
+    if unit == "1e-3 rel.":
+        return f"{_fmt_number(value * 1e-3)} Delta I / I"
+    return f"{_fmt_number(value)} {unit}"
+
+
+def build_main_readme_capacity_section(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        MAIN_README_TABLE_BEGIN,
+        "### Capacity Summary",
+        "",
+        "| Modality | Sample rate (Hz) | Freq spectrum model | Covariance computation | Output amp | Output noise | SNR | Bit-rate (bits/s) | Capacity / sample (bits) | Total capacity (bits/s) |",
+        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(rows, key=lambda item: float(item["capacity_bits_per_s"]), reverse=True):
+        bandwidth_hz = float(row["bandwidth_hz"])
+        capacity_bits_per_s = float(row["capacity_bits_per_s"])
+        capacity_bits_per_sample = capacity_bits_per_s / bandwidth_hz
+        output_units = str(row["output_units"])
+        lines.append(
+            "| {modality} | {sample_rate} | {freq_model} | {covariance} | {amp} | {noise} | {snr} | {bitrate} | {capacity_per_sample} | {capacity} |".format(
+                modality=row["modality"],
+                sample_rate=_fmt_number(bandwidth_hz),
+                freq_model=row["frequency_spectrum_model"],
+                covariance=row["covariance_computation"],
+                amp=_fmt_with_unit(float(row["output_amplitude"]), output_units),
+                noise=_fmt_with_unit(float(row["output_noise"]), output_units),
+                capacity_per_sample=_fmt_rate(capacity_bits_per_sample),
+                capacity=_fmt_rate(capacity_bits_per_s),
+                snr=_fmt_number(float(row["snr"])),
+                bitrate=_fmt_rate(float(row["bitrate_bits_per_s"])),
+            )
+        )
+    lines.extend(["", MAIN_README_TABLE_END])
+    return "\n".join(lines)
+
+
+def write_main_readme_capacity_table(path: Path, rows: list[dict[str, Any]]) -> None:
+    section = build_main_readme_capacity_section(rows)
+    text = path.read_text(encoding="utf-8")
+    if MAIN_README_TABLE_BEGIN in text and MAIN_README_TABLE_END in text:
+        start = text.index(MAIN_README_TABLE_BEGIN)
+        end = text.index(MAIN_README_TABLE_END) + len(MAIN_README_TABLE_END)
+        new_text = text[:start] + section + text[end:]
+    elif "### Channel Capacities" in text and "### SVD Spectrum" in text:
+        start = text.index("### Channel Capacities")
+        end = text.index("### SVD Spectrum")
+        new_text = text[:start] + section + "\n\n" + text[end:]
+    else:
+        first_break = text.find("\n\n")
+        if first_break == -1:
+            new_text = text.rstrip() + "\n\n" + section + "\n"
+        else:
+            new_text = text[: first_break + 2] + section + "\n\n" + text[first_break + 2 :]
+    path.write_text(new_text, encoding="utf-8")
 
 
 def write_markdown(
@@ -690,15 +775,36 @@ def write_markdown(
     us_record, _ = _load_us_cone_json(US_RBC_CONE_SLICE_CBV_VARIABILITY_RESULTS_DIR)
     us_amp = _us_output_amplitude_components(us_record)
     us_rbc = us_record.get("rbc_scaling") or {}
+    eeg_row = next((row for row in rows if row["modality"] == "EEG"), None)
+    eeg_uses_saved_spectrum = bool(
+        eeg_row and "fall back to the selected saved Johnson covariance" in eeg_row["note"]
+    )
+    if eeg_uses_saved_spectrum:
+        eeg_note = (
+            "- EEG uses the selected saved Johnson covariance spectrum row because "
+            "the empirical lead-field calibration cache is not available in this checkout; "
+            "output amplitude reports the typical EEG signal amplitude, and the saved "
+            "Johnson covariance row supplies the detector-noise scale."
+        )
+    else:
+        eeg_note = (
+            "- EEG uses the empirically anchored EEG calibration from the merged EEG fix, "
+            "with output power-law beta=1.4 over 1--100 Hz; output amplitude reports "
+            "the typical EEG signal amplitude, and the saved Johnson covariance row "
+            "supplies the detector-noise scale."
+        )
 
     lines = [
         "# Modality Noise and Capacity Summary",
         "",
         "Rows select the largest available voxel count, then the largest available",
         "sensor count within that voxel count. Bitrate and capacity are computed",
-        "from saved SVD spectra or SLQ spectral estimates, except EEG, which uses",
-        "the merged empirically anchored lead-field calibration.",
-        "Neural rows use the output temporal power-spectrum workflow; EEG uses beta=1.4 over 1--100 Hz by default.",
+        "from saved SVD spectra or SLQ spectral estimates. EEG uses the merged",
+        "empirically anchored lead-field calibration when the cached lead field",
+        "is available; otherwise it falls back to the saved Johnson covariance",
+        "spectrum row. Neural rows use the output temporal power-spectrum workflow;",
+        "EEG uses beta=1.4 over 1--100 Hz",
+        "by default.",
         "",
         "| Modality | BW Hz | Freq spectrum model | Covariance computation | Output unit | Output amp | Output noise | SNR | Bit-rate | Capacity |",
         "| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
@@ -724,7 +830,7 @@ def write_markdown(
             "",
             "## Selection Notes",
             "",
-            "- EEG uses the empirically anchored EEG calibration from the merged EEG fix, with output power-law beta=1.4 over 1--100 Hz; output amplitude reports the typical EEG signal amplitude, and the saved Johnson covariance row supplies the detector-noise scale.",
+            eeg_note,
             meg_note + " MEG uses the default neural output power-law beta=1.7 over 1--100 Hz.",
             "- fNIRS does not currently have a saved spatial covariance sweep, so its row uses the scalar detector-noise spectrum.",
             "- US uses the 128k-source 50 kHz analytical cone-scaled RBC SLQ result, `1 Hz` bitrate bandwidth, a 2 MHz range-slice source-power correction, a `0.01` voxel-to-sensor amplitude factor for 1% CBV variability, and lambda-cubed spatial scaling from 50 kHz to 2 MHz. The capacity column repeats the lambda-cubed-scaled equal-power SLQ bitrate as a lower-bound proxy because water-filled capacity was not recomputed from a full spectrum.",
@@ -755,7 +861,7 @@ def write_markdown(
             "",
             "| Modality | Output amplitude basis | Output noise basis |",
             "| --- | --- | --- |",
-            "| EEG OpenMEEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise, and bitrate/capacity use that same SNR through the anchored EEG mode-gain calculation with output power-law beta=1.4 over 1--100 Hz. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |",
+            "| EEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise. When the cached empirical lead field is available, bitrate/capacity use that SNR through the anchored EEG mode-gain calculation with output power-law beta=1.4 over 1--100 Hz; otherwise they use the selected saved Johnson covariance spectrum row. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |",
             f"| MEG OPM | `100 fT` typical evoked MEG field amplitude | `5 fT/sqrt(Hz)` OPM field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
             f"| MEG SQUID | `100 fT` typical evoked MEG field amplitude | `1 fT/sqrt(Hz)` SQUID field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
             "| fNIRS CW | `0.001` relative-intensity hemodynamic response (`1000 ppm`) | Photon shot noise from `P=5 mW`, `lambda=830 nm`, `OD=4`, divided over channels and bandwidth. |",
@@ -822,19 +928,22 @@ def write_markdown(
             "Here `Z` is built from `guti/modalities/eeg/scalp_resistance.py`,",
             "`B_J=100 Hz`, electrode area is `1 cm^2`, and `lmax=2000`.",
             "",
-            "For bitrate/capacity, EEG uses the merged empirically anchored",
-            "calibration instead of trusting the absolute OpenMEEG/BEM gain. The",
-            "cached lead-field shape is cleaned with a boundary margin and scaled so",
-            "a reference source has the displayed single-channel amplitude SNR:",
+            "When the cached lead field is available, EEG uses the merged",
+            "empirically anchored calibration instead of trusting the absolute",
+            "OpenMEEG/BEM gain. The cached lead-field shape is cleaned with a",
+            "boundary margin and scaled so a reference source has the displayed",
+            "single-channel amplitude SNR:",
             "",
             "$$",
             "g_i = \\mathrm{SNR}_{ref}\\frac{\\sigma_i(A_{clean})}{p_{ref}},",
             "\\qquad \\mathrm{SNR}_{ref}=A_{out}/\\sigma_{out}.",
             "$$",
             "",
-            "The table's EEG bitrate is the equal-power sum over `g_i`; EEG capacity",
-            "water-fills the same anchored mode gains. In this summary those gains",
-            "are evaluated through the output temporal-spectrum workflow with:",
+            "In anchored mode, the table's EEG bitrate is the equal-power sum over",
+            "`g_i`; EEG capacity water-fills the same anchored mode gains. If the",
+            "cache is unavailable, the generated row falls back to the selected",
+            "saved Johnson covariance spectrum's bitrate/capacity. In this summary",
+            "the EEG frequency weighting is:",
             "",
             "$$",
             "S_{out}(f) \\propto f^{-1.4},\\qquad 1\\le f\\le 100\\,\\mathrm{Hz}.",
@@ -1065,6 +1174,9 @@ def main() -> int:
         encoding="utf-8",
     )
     write_markdown(args.outdir / "README.md", rows, notes, load_errors=errors)
+    if not args.no_main_readme:
+        write_main_readme_capacity_table(args.main_readme, rows)
+        print(f"Updated main README at {args.main_readme}")
     print(f"Wrote {len(rows)} rows to {args.outdir}")
     if errors:
         print(f"Skipped {len(errors)} load errors")

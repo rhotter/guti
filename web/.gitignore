@@ -35,4 +35,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 public/data/*
+!public/data/eeg.json
 !public/data/meg_svd_components.json

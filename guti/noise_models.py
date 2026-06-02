@@ -858,8 +858,8 @@ def compute_modality_output_noise_covariance(
 
 
 NOISE_MODELS = {
-    "eeg_openmeeg": NoiseModel(
-        canonical_name="eeg_openmeeg",
+    "eeg": NoiseModel(
+        canonical_name="eeg",
         noise_source="Johnson noise at the electrode-contact / front-end",
         measurement_units="V",
         reference_sensor_count=256,
@@ -1031,7 +1031,6 @@ NOISE_MODELS = {
 
 def canonicalize_modality_name(modality_name: str) -> str:
     folder_name_aliases = {
-        "eeg": "eeg_openmeeg",
         "td_fnirs": "td_fnirs_analytical",
         "us": "us_analytical",
         "fnirs_analytical_cw": "cw_fnirs",

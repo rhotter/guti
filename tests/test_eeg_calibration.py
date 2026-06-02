@@ -22,7 +22,7 @@ class TestEEGCalibration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.A, cls.pos = load_eeg_leadfield()
-        model = get_noise_model("eeg_openmeeg")
+        model = get_noise_model("eeg")
         cls.snr_today = model.anchor_snr_today
         cls.snr_fund = model.anchor_snr_fundamental
 

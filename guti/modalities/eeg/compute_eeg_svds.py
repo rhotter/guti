@@ -126,7 +126,7 @@ for sweep_value in sweep_values:
     # Record the actual number of sources produced by the BEM builder.
     params.num_brain_grid_points = int(G_eeg.shape[1])
 
-    save_svd(s_eeg, modality_name="eeg_openmeeg", params=params)
+    save_svd(s_eeg, modality_name="eeg", params=params)
 
     print(f"Condition number: {s_eeg[0] / s_eeg[-1]:.2e}")
     print(f"Saved SVD with parameters: {params}")
@@ -139,7 +139,7 @@ print("\n" + "=" * 80)
 print("EEG Parameter Sweep Summary")
 print("=" * 80)
 
-variants = list_svd_variants("eeg_openmeeg", constant_params=CONSTANT_PARAMS)
+variants = list_svd_variants("eeg", constant_params=CONSTANT_PARAMS)
 
 print(f"\nFound {len(variants)} saved variants:")
 for key, variant in variants.items():
