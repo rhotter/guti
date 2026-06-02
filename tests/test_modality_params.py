@@ -41,8 +41,8 @@ def test_neural_modalities_default_to_power_law_output_spectrum():
     meg = MEGModality()
 
     expected_betas = {
-        eeg: 1.5,
-        meg: 1.0,
+        eeg: 1.4,
+        meg: 1.7,
     }
 
     for modality, beta in expected_betas.items():

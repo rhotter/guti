@@ -94,16 +94,16 @@ DEFAULT_NOISE_CORRELATION_KERNEL: NoiseCorrelationKernel = "gaussian"
 # noise = sqrt(4 * 1.38e-23 * 310 * 5000 * 100) ≈ 9.25e-8 V
 _EEG_NOISE_TODAY = math.sqrt(4 * K_B * BODY_TEMP_K * 5_000 * 100)  # ~9.25e-8 V
 
-# MEG SQUID: 5 fT/√Hz today, 0.1 fT/√Hz fundamental, BW_ref = 100 Hz
-_MEG_SQUID_NOISE_TODAY = 5e-15 * math.sqrt(100)  # 5e-14 T
+# MEG SQUID: 1 fT/√Hz today, 0.1 fT/√Hz fundamental, BW_ref = 100 Hz
+_MEG_SQUID_NOISE_TODAY = 1e-15 * math.sqrt(100)  # 1e-14 T
 _MEG_SQUID_NOISE_FUND = 0.1e-15 * math.sqrt(100)  # 1e-15 T
 
-# MEG OPM: 15 fT/√Hz today, 0.5 fT/√Hz fundamental (spin projection noise, 1 cm³ SERF cell).
+# MEG OPM: 5 fT/√Hz today, 0.5 fT/√Hz fundamental (spin projection noise, 1 cm³ SERF cell).
 # The body thermal floor (0.1 fT/√Hz) is NOT the binding limit for wearable OPMs:
 # spin projection noise δB ∝ 1/√(N_atoms·T) gives ~0.5 fT/√Hz for a 1 cm³ cell (~10¹⁴ atoms).
 # Reaching body thermal would require ~40 cm³ cells — incompatible with wearable use.
 # SQUIDs ARE body-thermal-limited (quantum limit ~0.0001 fT/√Hz is far below body thermal).
-_MEG_OPM_NOISE_TODAY = 15e-15 * math.sqrt(100)  # 1.5e-13 T
+_MEG_OPM_NOISE_TODAY = 5e-15 * math.sqrt(100)  # 5e-14 T
 _MEG_OPM_NOISE_FUND = 0.5e-15 * math.sqrt(100)  # 5e-15 T  (spin projection, 1 cm³ cell)
 
 # fNIRS CW shot noise (dimensionless relative intensity noise)

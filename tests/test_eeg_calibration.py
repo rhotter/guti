@@ -2,7 +2,9 @@ import unittest
 
 import numpy as np
 
+from guti.capacity import get_bitrate
 from guti.modalities.eeg.calibration import (
+    anchored_mode_snr,
     anchored_eeg_capacity,
     anchored_eeg_bitrate,
     exclude_boundary_voxels,
@@ -74,6 +76,41 @@ class TestEEGCalibration(unittest.TestCase):
             anchored_eeg_capacity(self.snr_today, leadfield=lf),
             anchored_eeg_bitrate(self.snr_today, leadfield=lf),
         )
+
+    def test_temporal_spectrum_scales_full_band_eeg_noise_per_bin(self):
+        """EEG full-band Johnson noise should be scaled to each freq bin."""
+        output_spectrum = np.array([1.0, 3.0])
+        bandwidth_hz = 8.0
+        time_resolution = 1.0 / bandwidth_hz
+        df = 2.0
+        lf = (self.A, self.pos)
+
+        actual = anchored_eeg_bitrate(
+            self.snr_today,
+            time_resolution=time_resolution,
+            leadfield=lf,
+            spectrum_kwargs={
+                "output_frequency_spectrum": output_spectrum,
+                "output_frequency_bin_width": df,
+            },
+        )
+
+        A_clean, pos_clean = exclude_boundary_voxels(self.A, self.pos)
+        snr_modes = anchored_mode_snr(A_clean, pos_clean, self.snr_today)
+        output_weights = output_spectrum / np.sum(output_spectrum)
+        bin_noise = np.sqrt(df / bandwidth_hz)
+        expected = sum(
+            get_bitrate(
+                snr_modes,
+                n_sources=len(snr_modes),
+                total_input_power=float(len(snr_modes)) * output_weight,
+                noise=bin_noise,
+                time_resolution=1.0 / df,
+            )
+            for output_weight in output_weights
+        )
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
 
 
 if __name__ == "__main__":

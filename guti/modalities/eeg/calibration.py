@@ -148,6 +148,10 @@ def anchored_eeg_bitrate(
 
     ``bitrate = (1/2T) * sum_i log2(1 + (snr_ref * sigma_i / peak_ref)^2)`` — the
     same ``get_bitrate`` prefactor convention as the other modes (T = 0.01 ⇒ 50).
+    If ``spectrum_kwargs`` are supplied, ``snr_ref`` is treated as a full-band
+    amplitude SNR over ``1 / time_resolution`` Hz; the shared capacity code then
+    scales the unit full-band noise to each frequency bin with
+    ``sqrt(delta_f / bandwidth)``.
     Pass ``leadfield=(A, pos)`` to use a non-cached layout (e.g. from
     ``eeg.modality.build_eeg_gain``); otherwise the cached 256-sensor field is used.
     """
