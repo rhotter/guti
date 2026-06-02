@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a clean EEG OpenMEEG SVD sweep over voxel and sensor counts."""
+"""Run a clean EEG SVD sweep over voxel and sensor counts."""
 
 from __future__ import annotations
 
@@ -43,15 +43,15 @@ DEFAULT_SOURCE_SPACING_MM = (40.0, 30.0, 20.0, 15.0, 10.0, 8.0, 6.0, 5.0, 4.0)
 DEFAULT_SENSOR_COUNTS = (32, 64, 128, 256, 512, 1024, 2048, 10000)
 DEFAULT_GRID_RESOLUTION_MM = 20.0
 DEFAULT_SOURCE_RADIUS_MARGIN_MM = 5.0
-DEFAULT_OUTPUT_DIR = Path("results/variants/eeg_openmeeg_clean_sweep_20260601_margin5mm")
-DEFAULT_WORK_DIR = Path("results/tmp/eeg_openmeeg_clean_sweep_20260601")
+DEFAULT_OUTPUT_DIR = Path("results/variants/eeg_clean_sweep_20260601_margin5mm")
+DEFAULT_WORK_DIR = Path("results/tmp/eeg_clean_sweep_20260601")
 DEFAULT_BEM_DIR = DEFAULT_WORK_DIR / "bem_model/eeg"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate EEG OpenMEEG singular-value spectra for a rectangular "
+            "Generate EEG singular-value spectra for a rectangular "
             "source-spacing by sensor-count sweep."
         )
     )
@@ -269,7 +269,7 @@ def noise_key(params: Parameters | dict[str, Any]) -> tuple[Any, ...]:
 
 
 def run_comment_for_args(args: argparse.Namespace) -> str:
-    base = "clean EEG OpenMEEG n_voxels x n_sensors convergence sweep"
+    base = "clean EEG n_voxels x n_sensors convergence sweep"
     if not args.save_noise_normalized:
         return base
     if args.noise_covariance_model == "distance_kernel":
@@ -377,7 +377,7 @@ def compute_sensor_noise_covariance_for_args(
     noise_std = None if args.johnson_absolute_scale else detector_noise
     return compute_johnson_noise_covariance(
         impedance,
-        bandwidth_hz=get_noise_model("eeg_openmeeg").reference_bandwidth_hz,
+        bandwidth_hz=get_noise_model("eeg").reference_bandwidth_hz,
         series_resistance_ohm=args.johnson_series_resistance_ohm,
         noise_std=noise_std,
     )
@@ -410,7 +410,7 @@ def main() -> int:
                 f"{args.max_save_noise_normalized_sensors}."
             )
 
-    print(f"Planned EEG OpenMEEG jobs: {len(jobs)}")
+    print(f"Planned EEG jobs: {len(jobs)}")
     for source_spacing_mm, num_sensors in jobs:
         n_voxels = len(
             eeg_grid_positions(source_spacing_mm, args.source_radius_margin_mm)
@@ -459,7 +459,7 @@ def main() -> int:
             continue
 
         print(
-            f"[{index}/{len(jobs)}] EEG OpenMEEG "
+            f"[{index}/{len(jobs)}] EEG "
             f"source_spacing_mm={source_spacing_mm:g} "
             f"n_voxels={n_voxels} num_sensors={num_sensors}"
         )
@@ -486,7 +486,7 @@ def main() -> int:
         noise_extra_arrays: dict[str, np.ndarray] = {}
         if args.save_noise_normalized:
             detector_noise = compute_output_noise_std(
-                "eeg_openmeeg",
+                "eeg",
                 n_sensors=num_sensors,
             )
             sensor_noise_covariance = compute_sensor_noise_covariance_for_args(

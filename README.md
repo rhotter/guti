@@ -1,12 +1,17 @@
 # Grand unified theory of imaging
 
-### Channel Capacities
+<!-- BEGIN GENERATED MODALITY CAPACITY SUMMARY -->
+### Capacity Summary
 
-![Birate](./results/bitrate.png)
+| Modality | Sample rate (Hz) | Freq spectrum model | Covariance computation | Output amp | Output noise | SNR | Bit-rate (bits/s) | Capacity / sample (bits) | Total capacity (bits/s) |
+| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| US 2 MHz RBC cone slice 1% CBV | 1 | none; 1 Hz brain-state band; 2 MHz range slice; 1% CBV variability; lambda^3 spatial scaling | Scalar IID 5 mPa pressure noise with 1% CBV cone-scaled RBC operator | 0.723 mPa | 5 mPa | 0.145 | 70.8M | 70.8M | 70.8M |
+| MEG SQUID | 100 | power law beta=1.7, 1-100 Hz | EEG spherical Johnson correlation + SQUID scalar diagonal | 100 fT | 10 fT | 10 | 17k | 630 | 63k |
+| fNIRS CW | 10 | none; scalar 10 Hz band | Scalar IID diagonal from photon shot noise | 0.001 Delta I / I | 6.188e-05 Delta I / I | 16.2 | 49.3k | 6.13k | 61.3k |
+| MEG OPM | 100 | power law beta=1.7, 1-100 Hz | EEG spherical Johnson correlation + OPM scalar diagonal | 100 fT | 50 fT | 2 | 10.3k | 609 | 60.9k |
+| EEG | 100 | power law beta=1.4, 1-100 Hz | Layered spherical Johnson impedance covariance | 5 uV | 0.156 uV | 32.1 | 49.8k | 554 | 55.4k |
 
-### Spatial Channel Capacities
-
-![Spatial Channel Capacities](./results/spatial_channel_capacity.png?v=2)
+<!-- END GENERATED MODALITY CAPACITY SUMMARY -->
 
 ### SVD Spectrum
 

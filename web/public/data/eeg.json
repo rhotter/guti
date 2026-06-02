@@ -1,6 +1,6 @@
 {
-  "modality": "eeg_openmeeg",
-  "label": "EEG (OpenMEEG)",
+  "modality": "eeg",
+  "label": "EEG",
   "sweep_params": [
     "num_sensors",
     "source_spacing_mm",

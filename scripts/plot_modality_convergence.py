@@ -46,14 +46,19 @@ class SweepSpec:
 
 SWEEP_SPECS = (
     SweepSpec(
-        name="eeg_openmeeg",
-        label="EEG OpenMEEG",
-        noise_model="eeg_openmeeg",
+        name="eeg",
+        label="EEG",
+        noise_model="eeg",
         variant_dirs=(
+            "results/variants/eeg_clean_sweep_20260601_margin5mm",
             "results/variants/eeg_openmeeg_clean_sweep_20260601_margin5mm",
+            "results/variants/eeg_correlated_noise_20260601_margin5mm",
             "results/variants/eeg_openmeeg_correlated_noise_20260601_margin5mm",
+            "results/variants/eeg_correlated_noise_exponential_L18p688mm_20260601_margin5mm",
             "results/variants/eeg_openmeeg_correlated_noise_exponential_L18p688mm_20260601_margin5mm",
+            "results/variants/eeg_johnson_volume_covariance_20260601_margin5mm",
             "results/variants/eeg_openmeeg_johnson_volume_covariance_20260601_margin5mm",
+            "results/variants/eeg_spherical_johnson_covariance_20260602_margin5mm",
             "results/variants/eeg_openmeeg_spherical_johnson_covariance_20260602_margin5mm",
         ),
         source_orientations=3,
@@ -184,8 +189,27 @@ def load_variant(
             "spectrum_scale_factor",
         ),
         "noise_covariance_model": _optional_np_scalar(data, "noise_covariance_model"),
+        "noise_detector_std_t": _optional_np_scalar(data, "noise_detector_std_t"),
         "noise_detector_std_v": _optional_np_scalar(data, "noise_detector_std_v"),
         "noise_absolute_scale": _optional_np_scalar(data, "noise_absolute_scale"),
+        "johnson_voxel_resolution_mm": _optional_np_scalar(
+            data,
+            "johnson_voxel_resolution_mm",
+        ),
+        "johnson_solver": _optional_np_scalar(data, "johnson_solver"),
+        "johnson_sensor_components": _optional_np_scalar(
+            data,
+            "johnson_sensor_components",
+        ),
+        "johnson_n_voxels": _optional_np_scalar(data, "johnson_n_voxels"),
+        "johnson_raw_body_noise_median_T_per_sqrtHz": _optional_np_scalar(
+            data,
+            "johnson_raw_body_noise_median_T_per_sqrtHz",
+        ),
+        "johnson_regularization_jitter_T2": _optional_np_scalar(
+            data,
+            "johnson_regularization_jitter_T2",
+        ),
         "johnson_electrode_area_cm2": _optional_np_scalar(
             data,
             "johnson_electrode_area_cm2",
@@ -343,6 +367,10 @@ def variant_record(spec: SweepSpec, path: Path) -> dict[str, Any]:
         "noise_model_type": noise_model_type,
         "noise_correlation_length_mm": params.noise_correlation_length_mm,
         "noise_correlation_kernel": params.noise_correlation_kernel,
+        "noise_voxel_resolution_mm": params.noise_voxel_resolution_mm,
+        "noise_solver": params.noise_solver,
+        "noise_absolute_scale": params.noise_absolute_scale,
+        "noise_sensor_components": params.noise_sensor_components,
         "total_input_power": float(total_input_power),
         "bitrate_bits_per_s": float(bitrate),
         "channel_capacity_bits_per_s": float(capacity),
@@ -369,8 +397,13 @@ def _noise_record_key(record: dict[str, Any]) -> tuple[Any, ...]:
         return (record["noise_model_type"], None, None)
     return (
         record["noise_model_type"],
+        str(record.get("noise_covariance_model") or "unknown").lower(),
         str(record.get("noise_correlation_kernel") or "unknown").lower(),
         _noise_length_key(record.get("noise_correlation_length_mm")),
+        _noise_length_key(record.get("noise_voxel_resolution_mm")),
+        str(record.get("noise_solver") or "").lower(),
+        str(record.get("noise_sensor_components") or "").lower(),
+        bool(record.get("noise_absolute_scale") or False),
     )
 
 
@@ -430,8 +463,18 @@ def write_metrics(records: list[dict[str, Any]], errors: list[dict[str, str]], o
         "noise_covariance_model",
         "noise_correlation_length_mm",
         "noise_correlation_kernel",
+        "noise_voxel_resolution_mm",
+        "noise_solver",
+        "noise_sensor_components",
+        "noise_detector_std_t",
         "noise_detector_std_v",
         "noise_absolute_scale",
+        "johnson_voxel_resolution_mm",
+        "johnson_solver",
+        "johnson_sensor_components",
+        "johnson_n_voxels",
+        "johnson_raw_body_noise_median_T_per_sqrtHz",
+        "johnson_regularization_jitter_T2",
         "johnson_electrode_area_cm2",
         "johnson_lmax",
         "johnson_series_resistance_ohm",
@@ -572,6 +615,15 @@ def _format_noise_length_tag(value: Any) -> str | None:
 def noise_plot_tag(row: dict[str, Any]) -> str | None:
     if row["noise_model_type"] != "spatial_covariance":
         return None
+
+    covariance_model = str(row.get("noise_covariance_model") or "").lower()
+    if covariance_model.startswith("meg_johnson"):
+        components = str(row.get("noise_sensor_components") or "unknown").lower()
+        resolution = _format_noise_length_tag(row.get("noise_voxel_resolution_mm"))
+        scale = "absolute" if row.get("noise_absolute_scale") else "matched"
+        if resolution is None:
+            return f"{covariance_model}_{components}_{scale}"
+        return f"{covariance_model}_{components}_{resolution}mm_{scale}"
 
     kernel = str(row.get("noise_correlation_kernel") or "unknown").lower()
     length_mm = row.get("noise_correlation_length_mm")

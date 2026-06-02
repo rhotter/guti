@@ -25,17 +25,13 @@ class EEGModality(ImagingModality):
     def name(self) -> str:
         return "eeg"
 
-    @property
-    def noise_model_name(self) -> str:
-        return "eeg_openmeeg"
-
     def _get_default_modality_params(self) -> Parameters:
         return Parameters(
             num_sensors=256,
             source_spacing_mm=5.0,
             grid_resolution_mm=20.0,
             output_spectrum_type="power_law",
-            output_spectrum_beta=1.5,
+            output_spectrum_beta=1.4,
             output_spectrum_min_freq_hz=DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
             output_spectrum_max_freq_hz=DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
             output_spectrum_bin_width_hz=DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
@@ -57,7 +53,7 @@ class EEGModality(ImagingModality):
             source_spacing_mm=3.0,
             grid_resolution_mm=15.0,
             output_spectrum_type="power_law",
-            output_spectrum_beta=1.5,
+            output_spectrum_beta=1.4,
             output_spectrum_min_freq_hz=DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
             output_spectrum_max_freq_hz=DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
             output_spectrum_bin_width_hz=DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,

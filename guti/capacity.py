@@ -111,21 +111,21 @@ def default_output_frequency_spectrum_kwargs(
 ) -> dict[str, float | str]:
     """Return default output-spectrum kwargs for modality-level bitrate.
 
-    Direct neural field modalities use a 1/f output-power spectrum over the
+    Direct neural field modalities use a power-law output-power spectrum over the
     conventional 1--100 Hz band. Hemodynamic modalities already route through
     the HRF temporal spectrum, and the remaining modalities keep the historical
     single-band behavior unless a caller supplies an explicit spectrum.
     """
-    if modality in {"eeg", "eeg_openmeeg"}:
+    if modality == "eeg":
         return {
-            "output_power_law_beta": 1.5,
+            "output_power_law_beta": 1.4,
             "output_power_law_min_freq_hz": DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
             "output_power_law_max_freq_hz": DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
             "output_power_law_bin_width_hz": DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
         }
     if modality in {"meg_opm", "meg_squid"}:
         return {
-            "output_power_law_beta": 1.0,
+            "output_power_law_beta": 1.7,
             "output_power_law_min_freq_hz": DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
             "output_power_law_max_freq_hz": DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
             "output_power_law_bin_width_hz": DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
@@ -266,6 +266,39 @@ def _normalized_frequency_power_weights(
     return weighted / total
 
 
+def _scalar_noise_std_for_frequency_bin(
+    noise: float,
+    *,
+    frequency_bin_width: float,
+    time_resolution: float,
+) -> float:
+    """Convert a full-band noise std to a frequency-bin noise std."""
+    noise = _as_positive_finite(noise, name="noise")
+    frequency_bin_width = _as_positive_finite(
+        frequency_bin_width,
+        name="output_frequency_bin_width",
+    )
+    time_resolution = _as_positive_finite(time_resolution, name="time_resolution")
+    return float(noise * np.sqrt(frequency_bin_width * time_resolution))
+
+
+def _noise_covariance_for_frequency_bin(
+    output_noise_covariance: np.ndarray,
+    *,
+    frequency_bin_width: float,
+    time_resolution: float,
+) -> np.ndarray:
+    """Convert a full-band noise covariance to a frequency-bin covariance."""
+    frequency_bin_width = _as_positive_finite(
+        frequency_bin_width,
+        name="output_frequency_bin_width",
+    )
+    time_resolution = _as_positive_finite(time_resolution, name="time_resolution")
+    return np.asarray(output_noise_covariance, dtype=float) * (
+        frequency_bin_width * time_resolution
+    )
+
+
 def _resolve_spectral_bins(
     *,
     output_frequency_spectrum: np.ndarray | None,
@@ -282,6 +315,7 @@ def _resolve_spectral_bins(
     noise_power_law_bin_width_hz: float | None,
     noise: float | None,
     output_noise_covariance: np.ndarray | None,
+    time_resolution: float,
 ) -> tuple[np.ndarray, np.ndarray | None, float] | None:
     output_spectrum, output_df = _resolve_frequency_spectrum(
         spectrum=output_frequency_spectrum,
@@ -342,9 +376,12 @@ def _resolve_spectral_bins(
         if noise is None:
             noise_per_bin = noise_levels
         else:
-            if noise <= 0:
-                raise ValueError("noise must be positive")
-            noise_per_bin = float(noise) * noise_levels
+            bin_noise = _scalar_noise_std_for_frequency_bin(
+                noise,
+                frequency_bin_width=float(output_df),
+                time_resolution=time_resolution,
+            )
+            noise_per_bin = bin_noise * noise_levels
 
     return output_weights, noise_per_bin, float(output_df)
 
@@ -706,7 +743,12 @@ def get_bitrate(
     is evaluated with ``time_resolution = 1 / output_frequency_bin_width``, and
     the bin bitrates are summed. A supplied ``noise_frequency_spectrum`` gives
     absolute per-bin noise stds when ``noise`` is omitted, or per-bin
-    multipliers on the scalar noise std when ``noise`` is supplied.
+    multipliers on the scalar noise std when ``noise`` is supplied. Scalar noise
+    and noise covariances are interpreted as full-band values over
+    ``1 / time_resolution`` Hz and converted to each bin by
+    ``sqrt(output_frequency_bin_width * time_resolution)`` for standard
+    deviations, or ``output_frequency_bin_width * time_resolution`` for
+    covariances.
     """
     spectral_bins = _resolve_spectral_bins(
         output_frequency_spectrum=output_frequency_spectrum,
@@ -723,6 +765,7 @@ def get_bitrate(
         noise_power_law_bin_width_hz=noise_power_law_bin_width_hz,
         noise=noise,
         output_noise_covariance=output_noise_covariance,
+        time_resolution=time_resolution,
     )
     if spectral_bins is None:
         return _get_bitrate_flat(
@@ -743,6 +786,21 @@ def get_bitrate(
         raise ValueError("n_sources must be positive")
 
     output_weights, noise_per_bin, freq_bin_width = spectral_bins
+    bin_noise_from_scalar = None
+    bin_output_noise_covariance = output_noise_covariance
+    if noise_per_bin is None:
+        if noise is not None:
+            bin_noise_from_scalar = _scalar_noise_std_for_frequency_bin(
+                noise,
+                frequency_bin_width=freq_bin_width,
+                time_resolution=time_resolution,
+            )
+        elif output_noise_covariance is not None:
+            bin_output_noise_covariance = _noise_covariance_for_frequency_bin(
+                output_noise_covariance,
+                frequency_bin_width=freq_bin_width,
+                time_resolution=time_resolution,
+            )
     resolved_total_input_power = resolve_total_input_power(
         s,
         n_sources=n_sources,
@@ -755,15 +813,19 @@ def get_bitrate(
     total = 0.0
     for i, output_weight in enumerate(output_weights):
         bin_power = resolved_total_input_power * float(output_weight)
-        bin_noise = None if noise_per_bin is None else float(noise_per_bin[i])
+        bin_noise = (
+            bin_noise_from_scalar
+            if noise_per_bin is None
+            else float(noise_per_bin[i])
+        )
         total += _get_bitrate_flat(
             s,
             n_sources=n_sources,
             total_input_power=bin_power,
             n_outputs=n_outputs,
-            noise=noise if bin_noise is None else bin_noise,
+            noise=bin_noise,
             time_resolution=1.0 / freq_bin_width,
-            output_noise_covariance=output_noise_covariance,
+            output_noise_covariance=bin_output_noise_covariance,
         )
     return float(total)
 
@@ -921,6 +983,7 @@ def get_capacity(
         noise_power_law_bin_width_hz=noise_power_law_bin_width_hz,
         noise=noise,
         output_noise_covariance=output_noise_covariance,
+        time_resolution=time_resolution,
     )
     if spectral_bins is None:
         return _get_capacity_flat(
@@ -938,6 +1001,21 @@ def get_capacity(
 
     _validate_optional_matrix_shape(s, n_sources=n_sources, n_outputs=n_outputs)
     output_weights, noise_per_bin, freq_bin_width = spectral_bins
+    bin_noise_from_scalar = None
+    bin_output_noise_covariance = output_noise_covariance
+    if noise_per_bin is None:
+        if noise is not None:
+            bin_noise_from_scalar = _scalar_noise_std_for_frequency_bin(
+                noise,
+                frequency_bin_width=freq_bin_width,
+                time_resolution=time_resolution,
+            )
+        elif output_noise_covariance is not None:
+            bin_output_noise_covariance = _noise_covariance_for_frequency_bin(
+                output_noise_covariance,
+                frequency_bin_width=freq_bin_width,
+                time_resolution=time_resolution,
+            )
     resolved_total_input_power = resolve_total_input_power(
         s,
         n_sources=n_sources,
@@ -950,15 +1028,19 @@ def get_capacity(
     total = 0.0
     for i, output_weight in enumerate(output_weights):
         bin_power = resolved_total_input_power * float(output_weight)
-        bin_noise = None if noise_per_bin is None else float(noise_per_bin[i])
+        bin_noise = (
+            bin_noise_from_scalar
+            if noise_per_bin is None
+            else float(noise_per_bin[i])
+        )
         total += _get_capacity_flat(
             s,
             total_input_power=bin_power,
             n_sources=n_sources,
             n_outputs=n_outputs,
-            noise=noise if bin_noise is None else bin_noise,
+            noise=bin_noise,
             time_resolution=1.0 / freq_bin_width,
-            output_noise_covariance=output_noise_covariance,
+            output_noise_covariance=bin_output_noise_covariance,
         )
     return float(total)
 

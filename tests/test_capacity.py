@@ -561,6 +561,8 @@ class CapacityPowerTests(unittest.TestCase):
         n_outputs = 3
         noise = 0.3
         output_spectrum = np.array([1.0, 3.0])
+        bandwidth_hz = 8.0
+        time_resolution = 1.0 / bandwidth_hz
         df = 2.0
 
         actual = get_bitrate(
@@ -569,18 +571,20 @@ class CapacityPowerTests(unittest.TestCase):
             n_outputs=n_outputs,
             average_output_power=average_output_power,
             noise=noise,
+            time_resolution=time_resolution,
             output_frequency_spectrum=output_spectrum,
             output_frequency_bin_width=df,
         )
 
         weights = output_spectrum / np.sum(output_spectrum)
+        bin_noise = noise * np.sqrt(df / bandwidth_hz)
         expected = sum(
             get_bitrate(
                 s,
                 n_sources=n_sources,
                 n_outputs=n_outputs,
                 average_output_power=average_output_power * weight,
-                noise=noise,
+                noise=bin_noise,
                 time_resolution=1.0 / df,
             )
             for weight in weights
@@ -593,6 +597,8 @@ class CapacityPowerTests(unittest.TestCase):
         noise = 0.4
         output_spectrum = np.array([1.0, 1.0])
         noise_spectrum = np.array([1.0, 3.0])
+        bandwidth_hz = 6.0
+        time_resolution = 1.0 / bandwidth_hz
         df = 1.5
 
         actual = get_bitrate(
@@ -600,6 +606,7 @@ class CapacityPowerTests(unittest.TestCase):
             n_sources=2,
             total_input_power=total_input_power,
             noise=noise,
+            time_resolution=time_resolution,
             output_frequency_spectrum=output_spectrum,
             output_frequency_bin_width=df,
             noise_frequency_spectrum=noise_spectrum,
@@ -607,12 +614,13 @@ class CapacityPowerTests(unittest.TestCase):
         )
 
         output_weights = output_spectrum / np.sum(output_spectrum)
+        bin_noise_base = noise * np.sqrt(df / bandwidth_hz)
         expected = sum(
             get_bitrate(
                 s,
                 n_sources=2,
                 total_input_power=total_input_power * output_weight,
-                noise=noise * noise_level_scale,
+                noise=bin_noise_base * noise_level_scale,
                 time_resolution=1.0 / df,
             )
             for output_weight, noise_level_scale in zip(
@@ -704,6 +712,38 @@ class CapacityPowerTests(unittest.TestCase):
                 time_resolution=1.0 / df,
             )
             for output_weight, noise_level in zip(output_weights, noise_spectrum)
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_capacity_frequency_spectrum_scales_scalar_noise_to_bin_bandwidth(self):
+        s = np.array([1.8, 0.6])
+        total_input_power = 3.5
+        output_spectrum = np.array([1.0, 2.0])
+        noise = 0.45
+        bandwidth_hz = 12.0
+        time_resolution = 1.0 / bandwidth_hz
+        df = 3.0
+
+        actual = get_capacity(
+            s,
+            n_sources=2,
+            total_input_power=total_input_power,
+            noise=noise,
+            time_resolution=time_resolution,
+            output_frequency_spectrum=output_spectrum,
+            output_frequency_bin_width=df,
+        )
+
+        output_weights = output_spectrum / np.sum(output_spectrum)
+        bin_noise = noise * np.sqrt(df / bandwidth_hz)
+        expected = sum(
+            get_capacity(
+                s,
+                total_input_power=total_input_power * output_weight,
+                noise=bin_noise,
+                time_resolution=1.0 / df,
+            )
+            for output_weight in output_weights
         )
         np.testing.assert_allclose(actual, expected, rtol=1e-12)
 

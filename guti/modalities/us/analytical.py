@@ -15,12 +15,14 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from guti.data_utils import save_svd
 from guti.modalities.us.utils import (
+    SOUND_SPEED_M_S,
     build_source_signal,
     free_field_voxel_size,
     make_free_field_chunk_fn,
     create_free_field_sources as create_free_field_sources_real,
     create_free_field_receivers as create_free_field_receivers_real,
 )
+from guti.core import BRAIN_RADIUS
 from guti.noise_models import (
     DEFAULT_NOISE_CORRELATION_KERNEL,
     DEFAULT_NOISE_CORRELATION_LENGTH_MM,
@@ -128,6 +130,183 @@ def _sqrt_nonnegative_estimate(value: float, label: str) -> float:
             raise ValueError(f"{label} must be non-negative, got {value}")
     return math.sqrt(value)
 
+
+def _cone_transmissions(
+    positions_m: np.ndarray,
+    *,
+    half_angle_deg: float,
+    transmission_in_cone: float,
+    transmission_out_of_cone: float,
+) -> tuple[np.ndarray, int]:
+    center_m = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0], dtype=np.float64) * 1e-3
+    directions = np.asarray(positions_m, dtype=np.float64) - center_m[None, :]
+    norms = np.linalg.norm(directions, axis=1)
+    cos_threshold = math.cos(math.radians(half_angle_deg))
+    x_cosines = np.zeros_like(norms)
+    valid = norms > 0.0
+    x_cosines[valid] = directions[valid, 0] / norms[valid]
+    in_cone = valid & (x_cosines >= cos_threshold)
+    transmissions = np.where(
+        in_cone,
+        transmission_in_cone,
+        transmission_out_of_cone,
+    ).astype(np.float32)
+    return transmissions, int(np.count_nonzero(in_cone))
+
+
+def _rbc_common_gain(
+    *,
+    n_sources: int,
+    simulation_center_frequency_hz: float,
+    rbc_frequency_hz: float,
+    external_pressure_pa: float,
+    bsc_10mhz_cm_inv_sr_inv: float,
+    cbv: float,
+    voxel_volume_mm3: float,
+) -> tuple[float, dict[str, float]]:
+    """Return the scalar that converts the free-field 1/r factor to RBC Pa.
+
+    The raw analytical operator's pair amplitude is
+    ``2 k V_cell / (4 pi r)`` times the source waveform. The 2 MHz RBC model
+    uses ``P_external * sqrt(eta V_rbc) / r`` times the two skull transmissions.
+    Their shared ``1/r`` dependence means a single scalar plus source/output
+    transmission vectors implements the pairwise model.
+    """
+    bsc_blood_cm = bsc_10mhz_cm_inv_sr_inv * (rbc_frequency_hz / 10_000_000.0) ** 4
+    eta_m_inv_sr_inv = bsc_blood_cm * cbv * 100.0
+    voxel_volume_m3 = voxel_volume_mm3 * 1e-9
+    rbc_pressure_distance_factor = external_pressure_pa * math.sqrt(
+        eta_m_inv_sr_inv * voxel_volume_m3
+    )
+
+    source_volume_m3 = (2.0 / 3.0) * math.pi * (BRAIN_RADIUS * 1e-3) ** 3
+    source_cell_volume_m3 = source_volume_m3 / float(n_sources)
+    simulation_wavelength_m = SOUND_SPEED_M_S / simulation_center_frequency_hz
+    simulation_wavenumber = 2.0 * math.pi / simulation_wavelength_m
+    raw_distance_factor = (
+        2.0 * simulation_wavenumber * source_cell_volume_m3
+    ) / (4.0 * math.pi)
+    if raw_distance_factor <= 0.0:
+        raise ValueError("raw free-field distance factor must be positive")
+
+    gain = rbc_pressure_distance_factor / raw_distance_factor
+    reference_range_m = 0.10
+    reference_no_skull_pressure_pa = rbc_pressure_distance_factor / reference_range_m
+    return gain, {
+        "rbc_bsc_blood_cm_inv_sr_inv": bsc_blood_cm,
+        "rbc_eta_m_inv_sr_inv": eta_m_inv_sr_inv,
+        "rbc_voxel_volume_m3": voxel_volume_m3,
+        "rbc_pressure_distance_factor_pa_m": rbc_pressure_distance_factor,
+        "rbc_reference_range_m": reference_range_m,
+        "rbc_reference_no_skull_pressure_pa": reference_no_skull_pressure_pa,
+        "simulation_raw_distance_factor_m": raw_distance_factor,
+        "rbc_common_gain_pa": gain,
+    }
+
+
+def _scale_chunk_matrix(
+    chunk_matrix: torch.Tensor,
+    *,
+    start: int,
+    end: int,
+    nt: int,
+    sensor_transmissions: np.ndarray | None,
+    source_transmissions_t: torch.Tensor | None,
+    rbc_common_gain: float,
+) -> torch.Tensor:
+    if sensor_transmissions is None or source_transmissions_t is None:
+        return chunk_matrix
+    dtype = chunk_matrix.dtype
+    device = chunk_matrix.device
+    sensor_scale = torch.as_tensor(
+        sensor_transmissions[start:end],
+        device=device,
+        dtype=dtype,
+    ).repeat_interleave(nt)
+    source_scale = source_transmissions_t.to(device=device, dtype=dtype)
+    return chunk_matrix * sensor_scale[:, None] * source_scale[None, :] * float(rbc_common_gain)
+
+
+@torch.no_grad()
+def _save_streamed_gram_matrix(
+    compute_chunk_matrix,
+    *,
+    num_sensors_total: int,
+    num_sources_total: int,
+    nt: int,
+    sensor_batch_size: int,
+    gram_side: str,
+    output_path: str,
+    device: str,
+) -> tuple[str, tuple[int, int], float]:
+    n_outputs_total = num_sensors_total * nt
+    if gram_side == "auto":
+        gram_side = "output" if n_outputs_total < num_sources_total else "source"
+    t0 = time.perf_counter()
+    if gram_side == "source":
+        gram = torch.zeros(
+            (num_sources_total, num_sources_total),
+            dtype=torch.float32,
+            device=device,
+        )
+        for start in range(0, num_sensors_total, sensor_batch_size):
+            end = min(start + sensor_batch_size, num_sensors_total)
+            print(
+                f"[gram-save] source side batch "
+                f"{start // sensor_batch_size + 1}/"
+                f"{(num_sensors_total + sensor_batch_size - 1) // sensor_batch_size}: "
+                f"{start}:{end}",
+                flush=True,
+            )
+            chunk_matrix = compute_chunk_matrix(start, end)
+            gram.addmm_(chunk_matrix.T, chunk_matrix)
+            del chunk_matrix
+            if device == "cuda":
+                torch.cuda.empty_cache()
+        gram_label = "G^T G"
+    elif gram_side == "output":
+        G = torch.empty(
+            (n_outputs_total, num_sources_total),
+            dtype=torch.float32,
+            device=device,
+        )
+        row_start = 0
+        for start in range(0, num_sensors_total, sensor_batch_size):
+            end = min(start + sensor_batch_size, num_sensors_total)
+            print(
+                f"[gram-save] materialize output rows batch "
+                f"{start // sensor_batch_size + 1}/"
+                f"{(num_sensors_total + sensor_batch_size - 1) // sensor_batch_size}: "
+                f"{start}:{end}",
+                flush=True,
+            )
+            chunk_matrix = compute_chunk_matrix(start, end)
+            rows = chunk_matrix.shape[0]
+            G[row_start:row_start + rows] = chunk_matrix
+            row_start += rows
+            del chunk_matrix
+            if device == "cuda":
+                torch.cuda.empty_cache()
+        print(f"[gram-save] computing output Gram for G shape={tuple(G.shape)}", flush=True)
+        gram = G @ G.T
+        del G
+        gram_label = "G G^T"
+    else:
+        raise ValueError(f"Unsupported gram_side={gram_side!r}")
+
+    if device == "cuda":
+        torch.cuda.synchronize()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    print(f"[gram-save] saving {gram_label} shape={tuple(gram.shape)} to {output_path}", flush=True)
+    np.save(output_path, gram.detach().cpu().numpy())
+    elapsed = time.perf_counter() - t0
+    print(f"[gram-save] saved in {elapsed:.3f}s", flush=True)
+    shape = tuple(int(x) for x in gram.shape)
+    del gram
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    return gram_label, shape, elapsed
+
 parser = argparse.ArgumentParser(description='Ultrasound simulation parameters')
 parser.add_argument('--n_sources', type=int, default=32000, help='Number of source points')
 parser.add_argument('--n_sensors', type=int, default=1000, help='Number of sensor points') 
@@ -148,8 +327,17 @@ parser.add_argument(
     '--input_power_convention',
     type=str,
     default='average_output_power',
-    choices=['average_output_power', 'fixed_total_source_power'],
+    choices=['average_output_power', 'fixed_total_source_power', 'fixed_input_power_per_source'],
     help='Input power convention for bitrate/capacity estimates.',
+)
+parser.add_argument(
+    '--input_power_per_source',
+    type=float,
+    default=1.0,
+    help=(
+        'Per-source input power used when --input_power_convention='
+        'fixed_input_power_per_source.'
+    ),
 )
 parser.add_argument('--accumulate_on_cpu', action='store_true', help='Accumulate Gram matrix on CPU instead of GPU')
 parser.add_argument('--svd_device', type=str, default='cuda', choices=['cpu', 'cuda'], help='Device to compute eigenvalues/SVD of Gram')
@@ -237,6 +425,80 @@ parser.add_argument(
     help='Use the raw propagation matrix instead of dividing by sqrt(n_sources * n_sensors).',
 )
 parser.add_argument(
+    '--rbc_pairwise_scaling',
+    action='store_true',
+    help=(
+        'Scale each source-sensor pair to the 2 MHz RBC backscatter pressure '
+        'model before Gram/SLQ computations.'
+    ),
+)
+parser.add_argument(
+    '--rbc_frequency_hz',
+    type=float,
+    default=2_000_000.0,
+    help='RBC backscatter frequency used by --rbc_pairwise_scaling.',
+)
+parser.add_argument(
+    '--rbc_external_pressure_pa',
+    type=float,
+    default=1_000_000.0,
+    help='External transmit pressure for the RBC pressure echo estimate.',
+)
+parser.add_argument(
+    '--rbc_bsc_10mhz_cm_inv_sr_inv',
+    type=float,
+    default=3e-5,
+    help='Blood backscatter coefficient at 10 MHz in cm^-1 sr^-1.',
+)
+parser.add_argument(
+    '--rbc_cbv',
+    type=float,
+    default=0.03,
+    help='Cerebral blood volume fraction for the RBC backscatter estimate.',
+)
+parser.add_argument(
+    '--rbc_voxel_volume_mm3',
+    type=float,
+    default=24.0,
+    help='Voxel volume used in the RBC per-voxel pressure echo estimate.',
+)
+parser.add_argument(
+    '--skull_cone_half_angle_deg',
+    type=float,
+    default=15.0,
+    help='Half angle around the positive x-axis for the high-transmission skull cone.',
+)
+parser.add_argument(
+    '--skull_transmission_in_cone',
+    type=float,
+    default=0.5,
+    help='Skull pressure transmission for sources/sensors in the cone.',
+)
+parser.add_argument(
+    '--skull_transmission_out_of_cone',
+    type=float,
+    default=0.1,
+    help='Skull pressure transmission for sources/sensors outside the cone.',
+)
+parser.add_argument(
+    '--save_gram_only',
+    action='store_true',
+    help=(
+        'When used with --save_gram_matrix and --bitrate_method=slq, save the '
+        'streamed Gram matrix without doing an exact eigendecomposition.'
+    ),
+)
+parser.add_argument(
+    '--gram_side',
+    type=str,
+    default='auto',
+    choices=['auto', 'source', 'output'],
+    help=(
+        'Gram side to save. source saves G^T G; output saves G G^T; auto saves '
+        'the smaller side.'
+    ),
+)
+parser.add_argument(
     '--result_json_path',
     type=str,
     default=None,
@@ -249,12 +511,29 @@ def main() -> None:
     args = parser.parse_args()
     if args.noise_multiplier <= 0.0:
         raise ValueError("--noise_multiplier must be positive")
+    if args.input_power_per_source < 0.0 or not math.isfinite(args.input_power_per_source):
+        raise ValueError("--input_power_per_source must be finite and non-negative")
     if args.noise_correlation_length_mm <= 0.0:
         raise ValueError("--noise_correlation_length_mm must be positive")
     if args.average_output_signal_amplitude is not None and args.average_output_signal_amplitude < 0.0:
         raise ValueError("--average_output_signal_amplitude must be non-negative")
     if args.bitrate_time_resolution is not None and args.bitrate_time_resolution <= 0.0:
         raise ValueError("--bitrate_time_resolution must be positive")
+    if args.rbc_pairwise_scaling:
+        if args.rbc_frequency_hz <= 0.0:
+            raise ValueError("--rbc_frequency_hz must be positive")
+        if args.rbc_external_pressure_pa < 0.0:
+            raise ValueError("--rbc_external_pressure_pa must be non-negative")
+        if args.rbc_bsc_10mhz_cm_inv_sr_inv < 0.0:
+            raise ValueError("--rbc_bsc_10mhz_cm_inv_sr_inv must be non-negative")
+        if args.rbc_cbv < 0.0:
+            raise ValueError("--rbc_cbv must be non-negative")
+        if args.rbc_voxel_volume_mm3 < 0.0:
+            raise ValueError("--rbc_voxel_volume_mm3 must be non-negative")
+        if args.skull_cone_half_angle_deg < 0.0 or args.skull_cone_half_angle_deg > 180.0:
+            raise ValueError("--skull_cone_half_angle_deg must be in [0, 180]")
+        if args.skull_transmission_in_cone < 0.0 or args.skull_transmission_out_of_cone < 0.0:
+            raise ValueError("skull transmissions must be non-negative")
 
     n_sources = args.n_sources
     n_sensors = args.n_sensors
@@ -275,6 +554,80 @@ def main() -> None:
     sensor_positions = create_free_field_receivers_real(n_sensors)
 
     n_sources = source_positions.shape[0]
+    rbc_scaling_metadata = None
+    source_transmissions = None
+    sensor_transmissions = None
+    source_transmissions_t = None
+    source_transmissions_t_list = None
+    rbc_gain = 1.0
+
+    if args.rbc_pairwise_scaling:
+        source_transmissions, source_in_cone_count = _cone_transmissions(
+            source_positions,
+            half_angle_deg=args.skull_cone_half_angle_deg,
+            transmission_in_cone=args.skull_transmission_in_cone,
+            transmission_out_of_cone=args.skull_transmission_out_of_cone,
+        )
+        sensor_transmissions, sensor_in_cone_count = _cone_transmissions(
+            sensor_positions,
+            half_angle_deg=args.skull_cone_half_angle_deg,
+            transmission_in_cone=args.skull_transmission_in_cone,
+            transmission_out_of_cone=args.skull_transmission_out_of_cone,
+        )
+        rbc_gain, rbc_scaling_metadata = _rbc_common_gain(
+            n_sources=n_sources,
+            simulation_center_frequency_hz=center_frequency,
+            rbc_frequency_hz=args.rbc_frequency_hz,
+            external_pressure_pa=args.rbc_external_pressure_pa,
+            bsc_10mhz_cm_inv_sr_inv=args.rbc_bsc_10mhz_cm_inv_sr_inv,
+            cbv=args.rbc_cbv,
+            voxel_volume_mm3=args.rbc_voxel_volume_mm3,
+        )
+        ref_with_out_out = (
+            rbc_scaling_metadata["rbc_reference_no_skull_pressure_pa"]
+            * args.skull_transmission_out_of_cone
+            * args.skull_transmission_out_of_cone
+        )
+        ref_with_in_out = (
+            rbc_scaling_metadata["rbc_reference_no_skull_pressure_pa"]
+            * args.skull_transmission_in_cone
+            * args.skull_transmission_out_of_cone
+        )
+        ref_with_in_in = (
+            rbc_scaling_metadata["rbc_reference_no_skull_pressure_pa"]
+            * args.skull_transmission_in_cone
+            * args.skull_transmission_in_cone
+        )
+        rbc_scaling_metadata.update(
+            {
+                "rbc_pairwise_scaling": True,
+                "rbc_frequency_hz": float(args.rbc_frequency_hz),
+                "rbc_external_pressure_pa": float(args.rbc_external_pressure_pa),
+                "rbc_bsc_10mhz_cm_inv_sr_inv": float(args.rbc_bsc_10mhz_cm_inv_sr_inv),
+                "rbc_cbv": float(args.rbc_cbv),
+                "rbc_voxel_volume_mm3": float(args.rbc_voxel_volume_mm3),
+                "skull_cone_axis": "+x",
+                "skull_cone_half_angle_deg": float(args.skull_cone_half_angle_deg),
+                "skull_transmission_in_cone": float(args.skull_transmission_in_cone),
+                "skull_transmission_out_of_cone": float(args.skull_transmission_out_of_cone),
+                "source_in_cone_count": int(source_in_cone_count),
+                "sensor_in_cone_count": int(sensor_in_cone_count),
+                "source_in_cone_fraction": float(source_in_cone_count / len(source_positions)),
+                "sensor_in_cone_fraction": float(sensor_in_cone_count / len(sensor_positions)),
+                "reference_pressure_out_out_pa": float(ref_with_out_out),
+                "reference_pressure_in_out_pa": float(ref_with_in_out),
+                "reference_pressure_in_in_pa": float(ref_with_in_in),
+            }
+        )
+        print("rbc_pairwise_scaling: enabled")
+        print(f"source_in_cone_count: {source_in_cone_count}/{len(source_positions)}")
+        print(f"sensor_in_cone_count: {sensor_in_cone_count}/{len(sensor_positions)}")
+        print(f"rbc_common_gain_pa: {rbc_gain}")
+        print(f"reference_pressure_out_out_pa: {ref_with_out_out}")
+        print(f"reference_pressure_in_out_pa: {ref_with_in_out}")
+        print(f"reference_pressure_in_in_pa: {ref_with_in_in}")
+    else:
+        rbc_scaling_metadata = {"rbc_pairwise_scaling": False}
 
     # Source waveform
     time_step = 1e-1 / center_frequency
@@ -324,6 +677,8 @@ def main() -> None:
     gram_for_svd = None
     gram_side_for_svd = None
     gram_output_path = None
+    gram_shape_for_save = None
+    gram_save_elapsed = None
 
     if not args.slq_streaming:
         print("Computing SVD (batched simulation + Gram accumulation)...")
@@ -336,6 +691,8 @@ def main() -> None:
     source_positions_t = torch.tensor(source_positions, device=device)
     source_signals_t = torch.tensor(source_signals, device=device)
     voxel_size_t = torch.tensor(voxel_size, device=device)
+    if source_transmissions is not None:
+        source_transmissions_t = torch.tensor(source_transmissions, device=device)
 
     stream_device_ids = None
     slq_device_ids = None
@@ -357,9 +714,14 @@ def main() -> None:
         voxel_size_t_list = [
             torch.tensor(voxel_size, device=f"cuda:{dev}") for dev in stream_device_ids
         ]
+        if source_transmissions is not None:
+            source_transmissions_t_list = [
+                torch.tensor(source_transmissions, device=f"cuda:{dev}")
+                for dev in stream_device_ids
+            ]
 
     # Single-device receiver-batch chunk fn (shared with USModality via utils).
-    compute_chunk_matrix = make_free_field_chunk_fn(
+    base_compute_chunk_matrix = make_free_field_chunk_fn(
         source_positions_t,
         sensor_positions,
         source_signals_t,
@@ -372,12 +734,23 @@ def main() -> None:
         use_complex_amplitudes=use_complex_ampitudes,
     )
 
+    def compute_chunk_matrix(start: int, end: int) -> torch.Tensor:
+        return _scale_chunk_matrix(
+            base_compute_chunk_matrix(start, end),
+            start=start,
+            end=end,
+            nt=nt,
+            sensor_transmissions=sensor_transmissions,
+            source_transmissions_t=source_transmissions_t,
+            rbc_common_gain=rbc_gain,
+        )
+
 
     def make_compute_chunk_matrix_for_device(dev_id: int):
         if stream_device_ids is None or source_positions_t_list is None:
             raise ValueError("Streaming probe-parallel tensors are not initialized")
         idx = stream_device_ids.index(dev_id)
-        return make_free_field_chunk_fn(
+        base_fn = make_free_field_chunk_fn(
             source_positions_t_list[idx],
             sensor_positions,
             source_signals_t_list[idx],
@@ -389,6 +762,24 @@ def main() -> None:
             num_sources=num_sources_total,
             use_complex_amplitudes=use_complex_ampitudes,
         )
+        source_transmissions_t_for_device = (
+            None
+            if source_transmissions_t_list is None
+            else source_transmissions_t_list[idx]
+        )
+
+        def compute_chunk_matrix_for_device(start: int, end: int) -> torch.Tensor:
+            return _scale_chunk_matrix(
+                base_fn(start, end),
+                start=start,
+                end=end,
+                nt=nt,
+                sensor_transmissions=sensor_transmissions,
+                source_transmissions_t=source_transmissions_t_for_device,
+                rbc_common_gain=rbc_gain,
+            )
+
+        return compute_chunk_matrix_for_device
 
     G = None
     if not args.slq_streaming:
@@ -453,6 +844,32 @@ def main() -> None:
         t1 = time.perf_counter()
         print(f"gram_accumulate: {t1 - t0:.3f}s")
 
+    if args.slq_streaming and args.save_gram_matrix:
+        if not args.save_gram_only:
+            print(
+                "WARNING: --save_gram_matrix with --slq_streaming saves the Gram "
+                "without exact eigendecomposition. Pass --save_gram_only to make "
+                "this explicit.",
+                flush=True,
+            )
+        if args.gram_output_path is None:
+            gram_output_path = (
+                "results/us_analytical_grams/"
+                f"{int(round(center_frequency / 1_000.0))}khz_"
+                f"{num_sources_total}src_{num_sensors_total}sensors_gram.npy"
+            )
+        else:
+            gram_output_path = args.gram_output_path
+        gram_side_for_svd, gram_shape_for_save, gram_save_elapsed = _save_streamed_gram_matrix(
+            compute_chunk_matrix,
+            num_sensors_total=num_sensors_total,
+            num_sources_total=num_sources_total,
+            nt=nt,
+            sensor_batch_size=sensor_batch_size,
+            gram_side=args.gram_side,
+            output_path=gram_output_path,
+            device=device,
+        )
 
     t0 = time.perf_counter()
 
@@ -496,6 +913,7 @@ def main() -> None:
     physical_total_source_power = compute_input_amplitude("us_analytical") ** 2
     slq_frobenius_norm_sq = None
     slq_logdet_alpha = None
+    slq_elapsed_seconds = None
 
     matrix_normalization_scale = (
         1.0
@@ -652,7 +1070,9 @@ def main() -> None:
             s_normalized = s
         else:
             s_normalized = s / (len(source_positions)**0.5 * len(sensor_positions)**0.5)
-        if args.input_power_convention == "fixed_total_source_power":
+        if args.input_power_convention == "fixed_input_power_per_source":
+            total_input_power = len(source_positions) * args.input_power_per_source
+        elif args.input_power_convention == "fixed_total_source_power":
             total_input_power = physical_total_source_power / (source_amplitude_scale**2)
         else:
             total_input_power = total_input_power_from_average_output_power(
@@ -690,7 +1110,9 @@ def main() -> None:
             device=device,
             verbose=args.slq_verbose,
         )
-        if args.input_power_convention == "fixed_total_source_power":
+        if args.input_power_convention == "fixed_input_power_per_source":
+            total_input_power = len(source_positions) * args.input_power_per_source
+        elif args.input_power_convention == "fixed_total_source_power":
             total_input_power = physical_total_source_power / (source_amplitude_scale**2)
         else:
             total_input_power = total_input_power_from_average_output_power(
@@ -740,7 +1162,8 @@ def main() -> None:
             )
         if device == "cuda":
             torch.cuda.synchronize()
-        print(f"slq_elapsed: {time.perf_counter() - t0:.3f}s")
+        slq_elapsed_seconds = time.perf_counter() - t0
+        print(f"slq_elapsed: {slq_elapsed_seconds:.3f}s")
         print(f"bitrate_slq: {bitrate_slq}")
 
     result_record = {
@@ -758,6 +1181,8 @@ def main() -> None:
         "matrix_size": [int(num_sensors_total * nt), int(len(source_positions))],
         "gram_output_path": gram_output_path,
         "gram_side": gram_side_for_svd,
+        "gram_shape": [int(x) for x in gram_shape_for_save] if gram_shape_for_save is not None else None,
+        "gram_save_elapsed_seconds": float(gram_save_elapsed) if gram_save_elapsed is not None else None,
         "bitrate": bitrate_slq if bitrate_slq is not None else bitrate_svd,
         "bitrate_slq": bitrate_slq,
         "bitrate_svd": bitrate_svd,
@@ -778,17 +1203,26 @@ def main() -> None:
         "source_power_normalization": args.source_power_normalization,
         "source_amplitude_scale": float(source_amplitude_scale),
         "input_power_convention": args.input_power_convention,
+        "input_power_per_source": (
+            float(args.input_power_per_source)
+            if args.input_power_convention == "fixed_input_power_per_source"
+            else None
+        ),
         "physical_total_source_power": float(physical_total_source_power),
         "total_input_power": float(total_input_power) if total_input_power is not None else None,
         "slq_frobenius_norm_sq": (
             float(slq_frobenius_norm_sq) if slq_frobenius_norm_sq is not None else None
         ),
         "slq_logdet_alpha": float(slq_logdet_alpha) if slq_logdet_alpha is not None else None,
+        "slq_elapsed_seconds": (
+            float(slq_elapsed_seconds) if slq_elapsed_seconds is not None else None
+        ),
         "slq_streaming": bool(args.slq_streaming),
         "slq_probe_parallel": bool(args.slq_probe_parallel),
         "slq_multi_gpu": bool(args.slq_multi_gpu),
         "slq_device_ids": slq_device_ids if slq_device_ids is not None else stream_device_ids,
         "saved_svd_path": saved_svd_path,
+        "rbc_scaling": rbc_scaling_metadata,
     }
     _emit_result_json(result_record, args.result_json_path)
 

@@ -73,9 +73,8 @@ class ImagingModality(ABC):
         """
         Return the canonical noise-model identifier for this modality.
 
-        This can differ from ``name`` when the runnable modality lives in a
-        short folder name but the physics/noise model has a more specific
-        historical key, such as ``eeg`` using ``eeg_openmeeg``.
+        This can differ from ``name`` when a runnable modality has variants that
+        share one implementation but use distinct noise models.
         """
         return self.name
 

@@ -42,6 +42,9 @@ from guti.parameters import Parameters  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = Path("results/modality_correlated_noise_summary")
+DEFAULT_MAIN_README = REPO_ROOT / "README.md"
+MAIN_README_TABLE_BEGIN = "<!-- BEGIN GENERATED MODALITY CAPACITY SUMMARY -->"
+MAIN_README_TABLE_END = "<!-- END GENERATED MODALITY CAPACITY SUMMARY -->"
 US_RBC_FREQ_HZ = 2_000_000.0
 US_RBC_REFERENCE_SVD_FREQ_HZ = 50_000.0
 US_RBC_RATE_BANDWIDTH_HZ = 1.0
@@ -51,6 +54,21 @@ US_RBC_BSC_10MHZ_CM_INV_SR_INV = 3e-5
 US_RBC_CEREBRAL_BLOOD_VOLUME = 0.03
 US_RBC_VOXEL_VOLUME_MM3 = 24.0
 US_RBC_RANGE_M = 0.10
+US_RBC_SLICE_CYCLES = 2.0
+US_RBC_CONE_RESULTS_DIR = Path(
+    "results/variants/us_free_field_analytical_50khz_128k_rbc_cone_20260602"
+)
+US_RBC_CONE_SLICE_RESULTS_DIR = Path(
+    "results/variants/us_free_field_analytical_50khz_128k_rbc_cone_slice_20260602"
+)
+US_RBC_CONE_SLICE_CBV_VARIABILITY_RESULTS_DIR = Path(
+    "results/variants/us_free_field_analytical_50khz_128k_rbc_cone_slice_cbv1pct_20260602"
+)
+US_RBC_CBV_VARIABILITY_AMPLITUDE_SCALE = 0.01
+US_RBC_CONE_N_SENSORS = 6000
+US_RBC_CONE_SKULL_HALF_ANGLE_DEG = 15.0
+US_RBC_CONE_SKULL_TRANSMISSION_IN = 0.5
+US_RBC_CONE_SKULL_TRANSMISSION_OUT = 0.1
 US_SOUND_SPEED_M_S = 1540.0
 US_BRAIN_DEPTH_M = 0.150
 US_BODY_TEMP_K = 310.0
@@ -65,6 +83,17 @@ US_N_SENSORS = 6000
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--main-readme",
+        type=Path,
+        default=DEFAULT_MAIN_README,
+        help="Main README.md to update with the high-level capacity table.",
+    )
+    parser.add_argument(
+        "--no-main-readme",
+        action="store_true",
+        help="Only write the detailed summary outputs; do not update the root README.",
+    )
     return parser
 
 
@@ -168,11 +197,13 @@ def _raw_csv_row(
     output_units: str,
     output_scale: float,
     frequency_spectrum_model: str,
+    covariance_computation: str,
 ) -> dict[str, Any]:
     return {
         "modality": label,
         "bandwidth_hz": _float(row, "bandwidth_hz"),
         "frequency_spectrum_model": frequency_spectrum_model,
+        "covariance_computation": covariance_computation,
         "output_units": output_units,
         "output_amplitude": _float(row, "output_amplitude") * output_scale,
         "output_noise": _float(row, "output_noise") * output_scale,
@@ -282,6 +313,7 @@ def _us_rbc_lambda3_row(row: dict[str, Any]) -> dict[str, Any]:
         "modality": "US 2 MHz RBC",
         "bandwidth_hz": US_RBC_RATE_BANDWIDTH_HZ,
         "frequency_spectrum_model": "none; 1 Hz brain-state band",
+        "covariance_computation": "Scalar IID diagonal from receiver pressure noise",
         "output_units": "mPa",
         "output_amplitude": output_amplitude_pa * 1e3,
         "output_noise": noise_pressure_pa * 1e3,
@@ -308,32 +340,185 @@ def _us_rbc_lambda3_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _load_us_cone_json(
+    results_dir: Path,
+    *,
+    n_sensors: int = US_RBC_CONE_N_SENSORS,
+) -> tuple[dict[str, Any], Path]:
+    candidates: list[tuple[float, Path, dict[str, Any]]] = []
+    for path in sorted((results_dir / "json").glob("*.json")):
+        with path.open("r", encoding="utf-8") as fh:
+            row = json.load(fh)
+        if row.get("status") != "ok" or row.get("bitrate") is None:
+            continue
+        if int(row.get("n_sensors") or -1) != n_sensors:
+            continue
+        candidates.append((path.stat().st_mtime, path, row))
+    if not candidates:
+        raise FileNotFoundError(
+            f"no successful {n_sensors}-sensor US cone JSON found under {results_dir}"
+        )
+    _, path, row = max(candidates, key=lambda item: (item[0], str(item[1])))
+    return row, path
+
+
+def _us_range_slice_fraction() -> float:
+    slice_thickness_m = US_SOUND_SPEED_M_S * (
+        US_RBC_SLICE_CYCLES / US_RBC_FREQ_HZ
+    ) / 2.0
+    return slice_thickness_m / US_BRAIN_DEPTH_M
+
+
+def _us_lambda3_scale() -> float:
+    return (US_RBC_FREQ_HZ / US_RBC_REFERENCE_SVD_FREQ_HZ) ** 3
+
+
+def _us_output_amplitude_components(row: dict[str, Any]) -> dict[str, float]:
+    n_outputs = int(row["matrix_size"][0])
+    frobenius_norm_sq = float(row["slq_frobenius_norm_sq"])
+    full_volume_output_rms_pa = math.sqrt(frobenius_norm_sq / n_outputs)
+    slice_fraction = _us_range_slice_fraction()
+    slice_output_rms_pa = full_volume_output_rms_pa * math.sqrt(slice_fraction)
+    variable_output_rms_pa = (
+        slice_output_rms_pa * US_RBC_CBV_VARIABILITY_AMPLITUDE_SCALE
+    )
+    return {
+        "frobenius_norm_sq": frobenius_norm_sq,
+        "n_outputs": float(n_outputs),
+        "full_volume_output_rms_pa": full_volume_output_rms_pa,
+        "slice_fraction": slice_fraction,
+        "slice_output_rms_pa": slice_output_rms_pa,
+        "variable_output_rms_pa": variable_output_rms_pa,
+        "variable_output_rms_mpa": variable_output_rms_pa * 1e3,
+    }
+
+
+def _us_rbc_cone_slice_row(_: dict[str, Any]) -> dict[str, Any]:
+    full_row, full_path = _load_us_cone_json(US_RBC_CONE_RESULTS_DIR)
+    unscaled_slice_row, unscaled_slice_path = _load_us_cone_json(US_RBC_CONE_SLICE_RESULTS_DIR)
+    slice_row, slice_path = _load_us_cone_json(
+        US_RBC_CONE_SLICE_CBV_VARIABILITY_RESULTS_DIR
+    )
+    if int(full_row["n_sources"]) != int(slice_row["n_sources"]):
+        raise ValueError(
+            "US cone full-volume and slice rows have different realized source counts"
+        )
+    if int(full_row["n_sensors"]) != int(slice_row["n_sensors"]):
+        raise ValueError("US cone full-volume and slice rows have different sensor counts")
+
+    amplitude = _us_output_amplitude_components(slice_row)
+    slice_fraction = amplitude["slice_fraction"]
+    slice_output_rms_pa = amplitude["variable_output_rms_pa"]
+    noise_pa = float(slice_row["noise_level"])
+    input_power_per_source = float(slice_row["input_power_per_source"])
+    raw_full_volume_bitrate = float(full_row["bitrate"])
+    unscaled_slice_bitrate = float(unscaled_slice_row["bitrate"])
+    cbv_slice_bitrate_50khz = float(slice_row["bitrate"])
+    lambda3_scale = _us_lambda3_scale()
+    slice_bitrate = cbv_slice_bitrate_50khz * lambda3_scale
+    rbc = slice_row.get("rbc_scaling") or full_row.get("rbc_scaling") or {}
+
+    return {
+        "modality": "US 2 MHz RBC cone slice 1% CBV",
+        "bandwidth_hz": US_RBC_RATE_BANDWIDTH_HZ,
+        "frequency_spectrum_model": "none; 1 Hz brain-state band; 2 MHz range slice; 1% CBV variability; lambda^3 spatial scaling",
+        "covariance_computation": "Scalar IID 5 mPa pressure noise with 1% CBV cone-scaled RBC operator",
+        "output_units": "mPa",
+        "output_amplitude": slice_output_rms_pa * 1e3,
+        "output_noise": noise_pa * 1e3,
+        "snr": slice_output_rms_pa / noise_pa,
+        "bitrate_bits_per_s": slice_bitrate,
+        "capacity_bits_per_s": slice_bitrate,
+        "n_voxels": int(slice_row["n_sources"]),
+        "n_sensors": int(slice_row["n_sensors"]),
+        "noise_model_type": "scalar_iid",
+        "noise_correlation_kernel": None,
+        "noise_covariance_model": None,
+        "noise_plot_tag": None,
+        "source_path": str(slice_path),
+        "note": (
+            "Uses the 128k-source 50 kHz analytical ultrasound SLQ run with "
+            f"T_skull={US_RBC_CONE_SKULL_TRANSMISSION_IN:g} inside a "
+            f"{US_RBC_CONE_SKULL_HALF_ANGLE_DEG:g} deg +x cone and "
+            f"T_skull={US_RBC_CONE_SKULL_TRANSMISSION_OUT:g} elsewhere. "
+            f"The per-source variance is scaled by the 2 MHz "
+            f"{US_RBC_SLICE_CYCLES:g}-cycle axial slice fraction "
+            f"{slice_fraction:.6g} and the "
+            f"{US_RBC_CBV_VARIABILITY_AMPLITUDE_SCALE:.6g} voxel-to-sensor "
+            f"CBV-variability amplitude factor squared; the SLQ run used "
+            f"input_power_per_source={input_power_per_source:.6g}. "
+            f"Full-volume unit-variance bitrate was "
+            f"{raw_full_volume_bitrate:.6g} bit/s from {full_path}; "
+            f"the unscaled one-slice bitrate was {unscaled_slice_bitrate:.6g} bit/s "
+            f"from {unscaled_slice_path}; the 1% CBV one-slice 50 kHz bitrate "
+            f"was {cbv_slice_bitrate_50khz:.6g} bit/s from {slice_path}. "
+            f"The final table rate multiplies that 50 kHz SLQ estimate by "
+            f"lambda^3 = ({US_RBC_FREQ_HZ:.6g}/{US_RBC_REFERENCE_SVD_FREQ_HZ:.6g})^3 "
+            f"= {lambda3_scale:.6g}, giving {slice_bitrate:.6g} bit/s. "
+            "The displayed output amplitude is sqrt(Frobenius/n_outputs) times "
+            "sqrt(slice fraction) times the CBV variability amplitude factor, "
+            f"giving {slice_output_rms_pa:.6g} Pa RMS "
+            f"against {noise_pa:.6g} Pa noise. Baseline 10 cm pair pressures "
+            "before the 0.01 CBV-variability factor "
+            f"are outside/outside={float(rbc.get('reference_pressure_out_out_pa', 0.0)):.6g} Pa, "
+            f"inside/outside={float(rbc.get('reference_pressure_in_out_pa', 0.0)):.6g} Pa, "
+            f"and inside/inside={float(rbc.get('reference_pressure_in_in_pa', 0.0)):.6g} Pa; "
+            "the variable component is 0.01 times these pressures. "
+            "Water-filled capacity was not recomputed from a full spectrum for "
+            "this SLQ-only run; the capacity column repeats the lambda^3-scaled "
+            "equal-power SLQ bitrate as a lower-bound proxy."
+        ),
+    }
+
+
 def _eeg_anchored_row(row: dict[str, Any]) -> dict[str, Any]:
-    model = get_noise_model("eeg_openmeeg")
+    model = get_noise_model("eeg")
     output_noise = _float(row, "output_noise")
     output_amplitude = float(model.typical_signal_amplitude)
     output_snr = output_amplitude / output_noise
     bandwidth_hz = _float(row, "bandwidth_hz")
     time_resolution = 1.0 / bandwidth_hz
-    spectrum_kwargs = default_output_frequency_spectrum_kwargs("eeg_openmeeg")
+    spectrum_kwargs = default_output_frequency_spectrum_kwargs("eeg")
+    try:
+        bitrate = anchored_eeg_bitrate(
+            output_snr,
+            time_resolution=time_resolution,
+            spectrum_kwargs=spectrum_kwargs,
+        )
+        capacity = anchored_eeg_capacity(
+            output_snr,
+            time_resolution=time_resolution,
+            spectrum_kwargs=spectrum_kwargs,
+        )
+        note = (
+            "EEG bitrate/capacity use the empirically anchored lead-field "
+            "calibration from guti/modalities/eeg/calibration.py with the "
+            "default EEG output power-law spectrum beta=1.4; output amplitude "
+            "reports the typical EEG signal amplitude from guti/noise_models.py, "
+            "and bitrate/capacity use the displayed output SNR; the saved "
+            "Johnson covariance row supplies the detector-noise scale."
+        )
+    except FileNotFoundError:
+        bitrate = _float(row, "bitrate_bits_per_s")
+        capacity = _float(row, "channel_capacity_bits_per_s")
+        note = (
+            "EEG anchored lead-field cache is unavailable in this checkout, so "
+            "bitrate/capacity fall back to the selected saved Johnson covariance "
+            "spectrum row; output amplitude reports the typical EEG signal "
+            "amplitude from guti/noise_models.py, and the saved Johnson "
+            "covariance row supplies the detector-noise scale."
+        )
     return {
-        "modality": "EEG OpenMEEG",
+        "modality": "EEG",
         "bandwidth_hz": bandwidth_hz,
-        "frequency_spectrum_model": "power law beta=1.5, 1-100 Hz",
+        "frequency_spectrum_model": "power law beta=1.4, 1-100 Hz",
+        "covariance_computation": "Layered spherical Johnson impedance covariance",
         "output_units": "uV",
         "output_amplitude": output_amplitude * 1e6,
         "output_noise": output_noise * 1e6,
         "snr": output_snr,
-        "bitrate_bits_per_s": anchored_eeg_bitrate(
-            output_snr,
-            time_resolution=time_resolution,
-            spectrum_kwargs=spectrum_kwargs,
-        ),
-        "capacity_bits_per_s": anchored_eeg_capacity(
-            output_snr,
-            time_resolution=time_resolution,
-            spectrum_kwargs=spectrum_kwargs,
-        ),
+        "bitrate_bits_per_s": bitrate,
+        "capacity_bits_per_s": capacity,
         "n_voxels": _int(row, "n_voxels"),
         "n_sensors": _int(row, "n_sensors"),
         "noise_model_type": row["noise_model_type"],
@@ -341,25 +526,19 @@ def _eeg_anchored_row(row: dict[str, Any]) -> dict[str, Any]:
         "noise_covariance_model": row.get("noise_covariance_model"),
         "noise_plot_tag": noise_plot_tag(row),
         "source_path": row["path"],
-        "note": (
-            "EEG bitrate/capacity use the empirically anchored lead-field "
-            "calibration from guti/modalities/eeg/calibration.py with the "
-            "default EEG output power-law spectrum beta=1.5; output amplitude "
-            "reports the typical EEG signal amplitude from guti/noise_models.py, "
-            "and bitrate/capacity use the displayed output SNR; the saved "
-            "Johnson covariance row supplies the detector-noise scale."
-        ),
+        "note": note,
     }
 
 
 def build_summary(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     selections = [
         {
-            "modality": "eeg_openmeeg",
-            "label": "EEG OpenMEEG",
+            "modality": "eeg",
+            "label": "EEG",
             "output_units": "uV",
             "output_scale": 1e6,
-            "frequency_spectrum_model": "power law beta=1.5, 1-100 Hz",
+            "frequency_spectrum_model": "power law beta=1.4, 1-100 Hz",
+            "covariance_computation": "Layered spherical Johnson impedance covariance",
             "preferred": _is_johnson_covariance,
             "fallback": None,
             "note": "EEG empirically anchored lead-field calibration with Johnson detector noise.",
@@ -370,7 +549,8 @@ def build_summary(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             "label": "MEG OPM",
             "output_units": "fT",
             "output_scale": 1e15,
-            "frequency_spectrum_model": "power law beta=1.0, 1-100 Hz",
+            "frequency_spectrum_model": "power law beta=1.7, 1-100 Hz",
+            "covariance_computation": "EEG spherical Johnson correlation + OPM scalar diagonal",
             "preferred": _is_kernel(
                 "spherical_johnson",
                 covariance_model="spherical_johnson",
@@ -390,7 +570,8 @@ def build_summary(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             "label": "MEG SQUID",
             "output_units": "fT",
             "output_scale": 1e15,
-            "frequency_spectrum_model": "power law beta=1.0, 1-100 Hz",
+            "frequency_spectrum_model": "power law beta=1.7, 1-100 Hz",
+            "covariance_computation": "EEG spherical Johnson correlation + SQUID scalar diagonal",
             "preferred": _is_kernel(
                 "spherical_johnson",
                 covariance_model="spherical_johnson",
@@ -411,23 +592,27 @@ def build_summary(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
             "output_units": "1e-3 rel.",
             "output_scale": 1e3,
             "frequency_spectrum_model": "none; scalar 10 Hz band",
+            "covariance_computation": "Scalar IID diagonal from photon shot noise",
             "preferred": _is_scalar,
             "fallback": None,
             "note": "No saved spatial-covariance fNIRS sweep; scalar detector noise row.",
         },
         {
             "modality": "us_analytical_50khz",
-            "label": "US 2 MHz RBC",
+            "label": "US 2 MHz RBC cone slice 1% CBV",
             "output_units": "mPa",
             "output_scale": 1e3,
-            "frequency_spectrum_model": "none; 1 Hz brain-state band",
+            "frequency_spectrum_model": "none; 1 Hz brain-state band; 2 MHz range slice; 1% CBV variability; lambda^3 spatial scaling",
+            "covariance_computation": "Scalar IID 5 mPa pressure noise with 1% CBV cone-scaled RBC operator",
             "preferred": _is_scalar,
             "fallback": None,
             "note": (
-                "US uses the previous 50 kHz SVD spectrum with 2 MHz RBC "
-                "output/noise and lambda^3 spatial scaling."
+                "US uses the 128k-source cone-scaled RBC SLQ result with a "
+                "2 MHz range-slice source-power correction and a 0.01 "
+                "voxel-to-sensor amplitude factor for 1% CBV variability, "
+                "then lambda^3 spatial scaling to 2 MHz."
             ),
-            "transform": _us_rbc_lambda3_row,
+            "transform": _us_rbc_cone_slice_row,
         },
     ]
 
@@ -465,6 +650,7 @@ def build_summary(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], 
                     output_units=str(selection["output_units"]),
                     output_scale=float(selection["output_scale"]),
                     frequency_spectrum_model=str(selection["frequency_spectrum_model"]),
+                    covariance_computation=str(selection["covariance_computation"]),
                 )
             )
 
@@ -476,6 +662,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "modality",
         "bandwidth_hz",
         "frequency_spectrum_model",
+        "covariance_computation",
         "output_units",
         "output_amplitude",
         "output_noise",
@@ -492,9 +679,66 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "note",
     ]
     with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fields)
+        writer = csv.DictWriter(fh, fieldnames=fields, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _fmt_with_unit(value: float, unit: str) -> str:
+    if unit == "1e-3 rel.":
+        return f"{_fmt_number(value * 1e-3)} Delta I / I"
+    return f"{_fmt_number(value)} {unit}"
+
+
+def build_main_readme_capacity_section(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        MAIN_README_TABLE_BEGIN,
+        "### Capacity Summary",
+        "",
+        "| Modality | Sample rate (Hz) | Freq spectrum model | Covariance computation | Output amp | Output noise | SNR | Bit-rate (bits/s) | Capacity / sample (bits) | Total capacity (bits/s) |",
+        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(rows, key=lambda item: float(item["capacity_bits_per_s"]), reverse=True):
+        bandwidth_hz = float(row["bandwidth_hz"])
+        capacity_bits_per_s = float(row["capacity_bits_per_s"])
+        capacity_bits_per_sample = capacity_bits_per_s / bandwidth_hz
+        output_units = str(row["output_units"])
+        lines.append(
+            "| {modality} | {sample_rate} | {freq_model} | {covariance} | {amp} | {noise} | {snr} | {bitrate} | {capacity_per_sample} | {capacity} |".format(
+                modality=row["modality"],
+                sample_rate=_fmt_number(bandwidth_hz),
+                freq_model=row["frequency_spectrum_model"],
+                covariance=row["covariance_computation"],
+                amp=_fmt_with_unit(float(row["output_amplitude"]), output_units),
+                noise=_fmt_with_unit(float(row["output_noise"]), output_units),
+                capacity_per_sample=_fmt_rate(capacity_bits_per_sample),
+                capacity=_fmt_rate(capacity_bits_per_s),
+                snr=_fmt_number(float(row["snr"])),
+                bitrate=_fmt_rate(float(row["bitrate_bits_per_s"])),
+            )
+        )
+    lines.extend(["", MAIN_README_TABLE_END])
+    return "\n".join(lines)
+
+
+def write_main_readme_capacity_table(path: Path, rows: list[dict[str, Any]]) -> None:
+    section = build_main_readme_capacity_section(rows)
+    text = path.read_text(encoding="utf-8")
+    if MAIN_README_TABLE_BEGIN in text and MAIN_README_TABLE_END in text:
+        start = text.index(MAIN_README_TABLE_BEGIN)
+        end = text.index(MAIN_README_TABLE_END) + len(MAIN_README_TABLE_END)
+        new_text = text[:start] + section + text[end:]
+    elif "### Channel Capacities" in text and "### SVD Spectrum" in text:
+        start = text.index("### Channel Capacities")
+        end = text.index("### SVD Spectrum")
+        new_text = text[:start] + section + "\n\n" + text[end:]
+    else:
+        first_break = text.find("\n\n")
+        if first_break == -1:
+            new_text = text.rstrip() + "\n\n" + section + "\n"
+        else:
+            new_text = text[: first_break + 2] + section + "\n\n" + text[first_break + 2 :]
+    path.write_text(new_text, encoding="utf-8")
 
 
 def write_markdown(
@@ -528,25 +772,50 @@ def write_markdown(
         meg_noise_basis = (
             "Distance-kernel correlated proxy where Johnson covariance rows are missing."
         )
+    us_record, _ = _load_us_cone_json(US_RBC_CONE_SLICE_CBV_VARIABILITY_RESULTS_DIR)
+    us_amp = _us_output_amplitude_components(us_record)
+    us_rbc = us_record.get("rbc_scaling") or {}
+    eeg_row = next((row for row in rows if row["modality"] == "EEG"), None)
+    eeg_uses_saved_spectrum = bool(
+        eeg_row and "fall back to the selected saved Johnson covariance" in eeg_row["note"]
+    )
+    if eeg_uses_saved_spectrum:
+        eeg_note = (
+            "- EEG uses the selected saved Johnson covariance spectrum row because "
+            "the empirical lead-field calibration cache is not available in this checkout; "
+            "output amplitude reports the typical EEG signal amplitude, and the saved "
+            "Johnson covariance row supplies the detector-noise scale."
+        )
+    else:
+        eeg_note = (
+            "- EEG uses the empirically anchored EEG calibration from the merged EEG fix, "
+            "with output power-law beta=1.4 over 1--100 Hz; output amplitude reports "
+            "the typical EEG signal amplitude, and the saved Johnson covariance row "
+            "supplies the detector-noise scale."
+        )
 
     lines = [
         "# Modality Noise and Capacity Summary",
         "",
         "Rows select the largest available voxel count, then the largest available",
-        "sensor count within that voxel count. Bitrate and capacity are recomputed",
-        "from saved SVD spectra, except EEG, which uses the merged empirically",
-        "anchored lead-field calibration. Neural rows use the output temporal",
-        "power-spectrum workflow; EEG uses beta=1.5 over 1--100 Hz by default.",
+        "sensor count within that voxel count. Bitrate and capacity are computed",
+        "from saved SVD spectra or SLQ spectral estimates. EEG uses the merged",
+        "empirically anchored lead-field calibration when the cached lead field",
+        "is available; otherwise it falls back to the saved Johnson covariance",
+        "spectrum row. Neural rows use the output temporal power-spectrum workflow;",
+        "EEG uses beta=1.4 over 1--100 Hz",
+        "by default.",
         "",
-        "| Modality | BW Hz | Freq spectrum model | Output unit | Output amp | Output noise | SNR | Bit-rate | Capacity |",
-        "| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        "| Modality | BW Hz | Freq spectrum model | Covariance computation | Output unit | Output amp | Output noise | SNR | Bit-rate | Capacity |",
+        "| --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
     ]
     for row in rows:
         lines.append(
-            "| {modality} | {bw} | {freq_model} | {unit} | {amp} | {noise} | {snr} | {bitrate} | {capacity} |".format(
+            "| {modality} | {bw} | {freq_model} | {covariance} | {unit} | {amp} | {noise} | {snr} | {bitrate} | {capacity} |".format(
                 modality=row["modality"],
                 bw=_fmt_number(float(row["bandwidth_hz"])),
                 freq_model=row["frequency_spectrum_model"],
+                covariance=row["covariance_computation"],
                 unit=row["output_units"],
                 amp=_fmt_number(float(row["output_amplitude"])),
                 noise=_fmt_number(float(row["output_noise"])),
@@ -561,10 +830,10 @@ def write_markdown(
             "",
             "## Selection Notes",
             "",
-            "- EEG uses the empirically anchored EEG calibration from the merged EEG fix, with output power-law beta=1.5 over 1--100 Hz; output amplitude reports the typical EEG signal amplitude, and the saved Johnson covariance row supplies the detector-noise scale.",
-            meg_note + " MEG uses the default neural output power-law beta=1.0 over 1--100 Hz.",
+            eeg_note,
+            meg_note + " MEG uses the default neural output power-law beta=1.7 over 1--100 Hz.",
             "- fNIRS does not currently have a saved spatial covariance sweep, so its row uses the scalar detector-noise spectrum.",
-            "- US uses the previous 50 kHz SVD spectrum, 2 MHz RBC output/noise, `1 Hz` bitrate bandwidth, and lambda-cubed spatial scaling.",
+            "- US uses the 128k-source 50 kHz analytical cone-scaled RBC SLQ result, `1 Hz` bitrate bandwidth, a 2 MHz range-slice source-power correction, a `0.01` voxel-to-sensor amplitude factor for 1% CBV variability, and lambda-cubed spatial scaling from 50 kHz to 2 MHz. The capacity column repeats the lambda-cubed-scaled equal-power SLQ bitrate as a lower-bound proxy because water-filled capacity was not recomputed from a full spectrum.",
             "- No fMRI convergence SVD files are present under `results/variants`, so fMRI is not included.",
         ]
     )
@@ -577,24 +846,26 @@ def write_markdown(
             "## Calculation",
             "",
             "The table reports the per-output signal amplitude and detector noise from",
-            "`guti/noise_models.py`, then uses the selected saved SVD spectrum to compute",
-            "bitrate and water-filled capacity.",
+            "`guti/noise_models.py` or modality-specific result metadata, then uses",
+            "the selected saved SVD/SLQ spectrum estimate to compute bitrate and capacity.",
             "Output amplitude/noise are displayed in modality-specific scaled units",
             "to keep the numbers readable; SNR and rates are computed before display",
             "scaling.",
             "For rows with an output temporal spectrum, total signal power is",
             "distributed across frequency bins and the per-bin bitrates/capacities",
-            "are summed.",
+            "are summed. Scalar detector-noise values are interpreted as integrated",
+            "over the row bandwidth; each frequency bin uses",
+            "`sigma_bin = sigma_out sqrt(delta_f / B)`.",
             "",
             "## Output Amplitude and Noise References",
             "",
             "| Modality | Output amplitude basis | Output noise basis |",
             "| --- | --- | --- |",
-            "| EEG OpenMEEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise, and bitrate/capacity use that same SNR through the anchored EEG mode-gain calculation with output power-law beta=1.5 over 1--100 Hz. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |",
-            f"| MEG OPM | `100 fT` typical evoked MEG field amplitude | `15 fT/sqrt(Hz)` OPM field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
-            f"| MEG SQUID | `100 fT` typical evoked MEG field amplitude | `5 fT/sqrt(Hz)` SQUID field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
+            "| EEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise. When the cached empirical lead field is available, bitrate/capacity use that SNR through the anchored EEG mode-gain calculation with output power-law beta=1.4 over 1--100 Hz; otherwise they use the selected saved Johnson covariance spectrum row. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |",
+            f"| MEG OPM | `100 fT` typical evoked MEG field amplitude | `5 fT/sqrt(Hz)` OPM field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
+            f"| MEG SQUID | `100 fT` typical evoked MEG field amplitude | `1 fT/sqrt(Hz)` SQUID field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
             "| fNIRS CW | `0.001` relative-intensity hemodynamic response (`1000 ppm`) | Photon shot noise from `P=5 mW`, `lambda=830 nm`, `OD=4`, divided over channels and bandwidth. |",
-            "| US 2 MHz RBC | RBC volume-backscatter echo pressure from `1 MPa` external pressure, `T_skull=0.03`, `CBV=3%`, `V=24 mm^3`, and `r=10 cm`; displayed in mPa. | 2 MHz acoustic/electronic receiver noise, displayed in mPa; pulse-averaged noise bandwidth is distinct from the `1 Hz` bitrate bandwidth. |",
+            "| US 2 MHz RBC cone slice 1% CBV | RMS output pressure from the 128k-source cone-scaled RBC operator, corrected to one two-cycle 2 MHz axial range slice and multiplied by `0.01` for 1% CBV variability; pair amplitudes use `1 MPa` external pressure, baseline `CBV=3%`, `V=24 mm^3`, `T_skull=0.5` inside the 15 deg +x cone, and `T_skull=0.1` elsewhere. | Fixed scalar pressure noise `5 mPa`, displayed in mPa. |",
             "",
             "Output amplitude is the square root of the average per-output signal power:",
             "",
@@ -612,7 +883,8 @@ def write_markdown(
             "",
             "$$",
             "\\sigma_{out}(N,B) = \\sigma_{ref}\\sqrt{\\frac{B}{B_{ref}}}",
-            "\\left(\\frac{N}{N_{ref}}\\right)^\\alpha.",
+            "\\left(\\frac{N}{N_{ref}}\\right)^\\alpha,\\qquad",
+            "\\sigma_{bin}=\\sigma_{out}\\sqrt{\\frac{\\Delta f}{B}}.",
             "$$",
             "",
             "For covariance-whitened spectra, bitrate/capacity use the singular values",
@@ -630,7 +902,8 @@ def write_markdown(
             "$$",
             "",
             "Capacity uses the same whitened gains but water-fills the total input power",
-            "across modes.",
+            "across modes. The US row is SLQ-only, so its capacity cell is the",
+            "equal-power bitrate lower bound rather than a water-filled calculation.",
             "",
             "## Modality Noise Formulas",
             "",
@@ -655,23 +928,30 @@ def write_markdown(
             "Here `Z` is built from `guti/modalities/eeg/scalp_resistance.py`,",
             "`B_J=100 Hz`, electrode area is `1 cm^2`, and `lmax=2000`.",
             "",
-            "For bitrate/capacity, EEG uses the merged empirically anchored",
-            "calibration instead of trusting the absolute OpenMEEG/BEM gain. The",
-            "cached lead-field shape is cleaned with a boundary margin and scaled so",
-            "a reference source has the displayed single-channel amplitude SNR:",
+            "When the cached lead field is available, EEG uses the merged",
+            "empirically anchored calibration instead of trusting the absolute",
+            "OpenMEEG/BEM gain. The cached lead-field shape is cleaned with a",
+            "boundary margin and scaled so a reference source has the displayed",
+            "single-channel amplitude SNR:",
             "",
             "$$",
             "g_i = \\mathrm{SNR}_{ref}\\frac{\\sigma_i(A_{clean})}{p_{ref}},",
             "\\qquad \\mathrm{SNR}_{ref}=A_{out}/\\sigma_{out}.",
             "$$",
             "",
-            "The table's EEG bitrate is the equal-power sum over `g_i`; EEG capacity",
-            "water-fills the same anchored mode gains. In this summary those gains",
-            "are evaluated through the output temporal-spectrum workflow with:",
+            "In anchored mode, the table's EEG bitrate is the equal-power sum over",
+            "`g_i`; EEG capacity water-fills the same anchored mode gains. If the",
+            "cache is unavailable, the generated row falls back to the selected",
+            "saved Johnson covariance spectrum's bitrate/capacity. In this summary",
+            "the EEG frequency weighting is:",
             "",
             "$$",
-            "S_{out}(f) \\propto f^{-1.5},\\qquad 1\\le f\\le 100\\,\\mathrm{Hz}.",
+            "S_{out}(f) \\propto f^{-1.4},\\qquad 1\\le f\\le 100\\,\\mathrm{Hz}.",
             "$$",
+            "",
+            "The displayed EEG noise is the Johnson noise integrated over the full",
+            "`100 Hz` band. During the frequency-bin sum, that full-band noise is",
+            "converted to each bin as `sigma_bin = sigma_out sqrt(delta_f / 100 Hz)`.",
             "",
             "### MEG",
             "",
@@ -679,8 +959,8 @@ def write_markdown(
             "over bandwidth:",
             "",
             "$$",
-            "\\sigma_{OPM}=15\\,\\mathrm{fT}/\\sqrt{\\mathrm{Hz}}\\sqrt{B},\\qquad",
-            "\\sigma_{SQUID}=5\\,\\mathrm{fT}/\\sqrt{\\mathrm{Hz}}\\sqrt{B}.",
+            "\\sigma_{OPM}=5\\,\\mathrm{fT}/\\sqrt{\\mathrm{Hz}}\\sqrt{B},\\qquad",
+            "\\sigma_{SQUID}=1\\,\\mathrm{fT}/\\sqrt{\\mathrm{Hz}}\\sqrt{B}.",
             "$$",
             "",
             "For this table, MEG uses the same Johnson covariance correlation as",
@@ -709,43 +989,68 @@ def write_markdown(
             "",
             "### Ultrasound",
             "",
-            "The ultrasound row keeps the previous 50 kHz SVD spectrum but replaces",
-            "the signal and noise with a 2 MHz RBC backscatter estimate. The table",
-            "uses `B_rate = f_brain = 1 Hz` for bitrate. Receiver noise uses the",
-            "pulse-averaged noise bandwidth:",
+            "The ultrasound row uses the 128k-source analytical 50 kHz free-field",
+            "operator, but every source-sensor pair is scaled into 2 MHz RBC",
+            "backscatter pressure units with cone-dependent skull transmission.",
+            "The table uses `B_rate = f_brain = 1 Hz` for bitrate and `5 mPa`",
+            "fixed scalar receiver noise.",
             "",
-            "$$",
-            "B_{noise}=f_0\\frac{f_{brain}}{PRF},\\qquad PRF=\\frac{c}{2D}.",
-            "$$",
+            "#### RBC Backscatter Model",
             "",
-            "For the table, `f_0=2 MHz`, so `B_noise=389.6 Hz` while",
-            "`B_rate=1 Hz`.",
-            "",
-            "RBC output amplitude is estimated from volume backscatter. The",
+            "RBC pair amplitude is estimated from volume backscatter. The",
             "dimensionless pressure transfer ratio is:",
             "",
             "$$",
-            "a_{US}=T_{skull}^2\\frac{\\sqrt{\\eta V}}{r},\\qquad",
+            "a_{US}=T_{source}T_{sensor}\\frac{\\sqrt{\\eta V}}{r},\\qquad",
             "\\eta=CBV\\cdot BSC_{blood},\\qquad",
             "BSC_{blood}(f)=BSC_{10MHz}\\left(\\frac{f}{10MHz}\\right)^4.",
             "$$",
             "",
-            "The pressure reported in the table is:",
+            "The per-pair pressure contribution is:",
             "",
             "$$",
             "p_{echo}=P_{external}a_{US}.",
             "$$",
             "",
-            "The assumptions are `T_skull=0.03`, `BSC_10MHz=3e-5 cm^-1 sr^-1`,",
-            "`CBV=3%`, `V=24 mm^3`, and `r=10 cm`.",
+            "Equivalently, the pressure contribution from one voxel to one sensor is:",
+            "",
+            "$$",
+            "p_{ij}=P_{external}\\,T_iT_j\\frac{\\sqrt{CBV\\,BSC_{blood}(f)\\,V_{voxel}}}{r_{ij}}.",
+            "$$",
+            "",
+            "The assumptions are `BSC_10MHz=3e-5 cm^-1 sr^-1`, `CBV=3%`,",
+            "`V=24 mm^3`, and `r=10 cm` for the reference pair pressures.",
+            "For the cone run, `T_skull=0.5` for sources and sensors inside a",
+            "`15 deg` cone around the positive x-axis and `T_skull=0.1` elsewhere.",
             "",
             "The physical interpretation is: the backscatter coefficient gives a",
             "differential scattered intensity fraction per unit volume and steradian.",
             "For an order-of-magnitude per-voxel echo, the intensity ratio from one",
             "voxel scales like `eta V / r^2`; pressure amplitude is the square root",
             "of intensity, so the received/transmitted pressure ratio scales like",
-            "`sqrt(eta V) / r`. The `T_skull^2` factor applies one skull pass on",
-            "transmit and one on receive.",
+            "`sqrt(eta V) / r`. The two transmission factors apply one skull pass",
+            "on transmit and one on receive.",
+            "",
+            "The streamed 50 kHz free-field operator already has a `1/r_ij`",
+            "distance dependence. The RBC run therefore converts each streamed",
+            "chunk to pressure units by multiplying the raw operator by a common",
+            "RBC pressure gain and by per-source/per-sensor skull transmissions:",
+            "",
+            "$$",
+            "G^{RBC}_{ij}(t)=G^{raw}_{ij}(t)\\,g_{RBC}\\,T_iT_j.",
+            "$$",
+            "",
+            "For this discretization, the metadata reports:",
+            "",
+            "$$",
+            f"g_{{RBC}}={float(us_rbc.get('rbc_common_gain_pa', 0.0)):.6g}\\,\\mathrm{{Pa}},\\qquad",
+            f"N_{{source,in}}={int(us_rbc.get('source_in_cone_count', 0))},\\qquad",
+            f"N_{{sensor,in}}={int(us_rbc.get('sensor_in_cone_count', 0))}.",
+            "$$",
+            "",
+            "The common gain is a conversion from this discretized 50 kHz raw",
+            "free-field basis to the 2 MHz RBC pair-pressure model; the physical",
+            "pair amplitudes are the `p_ij` values below.",
             "",
             "Numerically:",
             "",
@@ -767,50 +1072,83 @@ def write_markdown(
             "$$",
             "",
             "$$",
-            "a_{US}=0.03^2\\times5.88\\times10^{-7}=5.29\\times10^{-10}.",
+            "a_{US}=T_{source}T_{sensor}\\times5.88\\times10^{-7}.",
             "$$",
             "",
-            "For `P_external=1 MPa`, this gives:",
+            "For `P_external=1 MPa`, this gives the following baseline 10 cm",
+            "reference pressures before the 1% CBV-variability factor:",
             "",
             "$$",
-            "p_{echo}=10^6\\,\\mathrm{Pa}\\times5.29\\times10^{-10}",
-            "=5.29\\times10^{-4}\\,\\mathrm{Pa}=0.529\\,\\mathrm{mPa}.",
+            "p_{out,out}=5.88\\,\\mathrm{mPa},\\quad",
+            "p_{in,out}=29.4\\,\\mathrm{mPa},\\quad",
+            "p_{in,in}=147\\,\\mathrm{mPa}.",
             "$$",
+            "",
+            "The variable component used in the table is `0.01` times these",
+            "pair pressures.",
             "",
             "This is intentionally a simple backscatter estimate. It does not include",
             "array focusing gain, coherent summation across multiple resolution cells,",
             "or a detailed RBC form-factor model; it is the per-voxel pressure echo",
             "implied by the assumed volume backscatter coefficient.",
             "",
-            "Acoustic thermal modal power and electronic Johnson pressure noise are",
-            "combined in root-sum-square:",
+            "The full-volume unit-variance output RMS is estimated from the SLQ",
+            "Frobenius metadata as:",
             "",
             "$$",
-            "P_{n,ac}=A_{elem}\\frac{2\\pi}{\\lambda^2}k_BTB_{noise},\\quad",
-            "p_{ac}=\\sqrt{\\frac{P_{n,ac}}{A_{elem}}\\rho c},",
+            "A_{all}=\\sqrt{\\|G\\|_F^2/n_{outputs}}.",
+            "$$",
+            "",
+            "For the selected `6000`-sensor row, the stored SLQ metadata gives:",
+            "",
+            "$$",
+            f"\\|G\\|_F^2={us_amp['frobenius_norm_sq']:.6g},\\qquad",
+            f"n_{{outputs}}={int(us_amp['n_outputs'])}.",
             "$$",
             "",
             "$$",
-            "p_{elec}=\\frac{\\sqrt{4k_BTRB_{noise}}}{S_{rx}},\\quad",
-            "p_{n,US}=\\sqrt{p_{ac}^2+p_{elec}^2}.",
+            "A_{all}",
+            f"=\\sqrt{{{us_amp['frobenius_norm_sq']:.6g}/{int(us_amp['n_outputs'])}}}",
+            f"={us_amp['full_volume_output_rms_pa']:.6g}\\,\\mathrm{{Pa}}.",
             "$$",
             "",
-            "The equivalent normalized noise used internally is",
-            "`p_n,US / P_external`; reporting pressures or ratios gives the same",
-            "SNR when both signal and noise use the same convention.",
-            "",
-            "Finally, bitrate and capacity from the 50 kHz SVD row are scaled by",
-            "the assumed spatial-mode growth:",
+            "Only one axial range slice is used for the table's source-power",
+            "normalization. For a two-cycle 2 MHz pulse:",
             "",
             "$$",
-            "\\left(\\frac{\\lambda_{50kHz}}{\\lambda_{2MHz}}\\right)^3",
-            "=\\left(\\frac{2MHz}{50kHz}\\right)^3=64000.",
+            "f_{slice}=\\frac{c(2/f_0)/2}{D}",
+            "=\\frac{1540(2/2MHz)/2}{0.15}=0.00513.",
             "$$",
+            "",
+            "The displayed US output amplitude is",
+            "`A_all sqrt(f_slice) * 0.01`, and the SLQ bitrate is recomputed",
+            "with `f_slice * 0.01^2` as the per-source input variance.",
+            "Numerically:",
+            "",
+            "$$",
+            "A_{table}",
+            f"={us_amp['full_volume_output_rms_pa']:.6g}\\sqrt{{{us_amp['slice_fraction']:.6g}}}",
+            f"\\times {US_RBC_CBV_VARIABILITY_AMPLITUDE_SCALE:.6g}",
+            f"={us_amp['variable_output_rms_pa']:.6g}\\,\\mathrm{{Pa}}",
+            f"={us_amp['variable_output_rms_mpa']:.6g}\\,\\mathrm{{mPa}}.",
+            "$$",
+            "",
+            "The resulting 50 kHz SLQ bitrate is then extrapolated to 2 MHz",
+            "by the assumed spatial-mode growth:",
+            "",
+            "$$",
+            "R_{2MHz}=R_{50kHz}\\left(\\frac{2MHz}{50kHz}\\right)^3",
+            "=64000\\,R_{50kHz}.",
+            "$$",
+            "",
+            "Exact water-filled capacity was not recomputed for",
+            "this SLQ-only run, so the capacity column repeats the equal-power",
+            "bitrate after the same lambda-cubed scaling as a lower-bound proxy.",
             "",
             "## References",
             "",
             "- Code implementation: `guti/noise_models.py`, `guti/capacity.py`, and `scripts/plot_modality_convergence.py`.",
-            "- Johnson-Nyquist noise: `4 k_B T R B`, used for EEG and US electronics.",
+            "- Johnson-Nyquist noise: `4 k_B T R B`, used for EEG.",
             "- Shot-noise model: Poisson photon counting, `sigma = 1/sqrt(n_photons)`.",
             "- Acoustic thermal mode-count model: modal thermal power `k_B T B` per accepted acoustic mode.",
             "",
@@ -836,6 +1174,9 @@ def main() -> int:
         encoding="utf-8",
     )
     write_markdown(args.outdir / "README.md", rows, notes, load_errors=errors)
+    if not args.no_main_readme:
+        write_main_readme_capacity_table(args.main_readme, rows)
+        print(f"Updated main README at {args.main_readme}")
     print(f"Wrote {len(rows)} rows to {args.outdir}")
     if errors:
         print(f"Skipped {len(errors)} load errors")

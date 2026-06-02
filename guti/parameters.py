@@ -43,9 +43,14 @@ class Parameters:
     time_resolution: Optional[float] = None
     comment: Optional[str] = None
     noise_full_brain: Optional[float] = None
+    noise_covariance_model: Optional[str] = None
     noise_correlation_length_mm: Optional[float] = None
     noise_correlation_kernel: Optional[str] = None
     noise_distance_metric: Optional[str] = None
+    noise_voxel_resolution_mm: Optional[float] = None
+    noise_solver: Optional[str] = None
+    noise_absolute_scale: Optional[bool] = None
+    noise_sensor_components: Optional[str] = None
     matrix_size: Optional[tuple[int, int]] = None
     vincent_trick: Optional[bool] = None
     frequency_hz: Optional[float] = None
