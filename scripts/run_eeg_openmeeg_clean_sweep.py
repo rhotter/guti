@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -21,6 +19,9 @@ from guti.core import (
     create_eeg_bem_model,
     get_grid_positions,
     get_sensor_positions,
+)
+from guti.modalities.eeg.compute_eeg_leadfield import (
+    compute_eeg_leadfield_from_bem_dir,
 )
 from guti.modalities.eeg.scalp_resistance import (
     DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
@@ -45,8 +46,6 @@ DEFAULT_SOURCE_RADIUS_MARGIN_MM = 5.0
 DEFAULT_OUTPUT_DIR = Path("results/variants/eeg_openmeeg_clean_sweep_20260601_margin5mm")
 DEFAULT_WORK_DIR = Path("results/tmp/eeg_openmeeg_clean_sweep_20260601")
 DEFAULT_BEM_DIR = DEFAULT_WORK_DIR / "bem_model/eeg"
-DEFAULT_LEADFIELD_PATH = DEFAULT_WORK_DIR / "leadfields/eeg/eeg_leadfield.mat"
-DEFAULT_OPENMEEG_TMP_DIR = DEFAULT_WORK_DIR / "openmeeg_tmp/eeg"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,18 +95,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_BEM_DIR,
         help="Scratch directory for OpenMEEG model files.",
-    )
-    parser.add_argument(
-        "--leadfield-path",
-        type=Path,
-        default=DEFAULT_LEADFIELD_PATH,
-        help="Leadfield .mat path written by the OpenMEEG shell script.",
-    )
-    parser.add_argument(
-        "--openmeeg-tmp-dir",
-        type=Path,
-        default=DEFAULT_OPENMEEG_TMP_DIR,
-        help="Scratch directory for intermediate OpenMEEG matrices.",
     )
     parser.add_argument(
         "--limit",
@@ -212,16 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def check_dependencies() -> list[str]:
-    missing = [
-        executable
-        for executable in ("om_assemble", "om_minverser", "om_gain")
-        if shutil.which(executable) is None
-    ]
     try:
-        import h5py  # noqa: F401
+        import openmeeg  # noqa: F401
     except ImportError:
-        missing.append("python package h5py")
-    return missing
+        return ["python package openmeeg"]
+    return []
 
 
 def eeg_grid_positions(source_spacing_mm: float, source_radius_margin_mm: float) -> np.ndarray:
@@ -233,47 +215,9 @@ def eeg_grid_positions(source_spacing_mm: float, source_radius_margin_mm: float)
     return positions[distances < BRAIN_RADIUS - source_radius_margin_mm]
 
 
-def load_mat73_linop(path: Path) -> np.ndarray:
-    import h5py
-
-    with h5py.File(path, "r") as f:
-        if "linop" not in f:
-            raise ValueError(f"{path} does not contain a 'linop' dataset")
-        linop = f["linop"][()]
-    return np.asarray(linop, dtype=np.float64)
-
-
 def count_dipoles(path: Path) -> int:
     with path.open() as f:
         return sum(1 for line in f if line.strip())
-
-
-def run_openmeeg(
-    bem_dir: Path,
-    leadfield_path: Path,
-    tmp_dir: Path,
-) -> None:
-    geometry = bem_dir / "sphere_head.geom"
-    conductivities = bem_dir / "sphere_head.cond"
-    dipoles = bem_dir / "dipole_locations.txt"
-    electrodes = bem_dir / "sensor_locations.txt"
-
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    leadfield_path.parent.mkdir(parents=True, exist_ok=True)
-    hm = tmp_dir / "tmp.hm"
-    hm_inv = tmp_dir / "tmp.hm_inv"
-    dsm = tmp_dir / "tmp.dsm"
-    h2em = tmp_dir / "tmp.h2em"
-
-    commands = (
-        ["om_assemble", "-HM", str(geometry), str(conductivities), str(hm)],
-        ["om_minverser", str(hm), str(hm_inv)],
-        ["om_assemble", "-DSM", str(geometry), str(conductivities), str(dipoles), str(dsm)],
-        ["om_assemble", "-H2EM", str(geometry), str(conductivities), str(electrodes), str(h2em)],
-        ["om_gain", "-EEG", str(hm_inv), str(dsm), str(h2em), str(leadfield_path)],
-    )
-    for command in commands:
-        subprocess.run(command, check=True, cwd=Path.cwd())
 
 
 def save_clean_svd(
@@ -528,9 +472,8 @@ def main() -> int:
             use_radial_orientations=False,
             source_radius_margin_mm=args.source_radius_margin_mm,
         )
-        run_openmeeg(args.bem_dir, args.leadfield_path, args.openmeeg_tmp_dir)
 
-        leadfield = load_mat73_linop(args.leadfield_path)
+        leadfield = compute_eeg_leadfield_from_bem_dir(args.bem_dir)
         n_dipoles = count_dipoles(args.bem_dir / "dipole_locations.txt")
         if n_dipoles != 3 * n_voxels:
             raise ValueError(

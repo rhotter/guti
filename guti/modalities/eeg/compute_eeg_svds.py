@@ -20,7 +20,9 @@ from guti.utils import enable_autoreload
 from guti.parameters import Parameters
 from guti.data_utils import save_svd, list_svd_variants
 from guti.core import create_eeg_bem_model
-from guti.modalities.eeg.compute_eeg_leadfield import compute_eeg_leadfield
+from guti.modalities.eeg.compute_eeg_leadfield import (
+    compute_eeg_leadfield_from_bem_dir,
+)
 
 enable_autoreload()
 
@@ -115,12 +117,7 @@ for sweep_value in sweep_values:
     create_eeg_bem_model(**bem_kwargs)
 
     # Compute leadfield via the OpenMEEG Python API.
-    G_eeg = compute_eeg_leadfield(
-        geom_file=BEM_DIR / "sphere_head.geom",
-        cond_file=BEM_DIR / "sphere_head.cond",
-        dipole_file=BEM_DIR / "dipole_locations.txt",
-        sensor_file=BEM_DIR / "sensor_locations.txt",
-    )
+    G_eeg = compute_eeg_leadfield_from_bem_dir(BEM_DIR)
     print(f"Leadfield shape: {G_eeg.shape}")
 
     # SVD of the (n_sensors × n_dipoles) gain matrix.
