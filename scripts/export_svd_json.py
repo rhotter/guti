@@ -63,7 +63,25 @@ BITRATE_MODES = {
         "Empirical observed SNR",
         "Uses Frobenius(SVD)/observed_SNR and normalizes away raw forward gain.",
     ),
+    "empirical_anchored": (
+        "Empirically anchored",
+        "EEG only. Excludes near-boundary BEM artifact voxels, then anchors the "
+        "source amplitude so a canonical 20 mm-deep cortical source hits the "
+        "literature single-channel SNR; the SVD shape spreads it across modes. "
+        "Uses the cached 256-channel lead field, so it is a single anchored "
+        "estimate rather than a per-layout sweep.",
+    ),
 }
+
+# Per-modality default mode. EEG's absolute BEM gain is unreliable, so it defaults
+# to the empirically anchored estimate; everything else keeps the physical floor.
+DEFAULT_BITRATE_MODE_BY_MODALITY = {
+    "eeg_openmeeg": "empirical_anchored",
+}
+
+
+def default_bitrate_mode_for(modality):
+    return DEFAULT_BITRATE_MODE_BY_MODALITY.get(modality, DEFAULT_BITRATE_MODE)
 
 MODALITIES = {
     "meg_opm":            "MEG OPM",
@@ -140,6 +158,22 @@ def compute_bitrate(
     noise_mode=DEFAULT_BITRATE_MODE,
 ):
     model = get_noise_model(modality)
+
+    if noise_mode == "empirical_anchored":
+        # Anchored capacity ignores the saved (artifact-contaminated) spectrum and
+        # recomputes from the raw lead field with boundary voxels excluded.
+        snr_ref = (
+            model.anchor_snr_today if tier == "today"
+            else model.anchor_snr_fundamental
+        )
+        if snr_ref <= 0.0:
+            return None
+        if modality == "eeg_openmeeg":
+            from guti.modalities.eeg.calibration import anchored_eeg_bitrate
+
+            return anchored_eeg_bitrate(snr_ref, time_resolution=time_resolution)
+        return None  # anchoring is only defined for EEG today
+
     kwargs = _noise_kwargs(params, freq)
     s_capacity = scale_singular_values_for_capacity(
         s,
@@ -275,6 +309,20 @@ def export_modality(modality, label):
         except Exception:
             br_emp_fund = None
 
+        # Empirically anchored (EEG only; None elsewhere).
+        try:
+            br_anchored_today = compute_bitrate(
+                s, modality, n_sensors, freq, "today", tr, params,
+                noise_mode="empirical_anchored",
+            )
+            br_anchored_fund = compute_bitrate(
+                s, modality, n_sensors, freq, "fundamental", tr, params,
+                noise_mode="empirical_anchored",
+            )
+        except Exception as e:
+            br_anchored_today = br_anchored_fund = None
+            print(f"  anchored bitrate failed: {e}")
+
         # Empirical SNR
         try:
             snr_emp = float(
@@ -313,6 +361,8 @@ def export_modality(modality, label):
             "bitrate_physical_fundamental": br_physical_fund,
             "bitrate_empirical_today": br_emp_today,
             "bitrate_empirical_fundamental": br_emp_fund,
+            "bitrate_anchored_today": br_anchored_today,
+            "bitrate_anchored_fundamental": br_anchored_fund,
             "snr_empirical_today": snr_emp,
         }
         records.append(rec)
@@ -334,7 +384,7 @@ def export_modality(modality, label):
         "modality": modality,
         "label": label,
         "sweep_params": sweep_params,
-        "default_bitrate_mode": DEFAULT_BITRATE_MODE,
+        "default_bitrate_mode": default_bitrate_mode_for(modality),
         "bitrate_modes": {
             key: {"label": label, "description": description}
             for key, (label, description) in BITRATE_MODES.items()
