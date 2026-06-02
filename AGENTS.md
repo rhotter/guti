@@ -105,6 +105,14 @@ EEG uses OpenMEEG (boundary element method) via its in-process Python API:
   (`.tri` surfaces, `sphere_head.geom`)
 - OpenMEEG is installed as a Python dependency (see `guti/modalities/eeg/requirements.txt`)
 
+### MIDA Model Assets
+The downloaded MIDA model is large and must not be committed. It is ignored at
+`guti/mida/`. To restore it in a local checkout, copy it from Moses:
+
+```bash
+rsync -av --progress thomas@moses:/home/thomas/code/guti/guti/mida/ guti/mida/
+```
+
 ## Key Concepts
 
 ### Coordinate System

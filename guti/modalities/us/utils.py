@@ -12,7 +12,11 @@ import numpy as np
 import torch
 
 from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
-from guti.mida_geometry import mida_brain_acoustic_speed_m_s, mida_brain_volume_mm3
+from guti.mida_geometry import (
+    mida_brain_acoustic_speed_m_s,
+    mida_brain_volume_mm3,
+    sample_mida_us_acoustic_window_positions,
+)
 from guti.linop import ChunkedForwardOperator
 
 # Free-field constants shared by every entry point (the in-process USModality
@@ -53,8 +57,23 @@ def create_free_field_sources(
 
 
 def create_free_field_receivers(n_sensors: int) -> np.ndarray:
-    """Ultrasound receiver positions in **meters**."""
-    return get_sensor_positions(n_sensors=n_sensors, offset=RECEIVER_OFFSET_MM) * 1e-3
+    """Ultrasound receiver positions in **meters**.
+
+    Ultrasound receivers are restricted to the left/right temporal and
+    left/right occipital acoustic windows on the MIDA scalp. If MIDA is not
+    available, fall back to the generic scalp sampler.
+    """
+    try:
+        receivers_mm = sample_mida_us_acoustic_window_positions(
+            n_sensors=n_sensors,
+            offset=RECEIVER_OFFSET_MM,
+        )
+    except FileNotFoundError:
+        receivers_mm = get_sensor_positions(
+            n_sensors=n_sensors,
+            offset=RECEIVER_OFFSET_MM,
+        )
+    return receivers_mm * 1e-3
 
 
 def free_field_time_axis(center_frequency: float) -> tuple[np.ndarray, float]:

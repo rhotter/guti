@@ -86,6 +86,16 @@ class MidaBemLayer:
     tissue_name: str
 
 
+@dataclass(frozen=True)
+class MidaScalpAperture:
+    """A named circular scalp aperture in GUTI millimeter coordinates."""
+
+    name: str
+    center_mm: tuple[float, float, float]
+    radius_mm: float
+    description: str
+
+
 MIDA_EEG_BEM_LAYERS = (
     MidaBemLayer("Brain", "Brain", "Brain Gray Matter.stl", "Brain Gray Matter"),
     MidaBemLayer("CSF", "CSF", "CSF General.stl", "CSF General"),
@@ -112,6 +122,9 @@ MIDA_EEG_BEM_LAYERS = (
     MidaBemLayer("Scalp", "Scalp", "Epidermis_Dermis.stl", "Epidermis_Dermis"),
 )
 
+MIDA_US_TEMPORAL_APERTURE_RADIUS_MM = 28.0
+MIDA_US_OCCIPITAL_APERTURE_RADIUS_MM = 24.0
+
 
 def mida_eeg_bem_layers() -> tuple[MidaBemLayer, ...]:
     """Return the nested MIDA layers used for the EEG OpenMEEG head model."""
@@ -127,6 +140,83 @@ def mida_eeg_bem_layer_properties(
         layer.domain_name: mida_tissue_properties(layer.tissue_name, mida_root=mida_root)
         for layer in MIDA_EEG_BEM_LAYERS
     }
+
+
+def _mida_side_center(
+    surface_name: str,
+    *,
+    side: Literal["left", "right"],
+    mida_root: str | Path | None = None,
+) -> np.ndarray:
+    points = load_mida_surface_triangles(
+        surface_name,
+        mida_root=mida_root,
+        coordinate_frame="guti",
+    ).reshape(-1, 3)
+    if side == "left":
+        side_points = points[points[:, 0] < GUTI_HEAD_CENTER_MM[0]]
+    elif side == "right":
+        side_points = points[points[:, 0] >= GUTI_HEAD_CENTER_MM[0]]
+    else:
+        raise ValueError("side must be 'left' or 'right'")
+    if side_points.size == 0:
+        raise ValueError(f"No {side} points found in MIDA surface {surface_name!r}")
+    return side_points.mean(axis=0)
+
+
+def mida_us_acoustic_windows(
+    *,
+    mida_root: str | Path | None = None,
+) -> tuple[MidaScalpAperture, ...]:
+    """Return the four ultrasound receiver apertures on the MIDA scalp.
+
+    The two temporal windows are placed superior/anterior to the ear canal,
+    matching the usual transtemporal TCD window above the zygomatic arch and in
+    front of the tragus. The two occipital windows are placed on the lower
+    posterior scalp, split left/right around the occipital belly to approximate
+    paired suboccipital/transforaminal access.
+    """
+    windows: list[MidaScalpAperture] = []
+    for side in ("left", "right"):
+        ear_center = _mida_side_center(
+            "Ear Auditory Canal.stl",
+            side=side,
+            mida_root=mida_root,
+        )
+        temporal_center = (
+            float(ear_center[0]),
+            float(ear_center[1] - 12.0),
+            float(ear_center[2] + 55.0),
+        )
+        windows.append(
+            MidaScalpAperture(
+                name=f"{side}_temporal",
+                center_mm=temporal_center,
+                radius_mm=MIDA_US_TEMPORAL_APERTURE_RADIUS_MM,
+                description="Transtemporal window above the zygomatic arch and anterior/superior to the ear canal.",
+            )
+        )
+
+    for side in ("left", "right"):
+        occipital_center = _mida_side_center(
+            "Muscle - Occipitiofrontalis - Occipital Belly.stl",
+            side=side,
+            mida_root=mida_root,
+        )
+        lower_occipital_center = (
+            float(occipital_center[0]),
+            float(occipital_center[1] - 2.0),
+            float(occipital_center[2] - 12.0),
+        )
+        windows.append(
+            MidaScalpAperture(
+                name=f"{side}_occipital",
+                center_mm=lower_occipital_center,
+                radius_mm=MIDA_US_OCCIPITAL_APERTURE_RADIUS_MM,
+                description="Lower posterior occipital/suboccipital window approximating access toward the foramen magnum.",
+            )
+        )
+    return tuple(windows)
 
 
 def mida_model_available(mida_root: str | Path | None = None) -> bool:
@@ -464,6 +554,88 @@ def sample_mida_scalp_positions(
         raise ValueError("method must be 'area', 'projected_fibonacci', or 'max_distance'")
 
     return _offset_positions_outward(positions, offset)[start_n:end_n]
+
+
+def _split_counts_evenly(total: int, n_groups: int) -> tuple[int, ...]:
+    base = total // n_groups
+    remainder = total % n_groups
+    return tuple(base + (1 if index < remainder else 0) for index in range(n_groups))
+
+
+def sample_mida_us_acoustic_window_positions_by_window(
+    n_sensors: int,
+    *,
+    offset: float = 0.0,
+    mida_root: str | Path | None = None,
+    candidate_count: int | None = None,
+) -> dict[str, np.ndarray]:
+    """Sample ultrasound receivers only on temporal/occipital acoustic windows.
+
+    Receivers are split evenly across left/right temporal and left/right
+    occipital apertures. Within each aperture, a greedy max-distance sampler
+    gives an even local distribution over deterministic MIDA scalp candidates.
+    """
+    if n_sensors <= 0:
+        raise ValueError("n_sensors must be positive")
+
+    windows = mida_us_acoustic_windows(mida_root=mida_root)
+    counts = _split_counts_evenly(n_sensors, len(windows))
+    if candidate_count is None:
+        candidate_count = max(16384, n_sensors * 256)
+    if candidate_count < n_sensors:
+        raise ValueError("candidate_count must be at least n_sensors")
+
+    triangles = mida_scalp_triangles(
+        mida_root=mida_root,
+        region="full",
+        coordinate_frame="guti",
+    )
+    candidates = _area_weighted_surface_points(triangles, candidate_count)
+    centers = np.array([window.center_mm for window in windows], dtype=np.float64)
+    distances = np.linalg.norm(candidates[:, None, :] - centers[None, :, :], axis=2)
+    nearest_window = np.argmin(distances, axis=1)
+
+    positions_by_window: dict[str, np.ndarray] = {}
+    for window_index, (window, count) in enumerate(zip(windows, counts)):
+        if count == 0:
+            positions_by_window[window.name] = np.empty((0, 3), dtype=np.float64)
+            continue
+
+        mask = (
+            (distances[:, window_index] <= window.radius_mm)
+            & (nearest_window == window_index)
+        )
+        aperture_candidates = candidates[mask]
+        if len(aperture_candidates) < count:
+            fallback_mask = distances[:, window_index] <= window.radius_mm
+            aperture_candidates = candidates[fallback_mask]
+        if len(aperture_candidates) < count:
+            raise ValueError(
+                f"Only {len(aperture_candidates)} MIDA scalp candidates found for "
+                f"{window.name}; need {count}. Increase candidate_count or aperture radius."
+            )
+
+        selected = _max_distance_positions(aperture_candidates, count)
+        positions_by_window[window.name] = _offset_positions_outward(selected, offset)
+
+    return positions_by_window
+
+
+def sample_mida_us_acoustic_window_positions(
+    n_sensors: int,
+    *,
+    offset: float = 0.0,
+    mida_root: str | Path | None = None,
+    candidate_count: int | None = None,
+) -> np.ndarray:
+    """Sample ultrasound receivers on the four MIDA acoustic windows."""
+    positions_by_window = sample_mida_us_acoustic_window_positions_by_window(
+        n_sensors,
+        offset=offset,
+        mida_root=mida_root,
+        candidate_count=candidate_count,
+    )
+    return np.vstack(list(positions_by_window.values()))
 
 
 @lru_cache(maxsize=4)
