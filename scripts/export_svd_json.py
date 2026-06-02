@@ -100,7 +100,7 @@ MODALITIES = {
 README_ALGO_MODALITY = {
     "meg_opm": ("meg_opm", 3),
     "meg_squid": ("meg_squid", 3),
-    "eeg_openmeeg": ("eeg_openmeeg", 3),
+    "eeg": ("eeg_openmeeg", 3),
     "cw_fnirs": ("cw_fnirs", 1),
     "td_fnirs": ("td_fnirs_analytical", 1),
     "us_free_field_analytical_frequency_sweep": ("us_analytical", 1),
