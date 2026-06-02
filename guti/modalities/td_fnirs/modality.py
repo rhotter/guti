@@ -24,7 +24,11 @@ from guti.modalities.td_fnirs.utils import (
 class TDfNIRSAnalytical(ImagingModality):
     @property
     def name(self) -> str:
-        return "td_fnirs"
+        # NOTE: the incoming merge renamed this to "td_fnirs", but the rest of the
+        # pipeline (variant store, canonical npz, meta plot, noise model, existing
+        # variants) all use "td_fnirs_analytical". Kept here for consistency; revisit
+        # as a full rename during merge resolution if "td_fnirs" is preferred.
+        return "td_fnirs_analytical"
 
     @property
     def noise_model_name(self) -> str:
@@ -148,10 +152,17 @@ class TDfNIRSAnalytical(ImagingModality):
         print(f"  Time gates: {self.time_gates_ns} ns")
         print(f"  Output matrix shape: ({n_pairs * n_gates}, {n_points})")
 
-        # Compute sensitivities for each time gate (semi-infinite medium).
-        all_sensitivities = []
-        for t_ns in self.time_gates_ns:
-            sensitivities = td_sensitivity_batched(
+        # Compute sensitivities gate-by-gate, writing each directly into a
+        # preallocated (n_pairs, n_gates, n_points) buffer. This avoids holding the
+        # per-gate list AND a torch.stack copy at once (which doubled/tripled peak
+        # GPU memory and crashed large fine-grid x many-gate matrices). Rows end up
+        # ordered [pair0_t0, pair0_t1, ..., pair1_t0, ...] after the final reshape.
+        voxel_volume_mm3 = float(self.params.grid_resolution_mm) ** 3
+        result = torch.empty(
+            (n_pairs, n_gates, n_points), dtype=torch.float32, device=self.device
+        )
+        for gi, t_ns in enumerate(self.time_gates_ns):
+            result[:, gi, :] = td_sensitivity_batched(
                 pos=grid_points_torch,
                 source_pos=valid_sources,
                 source_normal=valid_source_normals,
@@ -163,22 +174,30 @@ class TDfNIRSAnalytical(ImagingModality):
                 c=self.c,
                 mu_s_prime=self.mu_s_prime,
             )
-            all_sensitivities.append(sensitivities)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        # Stack: shape becomes (n_gates, n_pairs, n_points)
-        stacked = torch.stack(all_sensitivities, dim=0)
-
-        # Reshape to (n_pairs * n_gates, n_points)
-        # We want rows ordered as [pair0_t0, pair0_t1, ..., pair1_t0, pair1_t1, ...]
-        # So transpose to (n_pairs, n_gates, n_points) then reshape
-        stacked = stacked.permute(1, 0, 2)  # (n_pairs, n_gates, n_points)
-        result = stacked.reshape(n_pairs * n_gates, n_points)
-        voxel_volume_mm3 = float(self.params.grid_resolution_mm) ** 3
+        result = result.reshape(n_pairs * n_gates, n_points)
+        result *= voxel_volume_mm3  # in-place: voxel-integrated transfer (mm^-1)
         self.params.forward_model_convention = "voxel_integrated_transfer"
         self.params.forward_model_units = "mm^-1"
         self.params.voxel_volume_mm3 = voxel_volume_mm3
 
-        return (result * voxel_volume_mm3).cpu().numpy()
+        return result.cpu().numpy()
+
+    def compute_svd(self) -> np.ndarray:
+        """Singular values via the fast adaptive solver.
+
+        The TD forward matrices at fine grids are large and extremely
+        ill-conditioned, where the direct GPU SVD (cuSOLVER gesvdj) fails and a
+        full eigendecomposition is slow. compute_svd_fast uses an exact full SVD
+        for small matrices and a float32 randomized top-k SVD for large ones
+        (resolved down to ~1e-5 of the largest singular value, which is all the
+        sqrt(N) spectra and capacity need).
+        """
+        from guti.svd import compute_svd_fast
+
+        return compute_svd_fast(self.jacobian)
 
 
 if __name__ == "__main__":
