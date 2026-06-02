@@ -66,7 +66,7 @@ TIME_RESOLUTION_S = {
     "meg_opm": 0.01,
     "meg_squid": 0.01,
     "cw_fnirs": 0.1,
-    "td_fnirs_analytical": 0.1,
+    "td_fnirs": 0.1,
 }
 TABLE_DEFAULTS = {
     "eeg_openmeeg": {
@@ -103,12 +103,12 @@ TABLE_DEFAULTS = {
         "max_dist_mm": 50.0,
         "reference": "results/cw_fnirs_svd_spectrum.npz",
     },
-    "td_fnirs_analytical": {
+    "td_fnirs": {
         "n_sensors": 400,
         "grid_spacing_mm": 4.0,
         "max_dist_mm": 50.0,
         "n_time_gates": 6,
-        "reference": "results/td_fnirs_analytical_svd_spectrum.npz",
+        "reference": "results/td_fnirs_svd_spectrum.npz",
     },
 }
 MODALITY_ALIASES = {
@@ -125,16 +125,16 @@ MODALITY_ALIASES = {
     "fnirs_cw": "cw_fnirs",
     "cw_fnirs": "cw_fnirs",
     "cw_fnirs": "cw_fnirs",
-    "td_fnirs": "td_fnirs_analytical",
-    "td-fnirs": "td_fnirs_analytical",
-    "td_fnirs_analytical": "td_fnirs_analytical",
+    "td_fnirs": "td_fnirs",
+    "td-fnirs": "td_fnirs",
+    "td_fnirs_analytical": "td_fnirs",
 }
 DEFAULT_MODALITIES = (
     "eeg_openmeeg",
     "meg_opm",
     "meg_squid",
     "cw_fnirs",
-    "td_fnirs_analytical",
+    "td_fnirs",
 )
 CAPACITY_ATTRIBUTION_DEFAULT_MODALITIES = (
     "eeg_openmeeg",
@@ -148,7 +148,7 @@ MODALITY_ORDER = (
     "meg_opm",
     "meg_squid",
     "cw_fnirs",
-    "td_fnirs_analytical",
+    "td_fnirs",
 )
 COMPARISON_LABELS = {
     "eeg_openmeeg": "EEG OpenMEEG",
@@ -156,7 +156,7 @@ COMPARISON_LABELS = {
     "meg_opm": "MEG OPM",
     "meg_squid": "MEG SQUID",
     "cw_fnirs": "fNIRS CW",
-    "td_fnirs_analytical": "TD-fNIRS",
+    "td_fnirs": "TD-fNIRS",
 }
 MODALITY_COLORS = {
     "EEG OpenMEEG": "#2563eb",
@@ -1472,9 +1472,9 @@ def run_td_fnirs(
     depth_bin_width_mm: float,
     scaling: str,
 ) -> Path:
-    model = get_noise_model("td_fnirs_analytical")
+    model = get_noise_model("td_fnirs")
     physical_noise = compute_detector_noise_std(
-        "td_fnirs_analytical",
+        "td_fnirs",
         n_sensors=n_sensors,
         tier="today",
     )
@@ -1493,7 +1493,7 @@ def run_td_fnirs(
     A = np.asarray(A_transfer, dtype=np.float64) * model.source_amplitude
     noise, scaling_params = choose_noise(
         A,
-        "td_fnirs_analytical",
+        "td_fnirs",
         n_sensors,
         physical_noise,
         scaling,
@@ -1501,12 +1501,12 @@ def run_td_fnirs(
     posterior_var, info_bits = posterior_info_scalar(A, noise)
     n_pairs = int(A.shape[0] // max(n_time_gates, 1))
     return save_result(
-        "td_fnirs_analytical",
+        "td_fnirs",
         positions,
         info_bits,
         posterior_var,
         {
-            "modality": "td_fnirs_analytical",
+            "modality": "td_fnirs",
             "n_sensors": n_sensors,
             "forward_matrix_shape": list(A.shape),
             "n_unique_source_detector_pairs": n_pairs,
@@ -1514,7 +1514,7 @@ def run_td_fnirs(
             "time_gates_ns": list(map(float, modality.time_gates_ns)),
             "grid_spacing_mm": grid_spacing_mm,
             "max_dist_mm": max_dist_mm,
-            "table_default_reference": TABLE_DEFAULTS["td_fnirs_analytical"]["reference"],
+            "table_default_reference": TABLE_DEFAULTS["td_fnirs"]["reference"],
             "detector_noise_today": physical_noise,
             "source_amplitude": model.source_amplitude,
             "voxel_volume_mm3": voxel_volume_mm3,
@@ -1596,22 +1596,22 @@ def main() -> None:
     parser.add_argument(
         "--td-fnirs-sensors",
         type=int,
-        default=TABLE_DEFAULTS["td_fnirs_analytical"]["n_sensors"],
+        default=TABLE_DEFAULTS["td_fnirs"]["n_sensors"],
     )
     parser.add_argument(
         "--td-fnirs-grid-spacing-mm",
         type=float,
-        default=TABLE_DEFAULTS["td_fnirs_analytical"]["grid_spacing_mm"],
+        default=TABLE_DEFAULTS["td_fnirs"]["grid_spacing_mm"],
     )
     parser.add_argument(
         "--td-fnirs-max-dist-mm",
         type=float,
-        default=TABLE_DEFAULTS["td_fnirs_analytical"]["max_dist_mm"],
+        default=TABLE_DEFAULTS["td_fnirs"]["max_dist_mm"],
     )
     parser.add_argument(
         "--td-fnirs-gates",
         type=int,
-        default=TABLE_DEFAULTS["td_fnirs_analytical"]["n_time_gates"],
+        default=TABLE_DEFAULTS["td_fnirs"]["n_time_gates"],
     )
     parser.add_argument("--depth-bin-width-mm", type=float, default=2.0)
     parser.add_argument(
@@ -1701,7 +1701,7 @@ def main() -> None:
                 args.scaling,
             )
         )
-    if args.map_kind in ("posterior", "both") and "td_fnirs_analytical" in selected:
+    if args.map_kind in ("posterior", "both") and "td_fnirs" in selected:
         posterior_outputs.append(
             run_td_fnirs(
                 args.td_fnirs_sensors,
@@ -1720,7 +1720,7 @@ def main() -> None:
         capacity_selected = list(CAPACITY_ATTRIBUTION_DEFAULT_MODALITIES)
     elif (
         args.map_kind in ("capacity", "both")
-        and "td_fnirs_analytical" in capacity_selected
+        and "td_fnirs" in capacity_selected
     ):
         raise NotImplementedError(
             "Exact TD-fNIRS capacity attribution requires a large dense right-SVD "
