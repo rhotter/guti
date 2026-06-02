@@ -913,6 +913,7 @@ def main() -> None:
     physical_total_source_power = compute_input_amplitude("us_analytical") ** 2
     slq_frobenius_norm_sq = None
     slq_logdet_alpha = None
+    slq_elapsed_seconds = None
 
     matrix_normalization_scale = (
         1.0
@@ -1161,7 +1162,8 @@ def main() -> None:
             )
         if device == "cuda":
             torch.cuda.synchronize()
-        print(f"slq_elapsed: {time.perf_counter() - t0:.3f}s")
+        slq_elapsed_seconds = time.perf_counter() - t0
+        print(f"slq_elapsed: {slq_elapsed_seconds:.3f}s")
         print(f"bitrate_slq: {bitrate_slq}")
 
     result_record = {
@@ -1212,6 +1214,9 @@ def main() -> None:
             float(slq_frobenius_norm_sq) if slq_frobenius_norm_sq is not None else None
         ),
         "slq_logdet_alpha": float(slq_logdet_alpha) if slq_logdet_alpha is not None else None,
+        "slq_elapsed_seconds": (
+            float(slq_elapsed_seconds) if slq_elapsed_seconds is not None else None
+        ),
         "slq_streaming": bool(args.slq_streaming),
         "slq_probe_parallel": bool(args.slq_probe_parallel),
         "slq_multi_gpu": bool(args.slq_multi_gpu),
