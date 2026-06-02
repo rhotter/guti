@@ -1,0 +1,275 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue,
+  citecolor=blue
+}
+
+\title{Derivation of the Ultrasound RBC Sensor SNR}
+\author{Grand Unified Theory of Imaging (GUTI)}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section*{Summary}
+
+The ultrasound summary table reports an amplitude SNR of approximately
+\[
+  \mathrm{SNR}_{\mathrm{sensor}} = 0.1445.
+\]
+This number is not the SNR of a single isolated source--sensor pair.  It is the
+RMS output amplitude of the full cone-scaled RBC pressure operator, restricted
+to one 2 MHz axial range slice and multiplied by a 1\% CBV-variability factor,
+divided by the assumed scalar sensor noise:
+\[
+  \mathrm{SNR}_{\mathrm{sensor}}
+  =
+  \frac{0.00072268~\mathrm{Pa}}{0.005~\mathrm{Pa}}
+  =
+  0.1445.
+\]
+
+\section*{Assumptions and References}
+
+The numerical assumptions are taken from the repository implementation and
+stored result metadata:
+\begin{itemize}
+  \item RBC backscatter defaults and metadata fields:
+    \texttt{guti/modalities/us/analytical.py}.
+  \item Modality-summary constants and SNR calculation:
+    \texttt{scripts/make\_modality\_noise\_summary.py}.
+  \item Stored 6000-sensor cone-scaled RBC result:
+    \texttt{results/variants/us\_free\_field\_analytical\_50khz\_128k\_rbc\_cone\_slice\_cbv1pct\_20260602/json/001\_50khz\_128000src\_6000sensors.json}.
+  \item Generated modality summary:
+    \texttt{results/modality\_correlated\_noise\_summary/README.md}.
+\end{itemize}
+
+The key scalar assumptions are:
+\[
+\begin{aligned}
+  f_{\mathrm{RBC}} &= 2~\mathrm{MHz},&
+  f_{\mathrm{ref}} &= 50~\mathrm{kHz},&
+  P_{\mathrm{external}} &= 1~\mathrm{MPa},\\
+  \mathrm{BSC}_{10\mathrm{MHz}} &= 3\times 10^{-5}~\mathrm{cm}^{-1}\mathrm{sr}^{-1},&
+  \mathrm{CBV} &= 0.03,&
+  V_{\mathrm{voxel}} &= 24~\mathrm{mm}^{3},\\
+  r_{\mathrm{ref}} &= 0.10~\mathrm{m},&
+  T_{\mathrm{in}} &= 0.5,&
+  T_{\mathrm{out}} &= 0.1.
+\end{aligned}
+\]
+
+The \(24~\mathrm{mm}^{3}\) voxel volume is the backscatter/source-cell volume
+used in the 50 kHz reference simulation basis.  It is not a claim that the
+2 MHz image-resolution voxel has volume \(24~\mathrm{mm}^{3}\).  The later
+2 MHz extrapolation uses the explicit spatial-mode scaling
+\[
+  \left(\frac{f_{\mathrm{RBC}}}{f_{\mathrm{ref}}}\right)^3
+  =
+  \left(\frac{2~\mathrm{MHz}}{50~\mathrm{kHz}}\right)^3
+  =
+  64{,}000.
+\]
+
+\section*{RBC Backscatter Model}
+
+The volume-backscatter model converts a blood backscatter coefficient into a
+pressure-amplitude transfer ratio.  The blood backscatter coefficient is
+scaled from the 10 MHz reference value as
+\[
+  \mathrm{BSC}_{\mathrm{blood}}(f)
+  =
+  \mathrm{BSC}_{10\mathrm{MHz}}
+  \left(\frac{f}{10~\mathrm{MHz}}\right)^4.
+\]
+At \(2~\mathrm{MHz}\),
+\[
+  \mathrm{BSC}_{\mathrm{blood}}(2~\mathrm{MHz})
+  =
+  3\times 10^{-5}
+  \left(\frac{2}{10}\right)^4
+  =
+  4.8\times 10^{-8}~\mathrm{cm}^{-1}\mathrm{sr}^{-1}.
+\]
+
+Multiplying by cerebral blood volume gives the volume backscatter density
+used for brain blood:
+\[
+  \eta
+  =
+  \mathrm{CBV}\cdot \mathrm{BSC}_{\mathrm{blood}}
+  =
+  0.03\cdot 4.8\times 10^{-8}
+  =
+  1.44\times 10^{-9}~\mathrm{cm}^{-1}\mathrm{sr}^{-1}.
+\]
+Converting from \(\mathrm{cm}^{-1}\) to \(\mathrm{m}^{-1}\):
+\[
+  \eta = 1.44\times 10^{-7}~\mathrm{m}^{-1}\mathrm{sr}^{-1}.
+\]
+
+The pairwise pressure model is
+\[
+  p_{ij}
+  =
+  P_{\mathrm{external}}\,
+  T_i T_j
+  \frac{\sqrt{\eta V_{\mathrm{voxel}}}}{r_{ij}}.
+\]
+The square root appears because the BSC gives an intensity-like scattering
+fraction, while the channel model uses pressure amplitude.
+
+\section*{Reference Pair Pressures}
+
+For the reference range \(r=0.10~\mathrm{m}\) and
+\(V_{\mathrm{voxel}}=24~\mathrm{mm}^3=24\times 10^{-9}~\mathrm{m}^3\),
+\[
+  \frac{\sqrt{\eta V_{\mathrm{voxel}}}}{r}
+  =
+  \frac{\sqrt{(1.44\times 10^{-7})(24\times 10^{-9})}}{0.10}
+  =
+  5.8788\times 10^{-7}.
+\]
+With \(P_{\mathrm{external}}=10^6~\mathrm{Pa}\), the no-skull reference pressure is
+\[
+  p_{\mathrm{no\ skull}}
+  =
+  10^6 \cdot 5.8788\times 10^{-7}
+  =
+  0.58788~\mathrm{Pa}.
+\]
+
+The cone run applies one skull-transmission factor on transmit and one on
+receive.  Thus the three reference pair amplitudes are
+\[
+\begin{aligned}
+  p_{\mathrm{out,out}}
+    &= 0.58788 \cdot 0.1 \cdot 0.1
+     = 0.0058788~\mathrm{Pa}
+     = 5.8788~\mathrm{mPa},\\
+  p_{\mathrm{in,out}}
+    &= 0.58788 \cdot 0.5 \cdot 0.1
+     = 0.029394~\mathrm{Pa}
+     = 29.394~\mathrm{mPa},\\
+  p_{\mathrm{in,in}}
+    &= 0.58788 \cdot 0.5 \cdot 0.5
+     = 0.14697~\mathrm{Pa}
+     = 146.97~\mathrm{mPa}.
+\end{aligned}
+\]
+
+These are baseline pair pressures before the 1\% CBV-variability factor.  The
+variable component used in the table is \(0.01\) times the pressure response.
+
+\section*{From Pair Pressures to the Table RMS Amplitude}
+
+The table uses the full cone-scaled operator, not just one reference pair.  The
+stored 6000-sensor SLQ metadata reports
+\[
+  \|G\|_F^2 = 372368.726,\qquad n_{\mathrm{outputs}}=366000.
+\]
+The full-volume, unit-variance output RMS is therefore
+\[
+  A_{\mathrm{all}}
+  =
+  \sqrt{\frac{\|G\|_F^2}{n_{\mathrm{outputs}}}}
+  =
+  \sqrt{\frac{372368.726}{366000}}
+  =
+  1.00866~\mathrm{Pa}.
+\]
+
+The summary row then restricts the source power to one axial range slice for a
+two-cycle, 2 MHz pulse.  With speed of sound \(c=1540~\mathrm{m/s}\) and depth
+\(D=0.15~\mathrm{m}\),
+\[
+  f_{\mathrm{slice}}
+  =
+  \frac{c(2/f_{\mathrm{RBC}})/2}{D}
+  =
+  \frac{1540(2/2{,}000{,}000)/2}{0.15}
+  =
+  0.00513333.
+\]
+
+The displayed table amplitude is
+\[
+  A_{\mathrm{table}}
+  =
+  A_{\mathrm{all}}\sqrt{f_{\mathrm{slice}}}\cdot 0.01
+  =
+  1.00866\sqrt{0.00513333}\cdot 0.01
+  =
+  0.00072268~\mathrm{Pa}.
+\]
+Equivalently,
+\[
+  A_{\mathrm{table}} = 0.72268~\mathrm{mPa}.
+\]
+
+\section*{Sensor Noise and Final SNR}
+
+The summary row assumes scalar iid pressure noise
+\[
+  \sigma_{\mathrm{sensor}}=5~\mathrm{mPa}=0.005~\mathrm{Pa}.
+\]
+The reported sensor SNR is therefore
+\[
+  \mathrm{SNR}_{\mathrm{sensor}}
+  =
+  \frac{A_{\mathrm{table}}}{\sigma_{\mathrm{sensor}}}
+  =
+  \frac{0.00072268}{0.005}
+  =
+  0.1445359.
+\]
+
+\section*{Interpretation}
+
+The number \(0.1445\) is a table-level RMS amplitude SNR under the current
+RBC-cone assumptions.  It combines:
+\begin{enumerate}
+  \item BSC-derived RBC pressure scaling at 2 MHz,
+  \item cone-dependent skull transmission,
+  \item the 50 kHz reference simulation basis using \(V=24~\mathrm{mm}^{3}\),
+  \item restriction to one two-cycle 2 MHz axial slice,
+  \item a 1\% CBV-variability amplitude factor, and
+  \item fixed \(5~\mathrm{mPa}\) scalar sensor noise.
+\end{enumerate}
+
+It should not be read as the SNR of every individual voxel-to-sensor pair.
+For example, the 10 cm reference pair pressures range from
+\(5.88~\mathrm{mPa}\) outside/outside to \(146.97~\mathrm{mPa}\) inside/inside
+before the 1\% variability factor.
+
+\section*{Repository References}
+
+\begin{thebibliography}{9}
+\bibitem{analytical}
+GUTI ultrasound analytical implementation,
+\texttt{guti/modalities/us/analytical.py}.
+
+\bibitem{summary-script}
+GUTI modality summary generator,
+\texttt{scripts/make\_modality\_noise\_summary.py}.
+
+\bibitem{result-json}
+GUTI 6000-sensor RBC cone slice 1\% CBV result metadata,
+\texttt{results/variants/us\_free\_field\_analytical\_50khz\_128k\_rbc\_cone\_slice\_cbv1pct\_20260602/json/001\_50khz\_128000src\_6000sensors.json}.
+
+\bibitem{summary-readme}
+GUTI generated modality noise summary,
+\texttt{results/modality\_correlated\_noise\_summary/README.md}.
+\end{thebibliography}
+
+\end{document}
