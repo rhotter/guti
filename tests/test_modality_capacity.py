@@ -7,14 +7,14 @@ from scripts.plot_modality_convergence import load_variant
 
 SUMMARY = Path("results/modality_correlated_noise_summary/summary.csv")
 
-# modality label -> (noise_model, source_orientations). EEG is excluded from the
-# parity check: the README converged row uses the anchored calibration, while the
-# charts (and this function) use each variant's own spectrum by design.
+# summary label -> (noise_model, source_orientations). EEG is excluded (its converged
+# row uses the anchored calibration, while the charts use each variant's own spectrum
+# by design); US is excluded (its summary row uses a separate cone-slice model, while
+# the charts use the RBC λ³ sensor sweep).
 PARITY = {
     "MEG OPM": ("meg_opm", 3),
     "MEG SQUID": ("meg_squid", 3),
     "fNIRS CW": ("cw_fnirs", 1),
-    "US 2 MHz RBC": ("us_analytical", 1),
 }
 
 

@@ -153,7 +153,7 @@ def infer_shape(
         n_voxels = len(get_grid_positions(grid_spacing_mm=float(params.source_spacing_mm)))
         return 3 * int(params.num_sensors), 3 * n_voxels, n_voxels
 
-    if noise_model.startswith("eeg_"):
+    if noise_model.startswith("eeg"):
         if params.num_sensors is None or params.num_brain_grid_points is None:
             raise ValueError("EEG variant needs num_sensors and num_brain_grid_points")
         n_voxels = int(params.num_brain_grid_points)
