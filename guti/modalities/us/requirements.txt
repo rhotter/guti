@@ -1,18 +1,11 @@
-# Ultrasound modality
+# Ultrasound modality (analytical free-field Green's-function forward model)
 #
-# jax/jwave are still required: us/analytical.py builds its medium via the
-# legacy helpers in guti.modalities._legacy.us_jwave (jax/jwave at import time).
-# CUDA wheels (commented) for GPU; cupy/modal only used by the Modal GPU runner.
-# jax[cuda12]==0.4.28
-# jaxlib[cuda12]==0.4.28
-jax
-jaxlib
-jaxdf==0.2.8
-jwave==0.2.1
-matplotlib==3.7.3
-# numpy==1.25.2
+# This path is jax/jwave-free: the old heterogeneous jwave implementation now
+# lives under guti.modalities._legacy.us_jwave and nothing here imports it.
+# cupy/modal are only used by the Modal multi-GPU runner (modal_us_analytical.py).
 numpy
 scipy
+matplotlib
 torch
 tqdm
 modal              # modal_us_analytical.py multi-GPU runner
