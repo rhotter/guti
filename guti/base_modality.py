@@ -68,6 +68,17 @@ class ImagingModality(ABC):
         """
         pass
 
+    @property
+    def noise_model_name(self) -> str:
+        """
+        Return the canonical noise-model identifier for this modality.
+
+        This can differ from ``name`` when the runnable modality lives in a
+        short folder name but the physics/noise model has a more specific
+        historical key, such as ``eeg`` using ``eeg_openmeeg``.
+        """
+        return self.name
+
     @abstractmethod
     def setup_geometry(self) -> None:
         """
@@ -290,12 +301,18 @@ class ImagingModality(ABC):
         """
         from guti.data_utils import save_svd
 
+        arrays = {"modality_name": self.name}
+        if self.noise_model_name != self.name:
+            arrays["noise_model_name"] = self.noise_model_name
+        if extra_arrays is not None:
+            arrays.update(extra_arrays)
+
         save_svd(
             singular_values,
             self.name,
             self.params,
             default_run=default_run,
-            extra_arrays=extra_arrays,
+            extra_arrays=arrays,
         )
 
     def __repr__(self) -> str:

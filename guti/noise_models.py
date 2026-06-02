@@ -1018,6 +1018,15 @@ NOISE_MODELS = {
 # ---------------------------------------------------------------------------
 
 def canonicalize_modality_name(modality_name: str) -> str:
+    folder_name_aliases = {
+        "eeg": "eeg_openmeeg",
+        "td_fnirs": "td_fnirs_analytical",
+        "us": "us_analytical",
+        "fnirs_analytical_cw": "cw_fnirs",
+    }
+    if modality_name in folder_name_aliases:
+        return folder_name_aliases[modality_name]
+
     if modality_name in NOISE_MODELS:
         return modality_name
 

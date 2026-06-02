@@ -69,10 +69,10 @@ SWEEP_SPECS = (
         source_orientations=3,
     ),
     SweepSpec(
-        name="fnirs_analytical_cw",
+        name="cw_fnirs",
         label="fNIRS CW",
-        noise_model="fnirs_analytical_cw",
-        variant_dirs=("results/variants/fnirs_analytical_cw",),
+        noise_model="cw_fnirs",
+        variant_dirs=("results/variants/cw_fnirs",),
     ),
     SweepSpec(
         name="us_analytical_50khz",

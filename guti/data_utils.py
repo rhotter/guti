@@ -34,7 +34,7 @@ def save_svd(
     s : ndarray or None
         Singular values from SVD, or None for the SLQ (no-spectrum) path.
     modality_name : str
-        Name of modality, e.g. 'cw_fnirs' or 'eeg_openmeeg'
+        Name of modality/result family, e.g. 'cw_fnirs', 'eeg', or 'meg_opm'
     params : Parameters, optional
         Parameters object (see guti.parameters.Parameters).
     default_run : bool, default=False

@@ -31,6 +31,10 @@ _MODEL_DIR = _HERE / "_openmeeg_model"
 class EEGModality(ImagingModality):
     @property
     def name(self) -> str:
+        return "eeg"
+
+    @property
+    def noise_model_name(self) -> str:
         return "eeg_openmeeg"
 
     def _get_default_modality_params(self) -> Parameters:

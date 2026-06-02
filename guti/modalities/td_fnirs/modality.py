@@ -24,6 +24,10 @@ from guti.modalities.td_fnirs.utils import (
 class TDfNIRSAnalytical(ImagingModality):
     @property
     def name(self) -> str:
+        return "td_fnirs"
+
+    @property
+    def noise_model_name(self) -> str:
         return "td_fnirs_analytical"
 
     def _get_default_modality_params(self) -> Parameters:

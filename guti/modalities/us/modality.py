@@ -45,6 +45,10 @@ def _source_spacing_for_count(n_sources: int) -> float:
 class USModality(ImagingModality):
     @property
     def name(self) -> str:
+        return "us"
+
+    @property
+    def noise_model_name(self) -> str:
         return "us_analytical"
 
     def _get_default_modality_params(self) -> Parameters:
