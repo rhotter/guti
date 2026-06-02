@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from guti.capacity import (
+    default_output_frequency_spectrum_kwargs,
+    frequency_spectrum_kwargs_from_params,
     get_bitrate,
     get_capacity,
     total_input_power_from_average_output_power,
@@ -51,6 +53,8 @@ SWEEP_SPECS = (
             "results/variants/eeg_openmeeg_clean_sweep_20260601_margin5mm",
             "results/variants/eeg_openmeeg_correlated_noise_20260601_margin5mm",
             "results/variants/eeg_openmeeg_correlated_noise_exponential_L18p688mm_20260601_margin5mm",
+            "results/variants/eeg_openmeeg_johnson_volume_covariance_20260601_margin5mm",
+            "results/variants/eeg_openmeeg_spherical_johnson_covariance_20260602_margin5mm",
         ),
         source_orientations=3,
     ),
@@ -108,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated metric noise types to include, or 'all'. "
             "Known: scalar_iid, spatial_covariance."
+        ),
+    )
+    parser.add_argument(
+        "--noise-plot-tags",
+        default="all",
+        help=(
+            "Comma-separated plot tags to include after noise-model filtering, "
+            "or 'all'. Use 'none' for scalar/no-tag records."
         ),
     )
     return parser
@@ -183,6 +195,8 @@ def load_variant(
             data,
             "johnson_series_resistance_ohm",
         ),
+        "johnson_bandwidth_hz": _optional_np_scalar(data, "johnson_bandwidth_hz"),
+        "johnson_noise_diagonal": _optional_np_scalar(data, "johnson_noise_diagonal"),
     }
     return (
         np.asarray(data["singular_values"], dtype=np.float64),
@@ -266,18 +280,23 @@ def variant_record(spec: SweepSpec, path: Path) -> dict[str, Any]:
             n_sources=n_sources,
             n_outputs=n_outputs,
         )
+        spectrum_kwargs = frequency_spectrum_kwargs_from_params(
+            params
+        ) or default_output_frequency_spectrum_kwargs(spec.noise_model)
         bitrate = get_bitrate(
             s_noise_normalized,
             n_sources=n_sources,
             total_input_power=total_input_power,
             noise=1.0,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
         capacity = get_capacity(
             s_noise_normalized[s_noise_normalized > 0],
             total_input_power=total_input_power,
             noise=1.0,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
     else:
         total_input_power = total_input_power_from_average_output_power(
@@ -286,18 +305,23 @@ def variant_record(spec: SweepSpec, path: Path) -> dict[str, Any]:
             n_sources=n_sources,
             n_outputs=n_outputs,
         )
+        spectrum_kwargs = frequency_spectrum_kwargs_from_params(
+            params
+        ) or default_output_frequency_spectrum_kwargs(spec.noise_model)
         bitrate = get_bitrate(
             s_capacity,
             n_sources=n_sources,
             total_input_power=total_input_power,
             noise=output_noise,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
         capacity = get_capacity(
             s_capacity[s_capacity > 0],
             total_input_power=total_input_power,
             noise=output_noise,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
     params_dict = asdict(params)
     return {
@@ -411,6 +435,8 @@ def write_metrics(records: list[dict[str, Any]], errors: list[dict[str, str]], o
         "johnson_electrode_area_cm2",
         "johnson_lmax",
         "johnson_series_resistance_ohm",
+        "johnson_bandwidth_hz",
+        "johnson_noise_diagonal",
         "total_input_power",
         "bitrate_bits_per_s",
         "channel_capacity_bits_per_s",
@@ -511,8 +537,26 @@ def _plot_filename(filename: str, plot_tag: str | None) -> str:
 
 
 def _plot_title(label: str, plot_tag: str | None, ylabel: str, xlabel: str) -> str:
-    title_label = label if plot_tag is None else f"{label} {plot_tag}"
+    if plot_tag is None:
+        title_label = label
+    elif plot_tag == "correlated_noise":
+        title_label = f"{label} correlated noise"
+    elif plot_tag.startswith("correlated_noise_"):
+        title_label = f"{label} {_format_plot_tag_for_title(plot_tag)}"
+    else:
+        title_label = f"{label} {plot_tag}"
     return f"{title_label}: {ylabel} vs {xlabel}"
+
+
+def _format_plot_tag_for_title(plot_tag: str) -> str:
+    tag = plot_tag.removeprefix("correlated_noise_")
+    if tag in {"spherical_johnson", "johnson_volume"}:
+        return "spherical Johnson noise covariance"
+    if "_L" not in tag:
+        return f"correlated noise ({tag})"
+    kernel, length = tag.split("_L", maxsplit=1)
+    length = length.removesuffix("mm").replace("p", ".").replace("m", "-")
+    return f"correlated noise ({kernel}, L={length} mm)"
 
 
 def _format_noise_length_tag(value: Any) -> str | None:
@@ -596,7 +640,6 @@ def plot_modality(
         ),
     ):
         path = modality_dir / _plot_filename(filename, plot_tag)
-        title_label = label if plot_tag is None else f"{label} {plot_tag}"
         ok = plot_single_line(
             highest_voxel_rows,
             x_key="n_sensors",
@@ -604,7 +647,7 @@ def plot_modality(
             xlabel="sensors",
             ylabel=ylabel,
             title=(
-                f"{title_label}: {ylabel} vs sensors "
+                f"{_plot_title(label, plot_tag, ylabel, 'sensors')} "
                 f"at n_voxels={max_n_voxels:g}"
             ),
             output_path=path,
@@ -694,10 +737,17 @@ def select_noise_model_types(names: str) -> set[str] | None:
     return wanted
 
 
+def select_noise_plot_tags(names: str) -> set[str] | None:
+    if names == "all":
+        return None
+    return {name.strip() for name in names.split(",") if name.strip()}
+
+
 def main() -> int:
     args = build_parser().parse_args()
     outdir = Path(args.outdir)
     selected_noise_model_types = select_noise_model_types(args.noise_model_types)
+    selected_noise_plot_tags = select_noise_plot_tags(args.noise_plot_tags)
 
     all_records: list[dict[str, Any]] = []
     all_errors: list[dict[str, str]] = []
@@ -714,8 +764,14 @@ def main() -> int:
             for record in all_records
             if record["noise_model_type"] in selected_noise_model_types
         ]
+    if selected_noise_plot_tags is not None:
+        all_records = [
+            record
+            for record in all_records
+            if (noise_plot_tag(record) or "none") in selected_noise_plot_tags
+        ]
     if not all_records:
-        raise SystemExit("No sweep records matched the selected noise model types")
+        raise SystemExit("No sweep records matched the selected filters")
 
     write_metrics(all_records, all_errors, outdir)
 

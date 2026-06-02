@@ -11,6 +11,11 @@ from typing import Optional
 import numpy as np
 
 from guti.base_modality import ImagingModality
+from guti.capacity import (
+    DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+    DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+    DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
+)
 from guti.parameters import Parameters
 from guti.core import get_sensor_positions, get_grid_positions
 from guti.modalities.meg.meg import (
@@ -36,6 +41,11 @@ class MEGModality(ImagingModality):
             num_sensors=1000,
             source_spacing_mm=5.0,
             sensor_offset_mm=OPM_OFFSET_MM,
+            output_spectrum_type="power_law",
+            output_spectrum_beta=1.0,
+            output_spectrum_min_freq_hz=DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+            output_spectrum_max_freq_hz=DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+            output_spectrum_bin_width_hz=DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
         )
 
     @classmethod
@@ -52,6 +62,11 @@ class MEGModality(ImagingModality):
             num_sensors=4000,
             source_spacing_mm=3.0,
             sensor_offset_mm=OPM_OFFSET_MM,
+            output_spectrum_type="power_law",
+            output_spectrum_beta=1.0,
+            output_spectrum_min_freq_hz=DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+            output_spectrum_max_freq_hz=DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+            output_spectrum_bin_width_hz=DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
         )
 
     def setup_geometry(self) -> None:

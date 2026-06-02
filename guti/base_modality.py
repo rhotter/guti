@@ -166,6 +166,18 @@ class ImagingModality(ABC):
 
         return as_operator(self.compute_forward_model())
 
+    def output_frequency_spectrum_kwargs(self) -> dict:
+        """Return capacity kwargs for this modality's default output spectrum."""
+        from guti.capacity import output_frequency_spectrum_kwargs_from_params
+
+        return output_frequency_spectrum_kwargs_from_params(self.params)
+
+    def frequency_spectrum_kwargs(self) -> dict:
+        """Return capacity kwargs for this modality's output/noise spectra."""
+        from guti.capacity import frequency_spectrum_kwargs_from_params
+
+        return frequency_spectrum_kwargs_from_params(self.params)
+
     def run(self, save_results: bool = True, default_run: bool = False):
         """
         Execute the bitrate pipeline: geometry → forward model → estimate → save.

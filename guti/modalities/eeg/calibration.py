@@ -23,7 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
-from guti.core import BRAIN_RADIUS, SCALP_RADIUS, get_bitrate, get_grid_positions
+from guti.capacity import get_bitrate, get_capacity
+from guti.core import BRAIN_RADIUS, SCALP_RADIUS, get_grid_positions
 
 _LEADFIELD_MAT = (
     Path(__file__).resolve().parent.parent
@@ -32,13 +33,38 @@ _LEADFIELD_MAT = (
     / "eeg_leadfield.mat"
 )
 
-# The cached lead field was built on the default 5 mm hemisphere source grid.
-_GRID_SPACING_MM = 5.0
 # Hemisphere centre in the core coordinate frame: (R, R, 0), z up.
 _BRAIN_CENTER = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
 
+# Known cached-leadfield layouts. The current repo cache has 984 source voxels,
+# matching a 10 mm grid with a 5 mm surface margin; older/generated caches may
+# use other grid layouts.
+_GRID_LAYOUT_CANDIDATES = (
+    (5.0, 0.0),
+    (10.0, 5.0),
+    (10.0, 0.0),
+)
+
 DEFAULT_MARGIN_MM = 4.0
 DEFAULT_REF_DEPTH_MM = 20.0
+
+
+def _candidate_grid_positions(spacing_mm: float, margin_mm: float) -> np.ndarray:
+    positions = get_grid_positions(spacing_mm)
+    if margin_mm <= 0.0:
+        return positions
+    r = np.linalg.norm(positions - _BRAIN_CENTER, axis=1)
+    return positions[r < (BRAIN_RADIUS - margin_mm)]
+
+
+def _source_positions_for_cached_leadfield(n_sources: int) -> np.ndarray:
+    for spacing_mm, margin_mm in _GRID_LAYOUT_CANDIDATES:
+        positions = _candidate_grid_positions(spacing_mm, margin_mm)
+        if positions.shape[0] == n_sources:
+            return positions
+    raise ValueError(
+        f"no known source grid matches cached lead field with {n_sources} sources"
+    )
 
 
 def load_eeg_leadfield(
@@ -57,12 +83,7 @@ def load_eeg_leadfield(
         linop = np.array(f["linop"])
     A = linop.T
     n_sources = A.shape[1] // 3
-    pos = get_grid_positions(_GRID_SPACING_MM)
-    if pos.shape[0] != n_sources:
-        raise ValueError(
-            f"grid/leadfield mismatch: {pos.shape[0]} grid points vs "
-            f"{n_sources} lead-field sources (expected {_GRID_SPACING_MM} mm grid)"
-        )
+    pos = _source_positions_for_cached_leadfield(n_sources)
     return A, pos
 
 
@@ -121,6 +142,7 @@ def anchored_eeg_bitrate(
     ref_depth_mm: float = DEFAULT_REF_DEPTH_MM,
     time_resolution: float = 0.01,
     leadfield: tuple[np.ndarray, np.ndarray] | None = None,
+    spectrum_kwargs: dict | None = None,
 ) -> float:
     """Empirically anchored EEG capacity in bits/s.
 
@@ -133,5 +155,38 @@ def anchored_eeg_bitrate(
     A_clean, pos_clean = exclude_boundary_voxels(A, pos, margin_mm)
     snr_modes = anchored_mode_snr(A_clean, pos_clean, snr_ref, ref_depth_mm)
     # get_bitrate computes (1/2T) sum log2(1 + (s/noise)^2); feed amplitude SNR
-    # directly with unit noise.
-    return float(get_bitrate(snr_modes, noise=1.0, time_resolution=time_resolution))
+    # directly with unit noise and unit input power per mode.
+    return float(
+        get_bitrate(
+            snr_modes,
+            n_sources=len(snr_modes),
+            total_input_power=float(len(snr_modes)),
+            noise=1.0,
+            time_resolution=time_resolution,
+            **(spectrum_kwargs or {}),
+        )
+    )
+
+
+def anchored_eeg_capacity(
+    snr_ref: float,
+    margin_mm: float = DEFAULT_MARGIN_MM,
+    ref_depth_mm: float = DEFAULT_REF_DEPTH_MM,
+    time_resolution: float = 0.01,
+    leadfield: tuple[np.ndarray, np.ndarray] | None = None,
+    spectrum_kwargs: dict | None = None,
+) -> float:
+    """Water-filled counterpart to :func:`anchored_eeg_bitrate`."""
+    A, pos = leadfield if leadfield is not None else load_eeg_leadfield()
+    A_clean, pos_clean = exclude_boundary_voxels(A, pos, margin_mm)
+    snr_modes = anchored_mode_snr(A_clean, pos_clean, snr_ref, ref_depth_mm)
+    return float(
+        get_capacity(
+            snr_modes,
+            n_sources=len(snr_modes),
+            total_input_power=float(len(snr_modes)),
+            noise=1.0,
+            time_resolution=time_resolution,
+            **(spectrum_kwargs or {}),
+        )
+    )

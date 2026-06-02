@@ -36,6 +36,32 @@ def test_partial_params_override_blur_defaults():
     assert modality.params.output_dim == 128
 
 
+def test_neural_modalities_default_to_power_law_output_spectrum():
+    eeg = EEGModality()
+    meg = MEGModality()
+
+    expected_betas = {
+        eeg: 1.5,
+        meg: 1.0,
+    }
+
+    for modality, beta in expected_betas.items():
+        assert modality.params.output_spectrum_type == "power_law"
+        assert modality.params.output_spectrum_beta == beta
+        assert modality.params.output_spectrum_min_freq_hz == 1.0
+        assert modality.params.output_spectrum_max_freq_hz == 100.0
+        assert modality.params.output_spectrum_bin_width_hz == 1.0
+        assert modality.output_frequency_spectrum_kwargs() == {
+            "output_power_law_beta": beta,
+            "output_power_law_min_freq_hz": 1.0,
+            "output_power_law_max_freq_hz": 100.0,
+            "output_power_law_bin_width_hz": 1.0,
+        }
+        assert modality.frequency_spectrum_kwargs() == (
+            modality.output_frequency_spectrum_kwargs()
+        )
+
+
 def test_runnable_modality_names_match_folders_except_meg_variants():
     assert Blur1D().name == "blur_1d"
     assert CWfNIRS().name == "cw_fnirs"

@@ -91,7 +91,12 @@ def get_modality_bitrate(
 
     Both branches return bits/second.
     """
-    from guti.capacity import get_bitrate, get_bitrate_temporal_filter
+    from guti.capacity import (
+        default_output_frequency_spectrum_kwargs,
+        get_bitrate,
+        get_bitrate_temporal_filter,
+        has_output_frequency_spectrum_kwargs,
+    )
 
     if is_hemodynamic(modality):
         tr_s = time_resolution or 1.0
@@ -110,6 +115,12 @@ def get_modality_bitrate(
             noise=noise,
             **kwargs,
         )
+
+    if not has_output_frequency_spectrum_kwargs(kwargs):
+        kwargs = {
+            **default_output_frequency_spectrum_kwargs(modality),
+            **kwargs,
+        }
 
     return get_bitrate(
         s,

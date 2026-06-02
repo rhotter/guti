@@ -18,9 +18,9 @@ The current completed high-source rows used the very high-SNR default (`1e-3` ou
 ## Inputs
 
 - Exact SVD rows: 15
-- SLQ rows: 13
+- SLQ rows: 15
 - Sensor counts: 1000, 3000, 6000
-- Largest SLQ realized source count: 259867
+- Largest SLQ realized source count: 518121
 
 ## Plots
 
@@ -28,12 +28,23 @@ The current completed high-source rows used the very high-SNR default (`1e-3` ou
 - [relative_bitrate_vs_sources_exact_plus_slq.png](relative_bitrate_vs_sources_exact_plus_slq.png)
 - [bitrate_vs_sensors_largest_slq_sources.png](bitrate_vs_sensors_largest_slq_sources.png)
 
-## Largest-Source Sensor Sweep
+## Sensor Sweep
+
+This uses the largest completed source count for each sensor count.
 
 | sensors | realized sources | SLQ bitrate bit/s |
 | ---: | ---: | ---: |
+| 1000 | 130399 | 4.81584e+11 |
 | 3000 | 259867 | 1.47528e+12 |
-| 6000 | 259867 | 2.15289e+12 |
+| 6000 | 518121 | 2.98447e+12 |
+
+## Convergence Status
+
+| sensors | previous realized sources | latest realized sources | previous bitrate bit/s | latest bitrate bit/s | latest-step change |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1000 | 98027 | 130399 | 4.81371e+11 | 4.81584e+11 | 0.04422% |
+| 3000 | 195147 | 259867 | 1.47443e+12 | 1.47528e+12 | 0.05764% |
+| 6000 | 389096 | 518121 | 2.98438e+12 | 2.98447e+12 | 0.003034% |
 
 ## Data
 

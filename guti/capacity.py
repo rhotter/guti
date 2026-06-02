@@ -5,6 +5,34 @@ from __future__ import annotations
 import numpy as np
 
 
+DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ = 1.0
+DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ = 1.0
+DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ = 100.0
+
+_OUTPUT_FREQUENCY_SPECTRUM_KWARGS = frozenset(
+    {
+        "output_frequency_spectrum",
+        "output_frequency_bin_width",
+        "output_power_law_beta",
+        "output_power_law_min_freq_hz",
+        "output_power_law_max_freq_hz",
+        "output_power_law_bin_width_hz",
+    }
+)
+
+
+_NOISE_FREQUENCY_SPECTRUM_KWARGS = frozenset(
+    {
+        "noise_frequency_spectrum",
+        "noise_frequency_bin_width",
+        "noise_power_law_beta",
+        "noise_power_law_min_freq_hz",
+        "noise_power_law_max_freq_hz",
+        "noise_power_law_bin_width_hz",
+    }
+)
+
+
 def _as_spectrum(s: np.ndarray, *, name: str = "s") -> np.ndarray:
     spectrum = np.asarray(s, dtype=float)
     if spectrum.ndim != 1:
@@ -14,6 +42,311 @@ def _as_spectrum(s: np.ndarray, *, name: str = "s") -> np.ndarray:
     if not np.all(np.isfinite(spectrum)):
         raise ValueError(f"{name} must contain finite singular values")
     return spectrum
+
+
+def _as_frequency_spectrum(
+    spectrum: np.ndarray,
+    *,
+    name: str,
+    allow_zero: bool = True,
+) -> np.ndarray:
+    values = np.asarray(spectrum, dtype=float)
+    if values.ndim != 1:
+        raise ValueError(f"{name} must be a 1D array")
+    if values.size == 0:
+        raise ValueError(f"{name} must contain at least one bin")
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"{name} must contain finite values")
+    if allow_zero:
+        if np.any(values < 0.0):
+            raise ValueError(f"{name} must contain non-negative values")
+        if not np.any(values > 0.0):
+            raise ValueError(f"{name} must contain at least one positive value")
+    else:
+        if np.any(values <= 0.0):
+            raise ValueError(f"{name} must contain positive values")
+    return values
+
+
+def _as_positive_finite(value: float, *, name: str) -> float:
+    value = float(value)
+    if value <= 0.0 or not np.isfinite(value):
+        raise ValueError(f"{name} must be positive and finite")
+    return value
+
+
+def power_law_frequency_spectrum(
+    *,
+    beta: float,
+    min_freq_hz: float,
+    max_freq_hz: float,
+    freq_bin_width_hz: float,
+) -> np.ndarray:
+    """Return a 1D power-law frequency spectrum sampled on uniform bins.
+
+    The returned values are proportional to ``1 / f**beta`` at bin centers.
+    They are intentionally not normalized; bitrate/capacity callers normalize
+    the spectrum to the supplied total output/input power.
+    """
+    beta = float(beta)
+    if not np.isfinite(beta):
+        raise ValueError("beta must be finite")
+    min_freq_hz = _as_positive_finite(min_freq_hz, name="min_freq_hz")
+    max_freq_hz = _as_positive_finite(max_freq_hz, name="max_freq_hz")
+    freq_bin_width_hz = _as_positive_finite(
+        freq_bin_width_hz,
+        name="freq_bin_width_hz",
+    )
+    if max_freq_hz <= min_freq_hz:
+        raise ValueError("max_freq_hz must be greater than min_freq_hz")
+
+    n_bins = int(np.ceil((max_freq_hz - min_freq_hz) / freq_bin_width_hz))
+    freqs = min_freq_hz + (np.arange(n_bins, dtype=float) + 0.5) * freq_bin_width_hz
+    freqs = np.minimum(freqs, max_freq_hz)
+    return freqs ** (-beta)
+
+
+def default_output_frequency_spectrum_kwargs(
+    modality: str,
+) -> dict[str, float | str]:
+    """Return default output-spectrum kwargs for modality-level bitrate.
+
+    Direct neural field modalities use a 1/f output-power spectrum over the
+    conventional 1--100 Hz band. Hemodynamic modalities already route through
+    the HRF temporal spectrum, and the remaining modalities keep the historical
+    single-band behavior unless a caller supplies an explicit spectrum.
+    """
+    if modality in {"eeg", "eeg_openmeeg"}:
+        return {
+            "output_power_law_beta": 1.5,
+            "output_power_law_min_freq_hz": DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+            "output_power_law_max_freq_hz": DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+            "output_power_law_bin_width_hz": DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
+        }
+    if modality in {"meg_opm", "meg_squid"}:
+        return {
+            "output_power_law_beta": 1.0,
+            "output_power_law_min_freq_hz": DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+            "output_power_law_max_freq_hz": DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+            "output_power_law_bin_width_hz": DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
+        }
+    return {}
+
+
+def has_output_frequency_spectrum_kwargs(kwargs: dict) -> bool:
+    """Return True if a kwargs dict contains explicit output-spectrum settings."""
+    return any(
+        key in kwargs and kwargs[key] is not None
+        for key in _OUTPUT_FREQUENCY_SPECTRUM_KWARGS
+    )
+
+
+def output_frequency_spectrum_kwargs_from_params(params) -> dict[str, float | str]:
+    """Extract output-spectrum kwargs from a ``Parameters``-like object."""
+    spectrum_type = getattr(params, "output_spectrum_type", None)
+    if spectrum_type is None:
+        return {}
+    if spectrum_type != "power_law":
+        raise ValueError(f"Unsupported output_spectrum_type {spectrum_type!r}")
+    return {
+        "output_power_law_beta": getattr(params, "output_spectrum_beta"),
+        "output_power_law_min_freq_hz": getattr(params, "output_spectrum_min_freq_hz"),
+        "output_power_law_max_freq_hz": getattr(params, "output_spectrum_max_freq_hz"),
+        "output_power_law_bin_width_hz": getattr(
+            params,
+            "output_spectrum_bin_width_hz",
+        ),
+    }
+
+
+def noise_frequency_spectrum_kwargs_from_params(params) -> dict[str, float | str]:
+    """Extract noise-spectrum kwargs from a ``Parameters``-like object."""
+    spectrum_type = getattr(params, "noise_spectrum_type", None)
+    if spectrum_type is None:
+        return {}
+    if spectrum_type != "power_law":
+        raise ValueError(f"Unsupported noise_spectrum_type {spectrum_type!r}")
+    return {
+        "noise_power_law_beta": getattr(params, "noise_spectrum_beta"),
+        "noise_power_law_min_freq_hz": getattr(params, "noise_spectrum_min_freq_hz"),
+        "noise_power_law_max_freq_hz": getattr(params, "noise_spectrum_max_freq_hz"),
+        "noise_power_law_bin_width_hz": getattr(
+            params,
+            "noise_spectrum_bin_width_hz",
+        ),
+    }
+
+
+def frequency_spectrum_kwargs_from_params(params) -> dict[str, float | str]:
+    """Extract output/noise frequency-spectrum kwargs from ``Parameters``."""
+    return {
+        **output_frequency_spectrum_kwargs_from_params(params),
+        **noise_frequency_spectrum_kwargs_from_params(params),
+    }
+
+
+def _resolve_frequency_spectrum(
+    *,
+    spectrum: np.ndarray | None,
+    frequency_bin_width: float | None,
+    power_law_beta: float | None,
+    power_law_min_freq_hz: float | None,
+    power_law_max_freq_hz: float | None,
+    power_law_bin_width_hz: float | None,
+    spectrum_name: str,
+    bin_width_name: str,
+) -> tuple[np.ndarray | None, float | None]:
+    has_array = spectrum is not None
+    has_power_law = any(
+        value is not None
+        for value in (
+            power_law_beta,
+            power_law_min_freq_hz,
+            power_law_max_freq_hz,
+            power_law_bin_width_hz,
+        )
+    )
+    if has_array and has_power_law:
+        raise ValueError(
+            f"Pass either {spectrum_name} or {spectrum_name} power-law args, not both"
+        )
+    if has_array:
+        if frequency_bin_width is None:
+            raise ValueError(f"{bin_width_name} is required with {spectrum_name}")
+        return (
+            _as_frequency_spectrum(spectrum, name=spectrum_name),
+            _as_positive_finite(frequency_bin_width, name=bin_width_name),
+        )
+    if not has_power_law:
+        if frequency_bin_width is not None:
+            raise ValueError(f"{bin_width_name} requires {spectrum_name}")
+        return None, None
+
+    if (
+        power_law_beta is None
+        or power_law_min_freq_hz is None
+        or power_law_max_freq_hz is None
+        or power_law_bin_width_hz is None
+    ):
+        raise ValueError(
+            f"{spectrum_name} power law requires beta, min_freq_hz, "
+            "max_freq_hz, and bin_width_hz"
+        )
+    if frequency_bin_width is not None and not np.isclose(
+        float(frequency_bin_width),
+        float(power_law_bin_width_hz),
+        rtol=1e-12,
+        atol=0.0,
+    ):
+        raise ValueError(
+            f"{bin_width_name} must match {spectrum_name} power-law bin width"
+        )
+    return (
+        power_law_frequency_spectrum(
+            beta=power_law_beta,
+            min_freq_hz=power_law_min_freq_hz,
+            max_freq_hz=power_law_max_freq_hz,
+            freq_bin_width_hz=power_law_bin_width_hz,
+        ),
+        _as_positive_finite(power_law_bin_width_hz, name=bin_width_name),
+    )
+
+
+def _normalized_frequency_power_weights(
+    spectrum: np.ndarray,
+    *,
+    frequency_bin_width: float,
+) -> np.ndarray:
+    weighted = _as_frequency_spectrum(spectrum, name="frequency spectrum") * float(
+        frequency_bin_width
+    )
+    total = float(np.sum(weighted))
+    if total <= 0.0 or not np.isfinite(total):
+        raise ValueError("frequency spectrum integral must be positive and finite")
+    return weighted / total
+
+
+def _resolve_spectral_bins(
+    *,
+    output_frequency_spectrum: np.ndarray | None,
+    output_frequency_bin_width: float | None,
+    noise_frequency_spectrum: np.ndarray | None,
+    noise_frequency_bin_width: float | None,
+    output_power_law_beta: float | None,
+    output_power_law_min_freq_hz: float | None,
+    output_power_law_max_freq_hz: float | None,
+    output_power_law_bin_width_hz: float | None,
+    noise_power_law_beta: float | None,
+    noise_power_law_min_freq_hz: float | None,
+    noise_power_law_max_freq_hz: float | None,
+    noise_power_law_bin_width_hz: float | None,
+    noise: float | None,
+    output_noise_covariance: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray | None, float] | None:
+    output_spectrum, output_df = _resolve_frequency_spectrum(
+        spectrum=output_frequency_spectrum,
+        frequency_bin_width=output_frequency_bin_width,
+        power_law_beta=output_power_law_beta,
+        power_law_min_freq_hz=output_power_law_min_freq_hz,
+        power_law_max_freq_hz=output_power_law_max_freq_hz,
+        power_law_bin_width_hz=output_power_law_bin_width_hz,
+        spectrum_name="output_frequency_spectrum",
+        bin_width_name="output_frequency_bin_width",
+    )
+    noise_spectrum, noise_df = _resolve_frequency_spectrum(
+        spectrum=noise_frequency_spectrum,
+        frequency_bin_width=noise_frequency_bin_width,
+        power_law_beta=noise_power_law_beta,
+        power_law_min_freq_hz=noise_power_law_min_freq_hz,
+        power_law_max_freq_hz=noise_power_law_max_freq_hz,
+        power_law_bin_width_hz=noise_power_law_bin_width_hz,
+        spectrum_name="noise_frequency_spectrum",
+        bin_width_name="noise_frequency_bin_width",
+    )
+    if output_spectrum is None and noise_spectrum is None:
+        return None
+    if noise_spectrum is not None and output_noise_covariance is not None:
+        raise ValueError(
+            "noise_frequency_spectrum is not supported with output_noise_covariance"
+        )
+
+    if output_spectrum is None:
+        assert noise_spectrum is not None
+        output_spectrum = np.ones_like(noise_spectrum)
+        output_df = noise_df
+    if noise_spectrum is not None:
+        if output_spectrum.shape != noise_spectrum.shape:
+            raise ValueError(
+                "output_frequency_spectrum and noise_frequency_spectrum must "
+                "have the same number of bins"
+            )
+        if noise_df is None:
+            noise_df = output_df
+        if not np.isclose(float(output_df), float(noise_df), rtol=1e-12, atol=0.0):
+            raise ValueError(
+                "output_frequency_bin_width and noise_frequency_bin_width must match"
+            )
+
+    assert output_df is not None
+    output_weights = _normalized_frequency_power_weights(
+        output_spectrum,
+        frequency_bin_width=output_df,
+    )
+    noise_per_bin = None
+    if noise_spectrum is not None:
+        noise_levels = _as_frequency_spectrum(
+            noise_spectrum,
+            name="noise_frequency_spectrum",
+            allow_zero=False,
+        )
+        if noise is None:
+            noise_per_bin = noise_levels
+        else:
+            if noise <= 0:
+                raise ValueError("noise must be positive")
+            noise_per_bin = float(noise) * noise_levels
+
+    return output_weights, noise_per_bin, float(output_df)
 
 
 def _as_channel_matrix(channel: np.ndarray, *, name: str = "channel") -> np.ndarray:
@@ -295,7 +628,7 @@ def resolve_total_input_power(
     )
 
 
-def get_bitrate(
+def _get_bitrate_flat(
     s: np.ndarray,
     *,
     n_sources: int,
@@ -308,15 +641,6 @@ def get_bitrate(
     time_resolution: float = 1.0,
     output_noise_covariance: np.ndarray | None = None,
 ) -> float:
-    """Return i.i.d.-input bitrate for a linear Gaussian channel.
-
-    The total input power is spread uniformly over ``n_sources`` source
-    channels. By default ``noise`` is the per-output-channel i.i.d. noise
-    standard deviation and ``s`` may be singular values or the channel matrix.
-    If ``output_noise_covariance`` is provided, ``s`` must be the output-by-input
-    channel matrix and the code uses the singular values of
-    ``K_N^{-1/2} H``.
-    """
     _validate_optional_matrix_shape(s, n_sources=n_sources, n_outputs=n_outputs)
     if n_sources <= 0:
         raise ValueError("n_sources must be positive")
@@ -340,6 +664,108 @@ def get_bitrate(
     resolved_power_per_source = resolved_total_input_power / n_sources
     snr_per_mode = (gains**2) * resolved_power_per_source
     return float(np.sum(np.log2(1.0 + snr_per_mode)) / (2.0 * time_resolution))
+
+
+def get_bitrate(
+    s: np.ndarray,
+    *,
+    n_sources: int,
+    total_input_power: float | None = None,
+    input_power_per_source: float | None = None,
+    input_amplitude: float | None = None,
+    average_output_power: float | None = None,
+    n_outputs: int | None = None,
+    noise: float | None = None,
+    time_resolution: float = 1.0,
+    output_noise_covariance: np.ndarray | None = None,
+    output_frequency_spectrum: np.ndarray | None = None,
+    output_frequency_bin_width: float | None = None,
+    noise_frequency_spectrum: np.ndarray | None = None,
+    noise_frequency_bin_width: float | None = None,
+    output_power_law_beta: float | None = None,
+    output_power_law_min_freq_hz: float | None = None,
+    output_power_law_max_freq_hz: float | None = None,
+    output_power_law_bin_width_hz: float | None = None,
+    noise_power_law_beta: float | None = None,
+    noise_power_law_min_freq_hz: float | None = None,
+    noise_power_law_max_freq_hz: float | None = None,
+    noise_power_law_bin_width_hz: float | None = None,
+) -> float:
+    """Return i.i.d.-input bitrate for a linear Gaussian channel.
+
+    The total input power is spread uniformly over ``n_sources`` source
+    channels. By default ``noise`` is the per-output-channel i.i.d. noise
+    standard deviation and ``s`` may be singular values or the channel matrix.
+    If ``output_noise_covariance`` is provided, ``s`` must be the output-by-input
+    channel matrix and the code uses the singular values of
+    ``K_N^{-1/2} H``.
+
+    If ``output_frequency_spectrum`` (or the output power-law args) is supplied,
+    the resolved total power is interpreted as power integrated over all
+    frequency bins. The output spectrum is normalized to power weights, each bin
+    is evaluated with ``time_resolution = 1 / output_frequency_bin_width``, and
+    the bin bitrates are summed. A supplied ``noise_frequency_spectrum`` gives
+    absolute per-bin noise stds when ``noise`` is omitted, or per-bin
+    multipliers on the scalar noise std when ``noise`` is supplied.
+    """
+    spectral_bins = _resolve_spectral_bins(
+        output_frequency_spectrum=output_frequency_spectrum,
+        output_frequency_bin_width=output_frequency_bin_width,
+        noise_frequency_spectrum=noise_frequency_spectrum,
+        noise_frequency_bin_width=noise_frequency_bin_width,
+        output_power_law_beta=output_power_law_beta,
+        output_power_law_min_freq_hz=output_power_law_min_freq_hz,
+        output_power_law_max_freq_hz=output_power_law_max_freq_hz,
+        output_power_law_bin_width_hz=output_power_law_bin_width_hz,
+        noise_power_law_beta=noise_power_law_beta,
+        noise_power_law_min_freq_hz=noise_power_law_min_freq_hz,
+        noise_power_law_max_freq_hz=noise_power_law_max_freq_hz,
+        noise_power_law_bin_width_hz=noise_power_law_bin_width_hz,
+        noise=noise,
+        output_noise_covariance=output_noise_covariance,
+    )
+    if spectral_bins is None:
+        return _get_bitrate_flat(
+            s,
+            n_sources=n_sources,
+            total_input_power=total_input_power,
+            input_power_per_source=input_power_per_source,
+            input_amplitude=input_amplitude,
+            average_output_power=average_output_power,
+            n_outputs=n_outputs,
+            noise=noise,
+            time_resolution=time_resolution,
+            output_noise_covariance=output_noise_covariance,
+        )
+
+    _validate_optional_matrix_shape(s, n_sources=n_sources, n_outputs=n_outputs)
+    if n_sources <= 0:
+        raise ValueError("n_sources must be positive")
+
+    output_weights, noise_per_bin, freq_bin_width = spectral_bins
+    resolved_total_input_power = resolve_total_input_power(
+        s,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+        total_input_power=total_input_power,
+        input_power_per_source=input_power_per_source,
+        input_amplitude=input_amplitude,
+        average_output_power=average_output_power,
+    )
+    total = 0.0
+    for i, output_weight in enumerate(output_weights):
+        bin_power = resolved_total_input_power * float(output_weight)
+        bin_noise = None if noise_per_bin is None else float(noise_per_bin[i])
+        total += _get_bitrate_flat(
+            s,
+            n_sources=n_sources,
+            total_input_power=bin_power,
+            n_outputs=n_outputs,
+            noise=noise if bin_noise is None else bin_noise,
+            time_resolution=1.0 / freq_bin_width,
+            output_noise_covariance=output_noise_covariance,
+        )
+    return float(total)
 
 
 def water_filling_power_allocation(
@@ -408,7 +834,7 @@ def water_filling_power_allocation(
     return allocation
 
 
-def get_capacity(
+def _get_capacity_flat(
     s: np.ndarray,
     *,
     total_input_power: float | None = None,
@@ -421,7 +847,6 @@ def get_capacity(
     time_resolution: float = 1.0,
     output_noise_covariance: np.ndarray | None = None,
 ) -> float:
-    """Return water-filled channel capacity for a linear Gaussian channel."""
     _validate_optional_matrix_shape(s, n_sources=n_sources, n_outputs=n_outputs)
     if time_resolution <= 0:
         raise ValueError("time_resolution must be positive")
@@ -447,6 +872,95 @@ def get_capacity(
     )
     snr_per_mode = (gains**2) * input_power_per_mode
     return float(np.sum(np.log2(1.0 + snr_per_mode)) / (2.0 * time_resolution))
+
+
+def get_capacity(
+    s: np.ndarray,
+    *,
+    total_input_power: float | None = None,
+    input_power_per_source: float | None = None,
+    input_amplitude: float | None = None,
+    average_output_power: float | None = None,
+    n_sources: int | None = None,
+    n_outputs: int | None = None,
+    noise: float | None = None,
+    time_resolution: float = 1.0,
+    output_noise_covariance: np.ndarray | None = None,
+    output_frequency_spectrum: np.ndarray | None = None,
+    output_frequency_bin_width: float | None = None,
+    noise_frequency_spectrum: np.ndarray | None = None,
+    noise_frequency_bin_width: float | None = None,
+    output_power_law_beta: float | None = None,
+    output_power_law_min_freq_hz: float | None = None,
+    output_power_law_max_freq_hz: float | None = None,
+    output_power_law_bin_width_hz: float | None = None,
+    noise_power_law_beta: float | None = None,
+    noise_power_law_min_freq_hz: float | None = None,
+    noise_power_law_max_freq_hz: float | None = None,
+    noise_power_law_bin_width_hz: float | None = None,
+) -> float:
+    """Return water-filled channel capacity for a linear Gaussian channel.
+
+    Frequency-spectrum arguments have the same semantics as
+    :func:`get_bitrate`: resolved total power is normalized across output
+    frequency bins and each bin is evaluated at
+    ``time_resolution = 1 / output_frequency_bin_width`` before summing.
+    """
+    spectral_bins = _resolve_spectral_bins(
+        output_frequency_spectrum=output_frequency_spectrum,
+        output_frequency_bin_width=output_frequency_bin_width,
+        noise_frequency_spectrum=noise_frequency_spectrum,
+        noise_frequency_bin_width=noise_frequency_bin_width,
+        output_power_law_beta=output_power_law_beta,
+        output_power_law_min_freq_hz=output_power_law_min_freq_hz,
+        output_power_law_max_freq_hz=output_power_law_max_freq_hz,
+        output_power_law_bin_width_hz=output_power_law_bin_width_hz,
+        noise_power_law_beta=noise_power_law_beta,
+        noise_power_law_min_freq_hz=noise_power_law_min_freq_hz,
+        noise_power_law_max_freq_hz=noise_power_law_max_freq_hz,
+        noise_power_law_bin_width_hz=noise_power_law_bin_width_hz,
+        noise=noise,
+        output_noise_covariance=output_noise_covariance,
+    )
+    if spectral_bins is None:
+        return _get_capacity_flat(
+            s,
+            total_input_power=total_input_power,
+            input_power_per_source=input_power_per_source,
+            input_amplitude=input_amplitude,
+            average_output_power=average_output_power,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            noise=noise,
+            time_resolution=time_resolution,
+            output_noise_covariance=output_noise_covariance,
+        )
+
+    _validate_optional_matrix_shape(s, n_sources=n_sources, n_outputs=n_outputs)
+    output_weights, noise_per_bin, freq_bin_width = spectral_bins
+    resolved_total_input_power = resolve_total_input_power(
+        s,
+        n_sources=n_sources,
+        n_outputs=n_outputs,
+        total_input_power=total_input_power,
+        input_power_per_source=input_power_per_source,
+        input_amplitude=input_amplitude,
+        average_output_power=average_output_power,
+    )
+    total = 0.0
+    for i, output_weight in enumerate(output_weights):
+        bin_power = resolved_total_input_power * float(output_weight)
+        bin_noise = None if noise_per_bin is None else float(noise_per_bin[i])
+        total += _get_capacity_flat(
+            s,
+            total_input_power=bin_power,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            noise=noise if bin_noise is None else bin_noise,
+            time_resolution=1.0 / freq_bin_width,
+            output_noise_covariance=output_noise_covariance,
+        )
+    return float(total)
 
 
 def get_bitrate_temporal_filter(
@@ -563,6 +1077,7 @@ def get_bitrate_from_average_output_power(
     n_outputs: int,
     time_resolution: float = 1.0,
     output_noise_covariance: np.ndarray | None = None,
+    **kwargs,
 ) -> float:
     """Return i.i.d.-input bitrate from observed output signal/noise levels."""
     return get_bitrate(
@@ -573,6 +1088,7 @@ def get_bitrate_from_average_output_power(
         noise=noise,
         time_resolution=time_resolution,
         output_noise_covariance=output_noise_covariance,
+        **kwargs,
     )
 
 
@@ -585,6 +1101,7 @@ def get_capacity_from_average_output_power(
     n_outputs: int,
     time_resolution: float = 1.0,
     output_noise_covariance: np.ndarray | None = None,
+    **kwargs,
 ) -> float:
     """Return water-filled capacity from observed output signal/noise levels."""
     return get_capacity(
@@ -595,4 +1112,5 @@ def get_capacity_from_average_output_power(
         noise=noise,
         time_resolution=time_resolution,
         output_noise_covariance=output_noise_covariance,
+        **kwargs,
     )
