@@ -7,10 +7,6 @@ type Tier = "today" | "fundamental";
 interface Variant {
   bitrate_today: number | null;
   bitrate_fundamental: number | null;
-  bitrate_physical_today: number | null;
-  bitrate_physical_fundamental: number | null;
-  bitrate_anchored_today: number | null;
-  bitrate_anchored_fundamental: number | null;
   num_sensors: number | null;
   source_spacing_mm: number | null;
   grid_resolution_mm: number | null;
@@ -40,15 +36,8 @@ const MODALITIES: ModalityConfig[] = [
 ];
 
 function bitrateFor(variant: Variant, tier: Tier) {
-  // Prefer the empirically anchored value where it exists (EEG, whose absolute BEM
-  // gain is unreliable); otherwise the physical detector floor.
-  const anchored =
-    tier === "today" ? variant.bitrate_anchored_today : variant.bitrate_anchored_fundamental;
-  if (anchored != null) return anchored;
-  const physical =
-    tier === "today" ? variant.bitrate_physical_today : variant.bitrate_physical_fundamental;
-  const fallback = tier === "today" ? variant.bitrate_today : variant.bitrate_fundamental;
-  return physical ?? fallback;
+  // Shared signal-vs-detector-noise bitrate (guti.modality_capacity).
+  return tier === "today" ? variant.bitrate_today : variant.bitrate_fundamental;
 }
 
 function bestVariant(variants: Variant[], tier: Tier) {
@@ -174,7 +163,7 @@ export default function CurrentNumbersTable() {
         </tbody>
       </table>
       <div style={{ marginTop: 6, color: "#666", fontFamily: "var(--sans)", fontSize: 12 }}>
-        Physical detector-floor mode (EEG: empirically anchored); values are the best exported sweep point for each noise tier.
+        Bitrate from the typical output signal against the detector-noise floor; values are the best exported sweep point for each noise tier.
       </div>
     </div>
   );

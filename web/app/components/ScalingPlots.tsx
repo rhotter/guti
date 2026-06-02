@@ -31,21 +31,15 @@ interface Variant {
   first_sv: number;
   bitrate_today: number | null;
   bitrate_fundamental: number | null;
-  bitrate_physical_today: number | null;
-  bitrate_physical_fundamental: number | null;
-  bitrate_empirical_today: number | null;
-  bitrate_empirical_fundamental: number | null;
-  bitrate_anchored_today: number | null;
-  bitrate_anchored_fundamental: number | null;
-  snr_empirical_today: number | null;
+  capacity_today: number | null;
+  capacity_fundamental: number | null;
+  output_snr: number | null;
 }
 
 interface ModalityData {
   modality: string;
   label: string;
   sweep_params: string[];
-  default_bitrate_mode?: NoiseMode;
-  bitrate_modes?: Record<string, { label: string; description: string }>;
   noise_label_today: string;
   noise_label_fundamental: string;
   source_amplitude: number;
@@ -54,7 +48,8 @@ interface ModalityData {
   variants: Variant[];
 }
 
-type NoiseMode = "physical_detector_floor" | "empirical_observed_snr" | "empirical_anchored";
+// Which rate to plot: achievable bitrate vs water-filled channel capacity.
+type Metric = "bitrate" | "capacity";
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -76,6 +71,16 @@ const PARAM_LABELS: Record<string, string> = {
   frequency_hz: "frequency (Hz)",
 };
 
+const CONFIG_PARAMS = [
+  "num_sensors",
+  "source_spacing_mm",
+  "grid_resolution_mm",
+  "psf_fwhm_mm",
+  "bold_contrast",
+  "bold_snr",
+  "frequency_hz",
+] as const;
+
 // viridis-ish palette
 const COLORS = [
   "#440154", "#3b528b", "#21908d", "#5dc963", "#fde725",
@@ -85,15 +90,36 @@ const COLORS = [
 const fmt = (x: number | null) =>
   x === null ? "—" : x >= 1000 ? `${(x / 1000).toFixed(1)}k` : x.toFixed(0);
 
-const bitrateFor = (v: Variant, tier: "today" | "fundamental", mode: NoiseMode) => {
-  if (mode === "empirical_observed_snr") {
-    return tier === "today" ? v.bitrate_empirical_today : v.bitrate_empirical_fundamental;
+const valueLabel = (param: string, value: number | null) => {
+  if (value === null) return null;
+  if (param === "frequency_hz" && value >= 1000) return `${value / 1000} kHz`;
+  return `${value}`;
+};
+
+const configKeyForSweep = (variant: Variant, sweepParam: string) => {
+  return CONFIG_PARAMS
+    .filter((param) => param !== sweepParam)
+    .map((param) => `${param}:${(variant as any)[param] ?? "null"}`)
+    .join("|");
+};
+
+const configLabelForSweep = (variant: Variant, sweepParam: string) => {
+  return CONFIG_PARAMS
+    .filter((param) => param !== sweepParam)
+    .map((param) => {
+      const value = (variant as any)[param] as number | null;
+      const label = valueLabel(param, value);
+      return label === null ? null : `${PARAM_LABELS[param] ?? param}: ${label}`;
+    })
+    .filter(Boolean)
+    .join(", ");
+};
+
+const metricFor = (v: Variant, tier: "today" | "fundamental", metric: Metric) => {
+  if (metric === "capacity") {
+    return tier === "today" ? v.capacity_today : v.capacity_fundamental;
   }
-  if (mode === "empirical_anchored") {
-    return tier === "today" ? v.bitrate_anchored_today : v.bitrate_anchored_fundamental;
-  }
-  const physical = tier === "today" ? v.bitrate_physical_today : v.bitrate_physical_fundamental;
-  return physical ?? (tier === "today" ? v.bitrate_today : v.bitrate_fundamental);
+  return tier === "today" ? v.bitrate_today : v.bitrate_fundamental;
 };
 
 // ── main component ────────────────────────────────────────────────────────────
@@ -110,7 +136,7 @@ export default function ScalingPlots() {
   const [chartType, setChartType] = useState<"spectra" | "bitrate" | "first_sv">("bitrate");
   const [normalized, setNormalized] = useState(true);
   const [tier, setTier] = useState<"today" | "fundamental">("today");
-  const [noiseMode, setNoiseMode] = useState<NoiseMode>("physical_detector_floor");
+  const [metric, setMetric] = useState<Metric>("bitrate");
 
   // Load data for active modality
   useEffect(() => {
@@ -120,7 +146,6 @@ export default function ScalingPlots() {
       .then((r) => r.json())
       .then((d: ModalityData) => {
         setData((prev) => ({ ...prev, [activeModality]: d }));
-        setNoiseMode(d.default_bitrate_mode ?? "physical_detector_floor");
         // set default sweep/fixed params
         if (d.sweep_params.length > 0) {
           setSweepParam(d.sweep_params[0]);
@@ -165,36 +190,72 @@ export default function ScalingPlots() {
       .sort((a, b) => ((a as any)[sweepParam] ?? 0) - ((b as any)[sweepParam] ?? 0));
   }, [modalityData, sweepParam, fixedParam, fixedValue]);
 
-  // All variants sorted by sweep param (no fixed constraint), deduplicated by sweep val → best bitrate
+  // Coherent sweep: hold every non-swept configuration parameter fixed. This
+  // prevents isolated points from a different source/grid setup from appearing
+  // as a false dip in a sensor-count trend.
   const sweepVariants = useMemo(() => {
-    if (!modalityData) return [];
-    // group by sweep value, pick variant with highest bitrate
-    const byVal: Record<number, Variant> = {};
+    if (!modalityData) return { variants: [] as Variant[], heldConfig: "", omitted: 0 };
+    const groups = new Map<
+      string,
+      { variants: Variant[]; sweepValues: Set<number>; score: number; exemplar: Variant }
+    >();
+
     for (const v of modalityData.variants) {
       const sv = (v as any)[sweepParam];
       if (sv === null) continue;
+      const key = configKeyForSweep(v, sweepParam);
+      const group = groups.get(key) ?? {
+        variants: [],
+        sweepValues: new Set<number>(),
+        score: 0,
+        exemplar: v,
+      };
+      group.variants.push(v);
+      group.sweepValues.add(sv);
+      group.score += metricFor(v, tier, metric) ?? 0;
+      groups.set(key, group);
+    }
+
+    const bestGroup = Array.from(groups.values()).sort((a, b) => {
+      const countDelta = b.sweepValues.size - a.sweepValues.size;
+      if (countDelta !== 0) return countDelta;
+      return b.score - a.score;
+    })[0];
+
+    if (!bestGroup) return { variants: [] as Variant[], heldConfig: "", omitted: 0 };
+
+    const byVal: Record<number, Variant> = {};
+    for (const v of bestGroup.variants) {
+      const sv = (v as any)[sweepParam];
+      if (sv === null) continue;
       const cur = byVal[sv];
-      const vBr = bitrateFor(v, tier, noiseMode);
-      const curBr = cur ? bitrateFor(cur, tier, noiseMode) : -Infinity;
+      const vBr = metricFor(v, tier, metric);
+      const curBr = cur ? metricFor(cur, tier, metric) : -Infinity;
       if (!cur || (vBr ?? 0) > (curBr ?? 0)) byVal[sv] = v;
     }
-    return Object.values(byVal).sort(
+    const variants = Object.values(byVal).sort(
       (a, b) => ((a as any)[sweepParam] ?? 0) - ((b as any)[sweepParam] ?? 0)
     );
-  }, [modalityData, sweepParam, tier, noiseMode]);
+    const allSweepVariants = modalityData.variants.filter((v) => (v as any)[sweepParam] !== null);
+    return {
+      variants,
+      heldConfig: configLabelForSweep(bestGroup.exemplar, sweepParam),
+      omitted: allSweepVariants.length - bestGroup.variants.length,
+    };
+  }, [modalityData, sweepParam, tier, metric]);
 
   // Bitrate chart data
   const bitrateData = useMemo(() => {
-    return sweepVariants.map((v) => ({
+    return sweepVariants.variants.map((v) => ({
       x: (v as any)[sweepParam],
-      today: bitrateFor(v, "today", noiseMode),
-      fundamental: bitrateFor(v, "fundamental", noiseMode),
+      today: metricFor(v, "today", metric),
+      fundamental: metricFor(v, "fundamental", metric),
     }));
-  }, [sweepVariants, sweepParam, noiseMode]);
+  }, [sweepVariants, sweepParam, metric]);
 
   // First SV chart data
   const firstSvData = useMemo(() => {
-    return sweepVariants.map((v) => ({
+    return sweepVariants.variants.map((v) => ({
       x: (v as any)[sweepParam],
       first_sv: v.first_sv,
     }));
@@ -326,20 +387,17 @@ export default function ScalingPlots() {
               </select>
             </label>
 
-            {/* Noise model */}
+            {/* Rate metric: achievable bitrate vs water-filled capacity */}
             {chartType === "bitrate" && (
               <label style={{ display: "flex", alignItems: "center", gap: 4, color: "#374151" }}>
-                Mode:
+                Rate:
                 <select
-                  value={noiseMode}
-                  onChange={(e) => setNoiseMode(e.target.value as NoiseMode)}
+                  value={metric}
+                  onChange={(e) => setMetric(e.target.value as Metric)}
                   style={{ border: "1px solid #d1d5db", borderRadius: 4, padding: "2px 6px", fontSize: 12 }}
                 >
-                  <option value="physical_detector_floor">Physical detector floor</option>
-                  <option value="empirical_observed_snr">Empirical observed SNR</option>
-                  {modalityData.variants[0]?.bitrate_anchored_today != null && (
-                    <option value="empirical_anchored">Empirically anchored</option>
-                  )}
+                  <option value="bitrate">Bitrate (achievable)</option>
+                  <option value="capacity">Capacity (water-filled)</option>
                 </select>
               </label>
             )}
@@ -357,23 +415,21 @@ export default function ScalingPlots() {
             )}
           </div>
 
-          {/* SNR info line */}
+          {/* Method info line */}
           <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8 }}>
-            {noiseMode === "physical_detector_floor" ? (
+            <>
+              {metric === "capacity" ? "Water-filled channel capacity" : "Achievable bitrate"} ·
+              output signal {modalityData.typical_signal} {modalityData.source_amplitude_units} vs
+              detector noise {tier === "today" ? modalityData.noise_label_today : modalityData.noise_label_fundamental}
+              {modalityData.variants[0]?.output_snr != null
+                ? ` · SNR ${modalityData.variants[0].output_snr.toFixed(1)}`
+                : ""}
+            </>
+            {chartType !== "spectra" && sweepVariants.heldConfig && (
               <>
-                Physical detector floor · noise today: {modalityData.noise_label_today} ·
-                source amplitude: {modalityData.source_amplitude} {modalityData.source_amplitude_units}
-              </>
-            ) : noiseMode === "empirical_anchored" ? (
-              <>
-                Empirically anchored · boundary voxels excluded, source anchored to the
-                literature single-channel SNR at a 20 mm-deep cortical source (single
-                estimate from the canonical 256-channel layout)
-              </>
-            ) : (
-              <>
-                Empirical observed SNR · SNR today: {modalityData.variants[0]?.snr_empirical_today?.toFixed(2) ?? "—"} ·
-                typical signal: {modalityData.typical_signal}
+                <br />
+                Sweep holds {sweepVariants.heldConfig}
+                {sweepVariants.omitted > 0 ? ` · omitted ${sweepVariants.omitted} mismatched exported variants` : ""}
               </>
             )}
           </div>
