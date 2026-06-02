@@ -37,6 +37,7 @@ import numpy as np
 from guti.data_utils import list_svd_variants, load_svd_variant
 from guti.parameters import Parameters
 from guti.hrf import get_modality_bitrate, is_hemodynamic
+from guti.modality_capacity import compute_bitrate_capacity
 from guti.noise_models import (
     capacity_forward_gain_scale,
     compute_detector_noise_std,
@@ -91,6 +92,18 @@ MODALITIES = {
     "td_fnirs": "fNIRS TD",
     "fmri_bold":          "fMRI BOLD",
     "us_free_field_analytical_frequency_sweep": "Ultrasound",
+}
+
+# Maps the export modality key to (noise_model, source_orientations) for the shared
+# README bitrate/capacity algorithm (guti.modality_capacity). fMRI is omitted (the
+# README excludes it — no convergence SVD files).
+README_ALGO_MODALITY = {
+    "meg_opm": ("meg_opm", 3),
+    "meg_squid": ("meg_squid", 3),
+    "eeg_openmeeg": ("eeg_openmeeg", 3),
+    "cw_fnirs": ("cw_fnirs", 1),
+    "td_fnirs": ("td_fnirs_analytical", 1),
+    "us_free_field_analytical_frequency_sweep": ("us_analytical", 1),
 }
 
 # time resolution per modality (seconds)
@@ -345,81 +358,33 @@ def export_modality(modality, label):
         idx, sv_vals = downsample(s, MAX_SV_POINTS)
         sv_indices = [i + 1 for i in idx]  # 1-based
 
-        # Bitrates.  The compatibility fields bitrate_today/fundamental are
-        # the physical detector-floor mode used by the blog's first-principles
-        # capacity claim.  Empirical observed-SNR values are exported separately
-        # for diagnostic comparisons.
-        try:
-            br_physical_today = compute_bitrate(
-                s, modality, n_sensors, freq, "today", tr, params,
-                noise_mode="physical_detector_floor",
-                s_noise_normalized=s_noise_normalized,
-                noise_normalized_detector_std=noise_metadata.get("noise_detector_std_t"),
-                noise_absolute_scale=bool(noise_metadata.get("noise_absolute_scale")),
-            )
-        except Exception as e:
-            br_physical_today = None
-            print(f"  physical bitrate today failed: {e}")
-
-        try:
-            br_physical_fund = compute_bitrate(
-                s, modality, n_sensors, freq, "fundamental", tr, params,
-                noise_mode="physical_detector_floor",
-                s_noise_normalized=s_noise_normalized,
-                noise_normalized_detector_std=noise_metadata.get("noise_detector_std_t"),
-                noise_absolute_scale=bool(noise_metadata.get("noise_absolute_scale")),
-            )
-        except Exception as e:
-            br_physical_fund = None
-            print(f"  physical bitrate fundamental failed: {e}")
-
-        try:
-            br_emp_today = compute_bitrate(
-                s, modality, n_sensors, freq, "today", tr, params,
-                noise_mode="empirical_observed_snr",
-            )
-        except Exception as e:
-            br_emp_today = None
-            print(f"  empirical bitrate today failed: {e}")
-
-        try:
-            br_emp_fund = compute_bitrate(
-                s, modality, n_sensors, freq, "fundamental", tr, params,
-                noise_mode="empirical_observed_snr",
-            )
-        except Exception:
-            br_emp_fund = None
-
-        # Empirically anchored (EEG only; None elsewhere).
-        try:
-            br_anchored_today = compute_bitrate(
-                s, modality, n_sensors, freq, "today", tr, params,
-                noise_mode="empirical_anchored",
-            )
-            br_anchored_fund = compute_bitrate(
-                s, modality, n_sensors, freq, "fundamental", tr, params,
-                noise_mode="empirical_anchored",
-            )
-        except Exception as e:
-            br_anchored_today = br_anchored_fund = None
-            print(f"  anchored bitrate failed: {e}")
-
-        # Empirical SNR
-        try:
-            snr_emp = float(
-                compute_empirical_snr(
-                    modality,
-                    n_sensors=n_sensors,
-                    frequency_hz=freq,
-                    tier="today",
-                    voxel_size_mm=getattr(params, "grid_resolution_mm", None),
-                    tr_s=getattr(params, "time_resolution", None),
-                    bold_contrast=getattr(params, "bold_contrast", None),
-                    bold_snr=getattr(params, "bold_snr", None),
-                )
-            )
-        except Exception:
-            snr_emp = None
+        # Bitrate + water-filled capacity from the shared README algorithm
+        # (guti.modality_capacity), per variant, for the today and fundamental
+        # detector-noise tiers. This is the single source of truth shared with
+        # the README modality summary table.
+        br_today = br_fund = cap_today = cap_fund = snr_out = None
+        nm_so = README_ALGO_MODALITY.get(modality)
+        if nm_so is not None:
+            nm, source_orientations = nm_so
+            for tier, set_rate, set_cap in (
+                ("today", "today", "today"),
+                ("fundamental", "fundamental", "fundamental"),
+            ):
+                try:
+                    out_bc = compute_bitrate_capacity(
+                        s, params, noise_model=nm,
+                        source_orientations=source_orientations,
+                        s_noise_normalized=s_noise_normalized, tier=tier,
+                    )
+                    if tier == "today":
+                        br_today = out_bc["bitrate_bits_per_s"]
+                        cap_today = out_bc["channel_capacity_bits_per_s"]
+                        snr_out = out_bc["output_snr"]
+                    else:
+                        br_fund = out_bc["bitrate_bits_per_s"]
+                        cap_fund = out_bc["channel_capacity_bits_per_s"]
+                except Exception as e:
+                    print(f"  {modality} {tier} bitrate/capacity failed: {e}")
 
         rec = {
             "hash": hash_key,
@@ -436,28 +401,24 @@ def export_modality(modality, label):
             "singular_values": [float(x) for x in sv_vals],
             "first_sv": float(s[0]),
             "capacity_singular_value_scale": capacity_sv_scale,
-            "bitrate_today": br_physical_today,
-            "bitrate_fundamental": br_physical_fund,
-            "bitrate_physical_today": br_physical_today,
-            "bitrate_physical_fundamental": br_physical_fund,
-            "bitrate_empirical_today": br_emp_today,
-            "bitrate_empirical_fundamental": br_emp_fund,
-            "bitrate_anchored_today": br_anchored_today,
-            "bitrate_anchored_fundamental": br_anchored_fund,
+            "bitrate_today": br_today,
+            "bitrate_fundamental": br_fund,
+            "capacity_today": cap_today,
+            "capacity_fundamental": cap_fund,
+            "output_snr": snr_out,
             "noise_model_type": noise_model_type,
             **{
                 key: value
                 for key, value in noise_metadata.items()
                 if value is not None
             },
-            "snr_empirical_today": snr_emp,
         }
         records.append(rec)
-        br_str = f"{br_physical_today:.0f}" if br_physical_today is not None else "N/A"
-        emp_str = f"{br_emp_today:.0f}" if br_emp_today is not None else "N/A"
+        br_str = f"{br_today:.0f}" if br_today is not None else "N/A"
+        cap_str = f"{cap_today:.0f}" if cap_today is not None else "N/A"
         print(
             f"  {hash_key}: N={n_sensors}, sp={params.source_spacing_mm}mm "
-            f"→ physical_today={br_str} b/s, empirical_today={emp_str} b/s"
+            f"→ bitrate={br_str} b/s, capacity={cap_str} b/s"
         )
 
     # Determine which parameters were actually swept
@@ -471,11 +432,6 @@ def export_modality(modality, label):
         "modality": modality,
         "label": label,
         "sweep_params": sweep_params,
-        "default_bitrate_mode": default_bitrate_mode_for(modality),
-        "bitrate_modes": {
-            key: {"label": label, "description": description}
-            for key, (label, description) in BITRATE_MODES.items()
-        },
         "noise_label_today": f"{model.today_best_noise:.2e} {model.measurement_units}",
         "noise_label_fundamental": f"{model.physical_floor_noise:.2e} {model.measurement_units}",
         "source_amplitude": model.source_amplitude,

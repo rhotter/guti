@@ -4,17 +4,6 @@
   "sweep_params": [
     "num_sensors"
   ],
-  "default_bitrate_mode": "physical_detector_floor",
-  "bitrate_modes": {
-    "physical_detector_floor": {
-      "label": "Physical detector floor",
-      "description": "Uses detector_noise/source_amplitude and preserves raw forward gain. Voxel-density modalities are saved as voxel-integrated transfer functions."
-    },
-    "empirical_observed_snr": {
-      "label": "Empirical observed SNR",
-      "description": "Uses Frobenius(SVD)/observed_SNR and normalizes away raw forward gain."
-    }
-  },
   "noise_label_today": "6.19e-05 dimensionless (\u0394I/I)",
   "noise_label_fundamental": "2.34e-05 dimensionless (\u0394I/I)",
   "source_amplitude": 0.002,
@@ -406,13 +395,12 @@
       ],
       "first_sv": 0.006799828261137009,
       "capacity_singular_value_scale": 1.0,
-      "bitrate_today": 6.609864711761475,
-      "bitrate_fundamental": 34.59553527832031,
-      "bitrate_physical_today": 6.609864711761475,
-      "bitrate_physical_fundamental": 34.59553527832031,
-      "bitrate_empirical_today": 237.53392028808594,
-      "bitrate_empirical_fundamental": 476.7803955078125,
-      "snr_empirical_today": 45.7067371297822
+      "bitrate_today": 16231.175343011388,
+      "bitrate_fundamental": 22679.723374511443,
+      "capacity_today": 23780.939228194275,
+      "capacity_fundamental": 31167.715655953034,
+      "output_snr": 45.7067371297822,
+      "noise_model_type": "scalar_iid"
     },
     {
       "hash": "e6d272eb",
@@ -849,13 +837,12 @@
       ],
       "first_sv": 0.016567569226026535,
       "capacity_singular_value_scale": 1.0,
-      "bitrate_today": 22.156688690185547,
-      "bitrate_fundamental": 94.50344848632812,
-      "bitrate_physical_today": 22.156688690185547,
-      "bitrate_physical_fundamental": 94.50344848632812,
-      "bitrate_empirical_today": 208.311279296875,
-      "bitrate_empirical_fundamental": 488.4289245605469,
-      "snr_empirical_today": 32.31954377037995
+      "bitrate_today": 28454.107790073496,
+      "bitrate_fundamental": 40365.107379446614,
+      "capacity_today": 38543.96770040916,
+      "capacity_fundamental": 51349.43756439028,
+      "output_snr": 32.31954377037995,
+      "noise_model_type": "scalar_iid"
     },
     {
       "hash": "120c44b5",
@@ -1294,13 +1281,12 @@
       ],
       "first_sv": 0.056263234466314316,
       "capacity_singular_value_scale": 1.0,
-      "bitrate_today": 73.37561798095703,
-      "bitrate_fundamental": 241.06748962402344,
-      "bitrate_physical_today": 73.37561798095703,
-      "bitrate_physical_fundamental": 241.06748962402344,
-      "bitrate_empirical_today": 121.76922607421875,
-      "bitrate_empirical_fundamental": 350.0842590332031,
-      "snr_empirical_today": 18.659697295914757
+      "bitrate_today": 45938.99646552291,
+      "bitrate_fundamental": 64065.647372503176,
+      "capacity_today": 57719.38988442135,
+      "capacity_fundamental": 76457.53307180131,
+      "output_snr": 18.659697295914757,
+      "noise_model_type": "scalar_iid"
     },
     {
       "hash": "efac6f72",
@@ -1895,13 +1881,12 @@
       ],
       "first_sv": 0.002314584329724312,
       "capacity_singular_value_scale": 1.0,
-      "bitrate_today": 1.1068928241729736,
-      "bitrate_fundamental": 6.981801986694336,
-      "bitrate_physical_today": 1.1068928241729736,
-      "bitrate_physical_fundamental": 6.981801986694336,
-      "bitrate_empirical_today": 210.32986450195312,
-      "bitrate_empirical_fundamental": 355.5256652832031,
-      "snr_empirical_today": 64.6390875407599
+      "bitrate_today": 7108.912616798982,
+      "bitrate_fundamental": 9117.848669437672,
+      "capacity_today": 10828.217573794283,
+      "capacity_fundamental": 12849.59469083667,
+      "output_snr": 64.6390875407599,
+      "noise_model_type": "scalar_iid"
     },
     {
       "hash": "4540c79e",
@@ -2340,13 +2325,12 @@
       ],
       "first_sv": 0.0760602355003357,
       "capacity_singular_value_scale": 1.0,
-      "bitrate_today": 92.7746353149414,
-      "bitrate_fundamental": 288.0214538574219,
-      "bitrate_physical_today": 92.7746353149414,
-      "bitrate_physical_fundamental": 288.0214538574219,
-      "bitrate_empirical_today": 101.78044891357422,
-      "bitrate_empirical_fundamental": 308.3703308105469,
-      "snr_empirical_today": 16.159771885189976
+      "bitrate_today": 49341.17581611704,
+      "bitrate_fundamental": 68285.43310251622,
+      "capacity_today": 61281.02510733825,
+      "capacity_fundamental": 80775.79072755307,
+      "output_snr": 16.159771885189976,
+      "noise_model_type": "scalar_iid"
     },
     {
       "hash": "9ecee08c",
@@ -2785,13 +2769,12 @@
       ],
       "first_sv": 0.03641773760318756,
       "capacity_singular_value_scale": 1.0,
-      "bitrate_today": 50.445064544677734,
-      "bitrate_fundamental": 180.8819122314453,
-      "bitrate_physical_today": 50.445064544677734,
-      "bitrate_physical_fundamental": 180.8819122314453,
-      "bitrate_empirical_today": 153.21620178222656,
-      "bitrate_empirical_fundamental": 409.751708984375,
-      "snr_empirical_today": 22.8533685648911
+      "bitrate_today": 40529.57100487946,
+      "bitrate_fundamental": 57132.337154001834,
+      "capacity_today": 51973.19472399014,
+      "capacity_fundamental": 69297.61046550523,
+      "output_snr": 22.8533685648911,
+      "noise_model_type": "scalar_iid"
     }
   ]
 }
