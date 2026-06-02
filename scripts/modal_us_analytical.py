@@ -30,6 +30,7 @@ def _ignore_modal_mount(path: Path) -> bool:
         "logs",
         "plots",
         "dist",
+        "mida",
     }
     if any(part in ignored_parts for part in path.parts):
         return True

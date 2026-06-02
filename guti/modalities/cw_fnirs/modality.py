@@ -67,14 +67,14 @@ class CWfNIRS(ImagingModality):
 
     def setup_geometry(self) -> None:
         """
-        Setup hemisphere optodes and volumetric grid points.
+        Setup scalp optodes and volumetric grid points.
 
         Creates:
-        - Optodes on hemisphere surface (using Fibonacci spiral)
+        - Optodes on the MIDA scalp surface when available
         - Grid points within brain volume
         - Filters valid source-detector pairs by distance
         """
-        # Get optode positions on hemisphere
+        # Get optode positions on scalp.
         self.sensor_positions = get_sensor_positions(self.params.num_sensors)
 
         # Get volumetric grid points within brain

@@ -4,6 +4,17 @@ from pathlib import Path
 import warnings
 from typing import Literal
 
+from guti.mida_geometry import (
+    MidaBemLayer,
+    ScalpSamplingMethod,
+    get_mida_grid_positions,
+    load_mida_surface_triangles,
+    mida_brain_lf_conductivity_s_per_m,
+    mida_eeg_bem_layers,
+    mida_lf_conductivity_s_per_m,
+    sample_mida_scalp_positions,
+)
+
 np.random.seed(239)
 
 BRAIN_RADIUS = 80  # mm
@@ -25,10 +36,40 @@ def get_sensor_positions(
     offset: float = 0,
     start_n: int = 0,
     end_n: int | None = None,
+    surface: Literal["mida", "sphere", "hemisphere"] = "mida",
+    scalp_region: Literal["superior", "cranial", "full"] = "superior",
+    scalp_sampling: ScalpSamplingMethod = "projected_fibonacci",
 ) -> np.ndarray:
     """
-    Get sensor positions uniformly on the surface of a hemisphere.
+    Get sensor positions on the scalp surface.
+
+    By default this samples the downloaded MIDA outer-skin mesh, filtered to
+    the superior cranial scalp and mapped into GUTI millimeter coordinates. If
+    the MIDA assets are not present, the function falls back to the historical
+    spherical-hemisphere Fibonacci layout. Pass ``surface="sphere"`` to request
+    that legacy geometry explicitly.
     """
+    if surface == "mida":
+        try:
+            return sample_mida_scalp_positions(
+                n_sensors,
+                offset=offset,
+                start_n=start_n,
+                end_n=end_n,
+                region=scalp_region,
+                method=scalp_sampling,
+            )
+        except FileNotFoundError as exc:
+            warnings.warn(
+                f"{exc}; falling back to spherical scalp sensor positions",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            surface = "sphere"
+
+    if surface not in {"sphere", "hemisphere"}:
+        raise ValueError("surface must be 'mida', 'sphere', or 'hemisphere'")
+
     # Deterministic uniform sampling on a hemisphere using a spherical Fibonacci spiral
     golden_angle = np.pi * (3 - np.sqrt(5))
     indices = np.arange(n_sensors)
@@ -51,9 +92,14 @@ def get_sensor_positions(
 
 
 def get_grid_positions(
-    grid_spacing_mm: float = 5.0, radius: float = BRAIN_RADIUS
+    grid_spacing_mm: float = 5.0,
+    radius: float = BRAIN_RADIUS,
+    volume: Literal["mida", "hemisphere"] = "mida",
 ) -> np.ndarray:
-    """Generate positions using a uniform 3D grid within the hemisphere.
+    """Generate source positions using a uniform 3D grid.
+
+    By default, positions come from MIDA brain-tissue voxel labels. Pass
+    ``volume="hemisphere"`` to use the historical spherical cap source grid.
 
     Parameters
     ----------
@@ -63,8 +109,22 @@ def get_grid_positions(
     Returns
     -------
     positions : ndarray of shape (n_points, 3)
-        Grid positions inside the hemisphere in mm
+        Grid positions inside the selected brain volume in mm
     """
+    if volume == "mida":
+        try:
+            return get_mida_grid_positions(grid_spacing_mm=grid_spacing_mm)
+        except FileNotFoundError as exc:
+            warnings.warn(
+                f"{exc}; falling back to hemisphere source positions",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            volume = "hemisphere"
+
+    if volume != "hemisphere":
+        raise ValueError("volume must be 'mida' or 'hemisphere'")
+
     # Create grid coordinates
     # Grid extends from 0 to 2*radius in x and y, and 0 to radius in z
     # to account for brain, skull, and scalp layers
@@ -383,6 +443,76 @@ def write_tri(filename, vertices, triangles, center=None):
             f.write(f"{t[0]} {t[1]} {t[2]}\n")
 
 
+def _write_brainvisa_tri(filename, vertices, triangles, normals):
+    """Write a BrainVisa .tri file from explicit vertices/faces/normals."""
+    with open(filename, "w") as f:
+        f.write(f"- {len(vertices)}\n")
+        for vertex, normal in zip(vertices, normals):
+            f.write(
+                f"{vertex[0]:.8f} {vertex[1]:.8f} {vertex[2]:.8f} "
+                f"{normal[0]:.8f} {normal[1]:.8f} {normal[2]:.8f}\n"
+            )
+
+        f.write(f"- {len(triangles)} {len(triangles)} {len(triangles)}\n")
+        for triangle in triangles:
+            f.write(f"{triangle[0]} {triangle[1]} {triangle[2]}\n")
+
+
+def _triangles_to_vertex_mesh(surface_triangles):
+    """Convert STL-style triangles to a unique-vertex mesh."""
+    vertices, inverse = np.unique(
+        surface_triangles.reshape(-1, 3),
+        axis=0,
+        return_inverse=True,
+    )
+    faces = inverse.reshape(-1, 3)
+
+    face_vertices = vertices[faces]
+    face_normals = np.cross(
+        face_vertices[:, 1] - face_vertices[:, 0],
+        face_vertices[:, 2] - face_vertices[:, 0],
+    )
+    face_norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+    valid_faces = face_norms[:, 0] > 0
+    faces = faces[valid_faces]
+    face_vertices = face_vertices[valid_faces]
+    face_normals = face_normals[valid_faces] / face_norms[valid_faces]
+
+    # The MIDA->GUTI transform swaps axes, so orient faces using an outward
+    # center heuristic after the transform instead of trusting STL winding.
+    mesh_center = vertices.mean(axis=0)
+    face_centers = face_vertices.mean(axis=1)
+    if np.mean(np.sum(face_normals * (face_centers - mesh_center), axis=1)) < 0:
+        faces = faces[:, [0, 2, 1]]
+        face_normals = -face_normals
+
+    vertex_normals = np.zeros_like(vertices)
+    np.add.at(vertex_normals, faces[:, 0], face_normals)
+    np.add.at(vertex_normals, faces[:, 1], face_normals)
+    np.add.at(vertex_normals, faces[:, 2], face_normals)
+    norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+    zero = norms[:, 0] == 0
+    if np.any(zero):
+        fallback = vertices[zero] - mesh_center
+        fallback_norms = np.linalg.norm(fallback, axis=1, keepdims=True)
+        fallback_norms[fallback_norms == 0] = 1.0
+        vertex_normals[zero] = fallback / fallback_norms
+        norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+    vertex_normals = vertex_normals / norms
+
+    return vertices, faces, vertex_normals
+
+
+def _write_mida_surface_tri(filename, surface_name):
+    """Write a MIDA STL surface as a BrainVisa .tri mesh."""
+    surface_triangles = load_mida_surface_triangles(
+        surface_name,
+        coordinate_frame="guti",
+    )
+    vertices, triangles, normals = _triangles_to_vertex_mesh(surface_triangles)
+    _write_brainvisa_tri(filename, vertices, triangles, normals)
+
+
 def get_random_orientations(n_sources: int, seed: int = 42) -> np.ndarray:
     """Generate random unit vectors for dipole orientations (reproducible).
 
@@ -651,7 +781,7 @@ def create_bem_model(mesh_resolution=20, source_spacing_mm=5.0, n_cortical_sourc
     )  # 20mm further out
 
     # Calculate radial orientations (pointing inward toward center of head)
-    head_center = np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
+    head_center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
 
     with open(f"{output_dir}/meg_sensor_locations.txt", "w") as f:
         for pos in meg_sensor_positions:
@@ -663,10 +793,10 @@ def create_bem_model(mesh_resolution=20, source_spacing_mm=5.0, n_cortical_sourc
             )
 
     print(
-        f"EEG/MEG: Using {len(brain_positions)} positions × 3 orientations = {len(brain_positions_expanded)} dipoles and {N_SENSORS_DEFAULT} sensors"
+        f"EEG/MEG: Using {len(brain_positions)} positions × 3 orientations = {len(brain_positions_expanded)} dipoles and {n_sensors} sensors"
     )
     print(
-        f"EIT: Using {n_cortical_sources} cortical dipoles and {N_SENSORS_DEFAULT} sensors"
+        f"EIT: Using {n_cortical_sources} cortical dipoles and {n_sensors} sensors"
     )
 
 
@@ -744,7 +874,7 @@ def create_bem_model_hemisphere():
     )  # 20mm further out
 
     # Calculate radial orientations (pointing inward toward center of head)
-    head_center = np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
+    head_center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
 
     with open("bem_model/meg_sensor_locations.txt", "w") as f:
         for pos in meg_sensor_positions:
@@ -789,7 +919,32 @@ def _create_sphere_meshes(output_dir, grid_resolution, center=None):
         write_tri(f"{output_dir}/{name}_sphere.tri", vertices, triangles, center=center)
 
 
-def _write_geometry_file(output_dir):
+def _mida_layer_mesh_filename(layer: MidaBemLayer) -> str:
+    return f"mida_{layer.interface_name}.tri"
+
+
+def _create_mida_eeg_meshes(
+    output_dir,
+    layers: tuple[MidaBemLayer, ...] | None = None,
+):
+    """Create EEG BEM interface meshes from MIDA surfaces.
+
+    OpenMEEG receives nested tissue domains, but their interface meshes come
+    from MIDA instead of concentric spheres.
+    """
+    if layers is None:
+        layers = mida_eeg_bem_layers()
+    for layer in layers:
+        _write_mida_surface_tri(
+            f"{output_dir}/{_mida_layer_mesh_filename(layer)}",
+            layer.surface_name,
+        )
+
+
+def _write_geometry_file(
+    output_dir,
+    layers: tuple[MidaBemLayer, ...] | None = None,
+):
     """Write OpenMEEG geometry file.
 
     Parameters
@@ -799,18 +954,32 @@ def _write_geometry_file(output_dir):
     """
     with open(f"{output_dir}/sphere_head.geom", "w") as f:
         f.write("# Domain Description 1.1\n\n")
-        f.write("Interfaces 3\n\n")
-        f.write('Interface Brain: "brain_sphere.tri"\n')
-        f.write('Interface Skull: "skull_sphere.tri"\n')
-        f.write('Interface Scalp: "scalp_sphere.tri"\n\n')
-        f.write("Domains 4\n\n")
-        f.write("Domain Brain: -Brain\n")
-        f.write("Domain Skull: -Skull +Brain\n")
-        f.write("Domain Scalp: -Scalp +Skull\n")
-        f.write("Domain Air: +Scalp\n")
+        if layers is None:
+            f.write("Interfaces 3\n\n")
+            f.write('Interface Brain: "brain_sphere.tri"\n')
+            f.write('Interface Skull: "skull_sphere.tri"\n')
+            f.write('Interface Scalp: "scalp_sphere.tri"\n\n')
+            f.write("Domains 4\n\n")
+            f.write("Domain Brain: -Brain\n")
+            f.write("Domain Skull: -Skull +Brain\n")
+            f.write("Domain Scalp: -Scalp +Skull\n")
+            f.write("Domain Air: +Scalp\n")
+            return
+
+        f.write(f"Interfaces {len(layers)}\n\n")
+        for layer in layers:
+            f.write(
+                f'Interface {layer.interface_name}: "{_mida_layer_mesh_filename(layer)}"\n'
+            )
+
+        f.write(f"\nDomains {len(layers) + 1}\n\n")
+        for index, layer in enumerate(layers):
+            inside = "" if index == 0 else f" +{layers[index - 1].interface_name}"
+            f.write(f"Domain {layer.domain_name}: -{layer.interface_name}{inside}\n")
+        f.write(f"Domain Air: +{layers[-1].interface_name}\n")
 
 
-def _write_conductivity_file(output_dir):
+def _write_conductivity_file(output_dir, conductivities=None):
     """Write OpenMEEG conductivity file.
 
     Parameters
@@ -818,12 +987,37 @@ def _write_conductivity_file(output_dir):
     output_dir : str
         Directory to write conductivity file
     """
+    if conductivities is None:
+        conductivities = {
+            "Air": AIR_CONDUCTIVITY,
+            "Scalp": SCALP_CONDUCTIVITY,
+            "Brain": BRAIN_CONDUCTIVITY,
+            "Skull": SKULL_CONDUCTIVITY,
+        }
+
     with open(f"{output_dir}/sphere_head.cond", "w") as f:
         f.write("# Properties Description 1.0 (Conductivities)\n\n")
-        f.write(f"Air         {AIR_CONDUCTIVITY}\n")
-        f.write(f"Scalp       {SCALP_CONDUCTIVITY}\n")
-        f.write(f"Brain       {BRAIN_CONDUCTIVITY}\n")
-        f.write(f"Skull       {SKULL_CONDUCTIVITY}\n")
+        for domain_name, conductivity in conductivities.items():
+            f.write(f"{domain_name:<24} {conductivity}\n")
+
+
+def _mida_eeg_conductivities(
+    layers: tuple[MidaBemLayer, ...] | None = None,
+) -> dict[str, float]:
+    """Layered EEG conductivities from the MIDA/IT'IS database."""
+    if layers is None:
+        layers = mida_eeg_bem_layers()
+
+    conductivities: dict[str, float] = {}
+    for layer in layers:
+        if layer.domain_name == "Brain":
+            conductivities[layer.domain_name] = mida_brain_lf_conductivity_s_per_m()
+        else:
+            conductivities[layer.domain_name] = mida_lf_conductivity_s_per_m(
+                layer.tissue_name
+            )
+    conductivities["Air"] = 0.0
+    return conductivities
 
 
 def create_eeg_bem_model(
@@ -835,6 +1029,7 @@ def create_eeg_bem_model(
     n_dipoles_per_line=None,
     use_radial_orientations=False,
     source_radius_margin_mm=0.0,
+    head_model: Literal["mida", "sphere"] = "mida",
 ):
     """Create BEM model specifically for EEG with configurable parameters.
 
@@ -863,6 +1058,10 @@ def create_eeg_bem_model(
         Exclude grid sources closer than this distance to the brain boundary.
         OpenMEEG rejects dipoles exactly on an interface, so clean sweeps can set
         a tiny positive margin without changing existing default behavior.
+    head_model : {"mida", "sphere"}, optional
+        Use layered MIDA anatomical BEM interfaces and MIDA low-frequency
+        conductivities when available, or the historical concentric spherical
+        layers.
 
     Notes
     -----
@@ -893,10 +1092,34 @@ def create_eeg_bem_model(
     # Define the center of the spheres to match source/sensor coordinate system
     center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
 
-    # Create meshes, geometry, and conductivity files
-    _create_sphere_meshes(output_dir, grid_resolution, center=center)
-    _write_geometry_file(output_dir)
-    _write_conductivity_file(output_dir)
+    # Create meshes, geometry, and conductivity files.
+    using_mida_head = False
+    mida_layers: tuple[MidaBemLayer, ...] | None = None
+    if head_model == "mida":
+        try:
+            mida_layers = mida_eeg_bem_layers()
+            _create_mida_eeg_meshes(output_dir, layers=mida_layers)
+            using_mida_head = True
+        except FileNotFoundError as exc:
+            warnings.warn(
+                f"{exc}; falling back to spherical EEG BEM interfaces",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            _create_sphere_meshes(output_dir, grid_resolution, center=center)
+    elif head_model == "sphere":
+        _create_sphere_meshes(output_dir, grid_resolution, center=center)
+    else:
+        raise ValueError("head_model must be 'mida' or 'sphere'")
+
+    _write_geometry_file(output_dir, layers=mida_layers if using_mida_head else None)
+    if using_mida_head:
+        _write_conductivity_file(
+            output_dir,
+            conductivities=_mida_eeg_conductivities(mida_layers),
+        )
+    else:
+        _write_conductivity_file(output_dir)
 
     # Generate brain volume dipole positions and orientations
     if n_radial_lines is not None:
@@ -921,8 +1144,11 @@ def create_eeg_bem_model(
             dipole_positions, dipole_orientations = expand_positions_with_orientations(radial_positions)
     else:
         # Use grid-based distribution
-        brain_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
-        if source_radius_margin_mm > 0:
+        brain_positions = get_grid_positions(
+            grid_spacing_mm=source_spacing_mm,
+            volume="mida" if using_mida_head else "hemisphere",
+        )
+        if source_radius_margin_mm > 0 and not using_mida_head:
             distances = np.linalg.norm(brain_positions - center, axis=1)
             brain_positions = brain_positions[
                 distances < BRAIN_RADIUS - source_radius_margin_mm
@@ -959,7 +1185,7 @@ def create_eeg_bem_model(
         method_str = f"grid-based ({source_spacing_mm}mm spacing, {orientation_str})"
 
     print(
-        f"EEG BEM model: {len(dipole_positions)} dipoles ({method_str}), {n_sensors} sensors, {grid_resolution}mm resolution"
+        f"EEG BEM model: {len(dipole_positions)} dipoles ({method_str}), {n_sensors} sensors, {head_model} head model, {grid_resolution}mm resolution"
     )
 
 
@@ -1007,7 +1233,7 @@ def create_meg_bem_model(
 
     # Generate MEG sensor positions (outside head with radial orientations)
     meg_sensor_positions = get_sensor_positions(n_sensors, offset=sensor_offset)
-    head_center = np.array([SCALP_RADIUS, SCALP_RADIUS, 0])
+    head_center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0])
 
     with open(f"{output_dir}/meg_sensor_locations.txt", "w") as f:
         for pos in meg_sensor_positions:

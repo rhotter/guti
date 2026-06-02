@@ -89,13 +89,13 @@ class TDfNIRSAnalytical(ImagingModality):
 
     def setup_geometry(self) -> None:
         """
-        Setup hemisphere optodes and volumetric grid points.
+        Setup scalp optodes and volumetric grid points.
 
         Creates:
-        - Optodes on hemisphere surface (using Fibonacci spiral)
+        - Optodes on the MIDA scalp surface when available
         - Grid points within brain volume
         """
-        # Get optode positions on hemisphere
+        # Get optode positions on scalp.
         self.sensor_positions = get_sensor_positions(self.params.num_sensors)
 
         # Get volumetric grid points within brain
@@ -131,7 +131,7 @@ class TDfNIRSAnalytical(ImagingModality):
             torch.from_numpy(self.sensor_positions).float().to(self.device)
         )
 
-        # Get valid source-detector pairs and their outward normals on the hemisphere.
+        # Get valid source-detector pairs and outward normals from the head center.
         (
             valid_sources,
             valid_source_normals,

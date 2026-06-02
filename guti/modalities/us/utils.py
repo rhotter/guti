@@ -12,11 +12,15 @@ import numpy as np
 import torch
 
 from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
+from guti.mida_geometry import mida_brain_acoustic_speed_m_s, mida_brain_volume_mm3
 from guti.linop import ChunkedForwardOperator
 
 # Free-field constants shared by every entry point (the in-process USModality
 # and the production analytical.py CLI), so the physics is defined exactly once.
-SOUND_SPEED_M_S = 1500.0          # water-like free-field approximation
+try:
+    SOUND_SPEED_M_S = mida_brain_acoustic_speed_m_s()
+except (FileNotFoundError, KeyError):
+    SOUND_SPEED_M_S = 1500.0      # water-like free-field approximation
 POINTS_PER_WAVELENGTH = 24        # voxel size = c / (PPW * f)
 TIME_DURATION_S = 120e-6          # simulated window
 RECEIVER_OFFSET_MM = 8.0          # receiver standoff from the scalp
@@ -25,8 +29,11 @@ DEFAULT_RECEIVER_BATCH = 256      # receivers per matrix-free row block
 
 
 def free_field_source_spacing_mm(n_sources: int) -> float:
-    """Grid spacing (mm) giving ~``n_sources`` points in the brain hemisphere."""
-    volume_mm3 = (2.0 / 3.0) * np.pi * BRAIN_RADIUS**3
+    """Grid spacing (mm) giving ~``n_sources`` points in the brain volume."""
+    try:
+        volume_mm3 = mida_brain_volume_mm3()
+    except (FileNotFoundError, KeyError, ValueError):
+        volume_mm3 = (2.0 / 3.0) * np.pi * BRAIN_RADIUS**3
     return (volume_mm3 / n_sources) ** (1.0 / 3.0)
 
 

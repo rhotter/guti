@@ -7,7 +7,7 @@ and sensitivity computation via the adjoint formulation.
 Semi-infinite medium is modelled with the extrapolated boundary condition
 using the method of images (Patterson, Chance & Wilson, Appl. Opt. 1989;
 Arridge, Appl. Opt. 1995). A local tangent-plane approximation is used
-at each optode on the curved hemisphere surface, so the real source is
+at each optode on the scalp surface, so the real source is
 placed one transport mean free path beneath the optode along its outward
 normal and a negative image source is placed through the extrapolated
 boundary along the same normal.
@@ -196,13 +196,13 @@ def get_valid_source_detector_pairs(
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Get unique source-detector pairs satisfying the distance criterion,
-    together with their outward normals on the hemisphere surface.
+    together with their outward normals from the head center.
 
     Parameters
     ----------
-    sensor_positions_mm : (n_sensors, 3) optode positions on the hemisphere.
+    sensor_positions_mm : (n_sensors, 3) optode positions on the scalp.
     max_dist : maximum allowed source-detector distance.
-    head_center : (3,) hemisphere centre. If None, inferred from the
+    head_center : (3,) head center. If None, inferred from the
         guti.core convention (BRAIN_RADIUS, BRAIN_RADIUS, 0).
 
     Returns
@@ -218,7 +218,7 @@ def get_valid_source_detector_pairs(
             device=sensor_positions_mm.device,
         )
 
-    # Outward normals on the hemisphere (optode pointing away from head centre).
+    # Outward normals from the head center.
     v = sensor_positions_mm - head_center
     normals = v / torch.norm(v, dim=1, keepdim=True)
 
