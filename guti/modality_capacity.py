@@ -190,8 +190,11 @@ def compute_bitrate_capacity(
     )
 
     if noise_model == "us_analytical":
-        svd_freq = float(params.frequency_hz or _US_RBC_REFERENCE_SVD_FREQ_HZ)
-        result = _us_rbc_bitrate_capacity(s_capacity, n_sources, n_outputs, svd_freq)
+        # Fixed 50 kHz → 2 MHz λ³ extrapolation (the calibrated proxy frequency).
+        # Frequency is NOT a meaningful sweep axis here: the swept variants are
+        # resolution-capped, so scaling λ³ off each variant's own frequency
+        # produces a spurious slope. US sweeps are restricted to 50 kHz upstream.
+        result = _us_rbc_bitrate_capacity(s_capacity, n_sources, n_outputs)
         result.update({"n_sensors": n_sensors, "n_voxels": n_voxels,
                        "n_outputs": n_outputs, "n_sources": n_sources})
         return result

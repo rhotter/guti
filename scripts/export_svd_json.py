@@ -339,6 +339,14 @@ def export_modality(modality, label):
     for hash_key, v in all_variants.items():
         s = v["s"]
         params = v["params"]
+        # US: only the 50 kHz proxy frequency is calibrated for the λ³→2 MHz
+        # extrapolation, so the chart sweeps sensors at 50 kHz (frequency is not a
+        # physical scaling axis here).
+        if (
+            modality == "us_free_field_analytical_frequency_sweep"
+            and params.frequency_hz not in (50000, 50000.0)
+        ):
+            continue
         n_sensors = params.num_sensors
         freq = getattr(params, "frequency_hz", None)
         s_noise_normalized, noise_metadata = _load_saved_noise_normalized_singular_values(
