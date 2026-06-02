@@ -1,1 +1,0 @@
-/Users/lev/notes/Other/GDocs/GUTIBlogPost.md

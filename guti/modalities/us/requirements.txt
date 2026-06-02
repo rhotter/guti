@@ -1,9 +1,12 @@
-# jax[cuda12]==0.4.28
-# jaxlib[cuda12]==0.4.28
-jax
-jaxlib
-jaxdf==0.2.8
-jwave==0.2.1
-matplotlib==3.7.3
-# numpy==1.25.2
+# Ultrasound modality (analytical free-field Green's-function forward model)
+#
+# This path is jax/jwave-free: the old heterogeneous jwave implementation now
+# lives under guti.modalities._legacy.us_jwave and nothing here imports it.
+# cupy/modal are only used by the Modal multi-GPU runner (modal_us_analytical.py).
 numpy
+scipy
+matplotlib
+torch
+tqdm
+modal              # modal_us_analytical.py multi-GPU runner
+# cupy-cuda12x     # GPU-only (Modal runner); install the wheel matching your CUDA

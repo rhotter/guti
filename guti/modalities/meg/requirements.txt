@@ -1,0 +1,3 @@
+# MEG modality (analytic Sarvas forward model)
+numpy
+matplotlib        # MEG.ipynb exploration notebook only

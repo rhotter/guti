@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
-from guti.core import get_bitrate_channel_capacity, noise_floor_from_total_snr
+from guti.core import (
+    BRAIN_RADIUS,
+    get_bitrate_channel_capacity,
+    noise_floor_from_total_snr,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +57,26 @@ class NoiseModel:
     reference_total_snr: float = 100.0
 
     notes: str = ""
+
+
+@dataclass(frozen=True)
+class NoiseCorrelationLengthFit:
+    """Summary of a distance-kernel fit to a covariance matrix."""
+
+    kernel: str
+    length_mm: float
+    log_rmse: float
+    n_pairs: int
+    min_correlation: float
+    max_distance_mm: float
+
+
+NoiseCorrelationKernel = Literal["gaussian", "exponential"]
+NoiseDistanceMetric = Literal["geodesic", "euclidean"]
+
+
+DEFAULT_NOISE_CORRELATION_LENGTH_MM = 5.0
+DEFAULT_NOISE_CORRELATION_KERNEL: NoiseCorrelationKernel = "gaussian"
 
 
 # ---------------------------------------------------------------------------
@@ -123,35 +148,34 @@ _TD_FNIRS_NOISE_FUND = 1.0 / math.sqrt(
 
 # Ultrasound: noise in forward-model units (dimensionless pressure ratio)
 # The forward model maps scatterer reflectivity (dimensionless) to received
-# pressure ratio (dimensionless).  Two noise sources:
+# pressure ratio (dimensionless).  Two independent receiver noise sources:
 #
-# 1. Acoustic thermal noise (Mellen 1952):
-#    NL = -15 + 20·log₁₀(f_kHz)  [dB re 1 µPa²/Hz]
-#    At 50 kHz: NL ≈ 19 dB → S_p ≈ 7.9e-11 Pa²/Hz → p_th ≈ 8.9 µPa/√Hz
-#    This is thermal pressure fluctuations in the medium itself.
+# 1. Acoustic thermal noise from the accepted acoustic mode count:
+#    P_n = A_elem * (2π / λ²) * k_B T * Δf
+#    where A_elem is the scalp tile area per element.  This is the half-space
+#    modal/equipartition form of the same thermal physics behind Mellen's
+#    pressure-noise floor.  We convert the available acoustic power to an
+#    equivalent RMS pressure with I = P/A = p²/(ρc).
 #
 # 2. Electronic Johnson noise:
 #    V_noise = √(4 k_B T R), R = 50 Ω → 0.93 nV/√Hz
 #    Referred to pressure via transducer sensitivity S_rx = 1 mV/Pa:
-#    p_elec ≈ 0.93 µPa/√Hz
+#    p_elec ≈ 0.93 µPa/√Hz.
 #
 # Referred to forward-model units: noise_fwd = p_total / P_tx
-#   where P_tx ≈ 10 kPa (transmit pressure at brain depth)
+#   where P_tx ≈ 10 kPa (transmit pressure at brain depth).
 #
-# The noise model is *frequency-aware*:
-#   - Acoustic thermal noise (Mellen 1952) scales as f² in PSD (f in amplitude)
-#   - Aperture directivity: for ka > 1 the element spatially filters isotropic
-#     thermal noise, reducing effective noise by ~1/ka in amplitude.
-#     ka = 2πf·a/c, where a = element radius = √(scalp_area / (N·π)).
-#   - Pulse averaging: PRF = c/(2D) pulse-echoes per second, all seeing the
-#     same brain state.  Averaging N_avg = PRF/f_brain reduces noise by √N_avg.
-#     The effective noise bandwidth is BW_pulse * f_brain / PRF.
+# The noise model is frequency-aware.  The thermal mode density contributes
+# 1/λ² ∝ f² scaling, and pulse averaging reduces the effective bandwidth:
+#   PRF = c/(2D), N_avg = PRF/f_brain, BW_eff = BW_pulse * f_brain / PRF.
 _US_DEFAULT_CENTER_FREQ = 50e3  # Hz  (used when frequency not specified)
 _US_TRANSMIT_PRESSURE = 1e4  # Pa  (10 kPa at brain depth after skull)
 _US_TRANSDUCER_SENSITIVITY = 1e-3  # V/Pa
 _US_SOUND_SPEED = 1540.0  # m/s in soft tissue
+_US_TISSUE_DENSITY = 1000.0  # kg/m³, soft-tissue/water approximation
 _US_BRAIN_DEPTH = 0.150  # m  (max imaging depth, sets PRF)
 _US_DEFAULT_F_BRAIN = 1.0  # Hz  (brain-state temporal bandwidth)
+_US_ACCEPTED_SOLID_ANGLE = 2 * math.pi  # half-space modes accepted by surface elements
 
 # Scalp hemisphere area for element sizing: 2π × R² with R = 92 mm
 _US_SCALP_AREA_MM2 = 2 * math.pi * 92**2  # ~53,200 mm²
@@ -168,72 +192,82 @@ def _us_prf(depth_m: float = _US_BRAIN_DEPTH) -> float:
     return _US_SOUND_SPEED / (2 * depth_m)
 
 
-def _us_acoustic_thermal_noise(freq_hz: float) -> float:
-    """Mellen (1952) acoustic thermal noise spectral density in Pa/sqrt(Hz)."""
-    freq_khz = freq_hz / 1e3
-    nl_db = -15 + 20 * math.log10(freq_khz)  # dB re 1 µPa²/Hz
-    return math.sqrt(10 ** (nl_db / 10)) * 1e-6  # Pa/√Hz
+def _us_element_area_m2(n_sensors: int) -> float:
+    """Scalp hemisphere tile area represented by one ultrasound receiver."""
+    if n_sensors <= 0:
+        raise ValueError("n_sensors must be positive")
+    return _US_SCALP_AREA_MM2 * 1e-6 / n_sensors
 
 
-def _us_element_ka(freq_hz: float, n_sensors: int) -> float:
-    """Compute ka for a circular piston element tiling the scalp hemisphere."""
-    area_mm2 = _US_SCALP_AREA_MM2 / n_sensors
-    radius_m = math.sqrt(area_mm2 / math.pi) * 1e-3  # mm → m
-    k = 2 * math.pi * freq_hz / _US_SOUND_SPEED
-    return k * radius_m
+def _us_effective_bandwidth_hz(
+    freq_hz: float,
+    f_brain: float = _US_DEFAULT_F_BRAIN,
+) -> float:
+    """Pulse bandwidth after averaging pulse-echoes for one brain-state sample."""
+    # BW_pulse = freq_hz (100% fractional BW)
+    # PRF = c/(2D) ≈ 5133 Hz
+    # N_avg = PRF / f_brain
+    # BW_eff = BW_pulse / N_avg = BW_pulse * f_brain / PRF
+    return freq_hz * f_brain / _us_prf()
 
 
-def _us_directivity_factor(ka: float) -> float:
-    """Noise reduction factor from aperture directivity.
+def _us_acoustic_thermal_noise_power(
+    freq_hz: float,
+    bandwidth_hz: float,
+    n_sensors: int,
+) -> float:
+    """Acoustic thermal noise power accepted by one receiver element.
 
-    For a circular piston receiving isotropic noise:
-      ka << 1  →  omnidirectional, factor = 1 (no reduction)
-      ka >> 1  →  directional, factor ≈ 1/ka
-
-    We use a smooth interpolation: factor = 1 / sqrt(1 + ka²).
+    P_n = A_elem * (2π / λ²) * k_B T * Δf.
     """
-    return 1.0 / math.sqrt(1.0 + ka**2)
+    area_m2 = _us_element_area_m2(n_sensors)
+    wavelength_m = _US_SOUND_SPEED / freq_hz
+    mode_count = area_m2 * _US_ACCEPTED_SOLID_ANGLE / wavelength_m**2
+    return mode_count * K_B * BODY_TEMP_K * bandwidth_hz
+
+
+def _us_acoustic_thermal_pressure_rms(
+    freq_hz: float,
+    bandwidth_hz: float,
+    n_sensors: int,
+) -> float:
+    """Equivalent RMS pressure for the accepted thermal acoustic power."""
+    area_m2 = _us_element_area_m2(n_sensors)
+    power_w = _us_acoustic_thermal_noise_power(freq_hz, bandwidth_hz, n_sensors)
+    intensity_w_m2 = power_w / area_m2
+    return math.sqrt(intensity_w_m2 * _US_TISSUE_DENSITY * _US_SOUND_SPEED)
 
 
 def _us_total_noise_fwd(
     freq_hz: float,
     n_sensors: int | None = None,
     f_brain: float = _US_DEFAULT_F_BRAIN,
+    bandwidth_hz: float | None = None,
 ) -> float:
     """Total US noise in forward-model units per brain-state sample.
 
-    Combines acoustic thermal (frequency-dependent, aperture-filtered) and
-    electronic Johnson (frequency-independent) noise in RSS, then refers to
-    fwd-model units by dividing by transmit pressure.
+    Combines acoustic thermal modal power and electronic Johnson noise in RSS,
+    then refers to fwd-model units by dividing by transmit pressure.
 
     The noise bandwidth accounts for pulse averaging: each brain-state sample
     averages N_avg = PRF/f_brain pulse-echoes, so the effective bandwidth is
     BW_pulse * f_brain / PRF.  This ensures consistency with the capacity
     formula C = (1/2T) Σ log₂(1 + (σ/noise)²) where T = 1/f_brain.
     """
-    p_thermal = _us_acoustic_thermal_noise(freq_hz)
-
-    # Aperture directivity reduces thermal noise (but not electronic noise)
     n = n_sensors if n_sensors is not None else _US_DEFAULT_N_SENSORS
-    ka = _us_element_ka(freq_hz, n)
-    dir_factor = _us_directivity_factor(ka)
-    p_thermal_eff = p_thermal * dir_factor
+    bw_eff = (
+        bandwidth_hz
+        if bandwidth_hz is not None
+        else _us_effective_bandwidth_hz(freq_hz, f_brain)
+    )
+    p_thermal = _us_acoustic_thermal_pressure_rms(freq_hz, bw_eff, n)
+    p_electronic = _US_P_ELECTRONIC * math.sqrt(bw_eff)
+    p_total = math.sqrt(p_thermal**2 + p_electronic**2)
 
-    p_total = math.sqrt(p_thermal_eff**2 + _US_P_ELECTRONIC**2)
-
-    # Effective bandwidth after pulse averaging:
-    # BW_pulse = freq_hz (100% fractional BW)
-    # PRF = c/(2D) ≈ 5133 Hz
-    # N_avg = PRF / f_brain
-    # BW_eff = BW_pulse / N_avg = BW_pulse * f_brain / PRF
-    prf = _us_prf()
-    bw_pulse = freq_hz
-    bw_eff = bw_pulse * f_brain / prf
-
-    return p_total / _US_TRANSMIT_PRESSURE * math.sqrt(bw_eff)
+    return p_total / _US_TRANSMIT_PRESSURE
 
 
-# Default noise at 50 kHz (for the NoiseModel entry)
+# Default noise at 50 kHz, per pulse-averaged brain-state sample
 _US_NOISE_FWD_50K = _us_total_noise_fwd(_US_DEFAULT_CENTER_FREQ, _US_DEFAULT_N_SENSORS)
 
 # Neural current dipole amplitude (same for EEG, MEG)
@@ -250,6 +284,572 @@ _US_REFLECTIVITY = 0.01  # dimensionless
 # fNIRS absorption change
 _FNIRS_DELTA_MUA = 0.002  # mm⁻¹
 
+# fMRI reconstructed-BOLD model.
+#
+# We model the measurement as fractional BOLD signal.  A typical task-evoked
+# BOLD contrast is ~1%, and temporal SNR for whole-brain 3 mm voxels at 3T is
+# often O(50-100).  The "fundamental" tier here should be read as a high-quality
+# physiological-noise-limited reference, not as a thermodynamic MRI limit.
+_FMRI_REF_VOXEL_SIZE_MM = 3.0
+_FMRI_REF_TR_S = 2.0
+_FMRI_BOLD_CONTRAST = 0.01
+_FMRI_TODAY_TSNR = 80.0
+_FMRI_HIGH_QUALITY_TSNR = 200.0
+_FMRI_TODAY_BOLD_SNR = _FMRI_BOLD_CONTRAST * _FMRI_TODAY_TSNR
+_FMRI_HIGH_QUALITY_BOLD_SNR = _FMRI_BOLD_CONTRAST * _FMRI_HIGH_QUALITY_TSNR
+_FMRI_TODAY_REL_NOISE = _FMRI_BOLD_CONTRAST / _FMRI_TODAY_BOLD_SNR
+_FMRI_HIGH_QUALITY_REL_NOISE = _FMRI_BOLD_CONTRAST / _FMRI_HIGH_QUALITY_BOLD_SNR
+
+
+def _fmri_relative_noise(
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
+    tier: str = "today",
+) -> float:
+    """Relative BOLD noise for a voxel and TR.
+
+    If ``bold_snr`` is supplied, it directly specifies response SNR:
+    ``bold_contrast / noise``.  Otherwise we use a tSNR-derived fallback that
+    scales with voxel volume and sqrt(TR).
+    """
+    contrast = bold_contrast if bold_contrast is not None else _FMRI_BOLD_CONTRAST
+    if bold_snr is not None:
+        return contrast / bold_snr
+
+    if tier == "fundamental":
+        return _FMRI_HIGH_QUALITY_REL_NOISE
+
+    voxel = voxel_size_mm if voxel_size_mm is not None else _FMRI_REF_VOXEL_SIZE_MM
+    tr = tr_s if tr_s is not None else _FMRI_REF_TR_S
+
+    thermal_ref = math.sqrt(
+        max(_FMRI_TODAY_REL_NOISE**2 - _FMRI_HIGH_QUALITY_REL_NOISE**2, 0.0)
+    )
+    volume_factor = (_FMRI_REF_VOXEL_SIZE_MM / voxel) ** 3
+    tr_factor = math.sqrt(_FMRI_REF_TR_S / tr)
+    thermal = thermal_ref * volume_factor * tr_factor
+    return math.sqrt(thermal**2 + _FMRI_HIGH_QUALITY_REL_NOISE**2)
+
+
+def scalp_geodesic_distance_matrix(
+    sensor_positions_mm: np.ndarray,
+    *,
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return pairwise arc distances between scalp sensor positions in mm."""
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("sensor_positions_mm must have shape (n_sensors, 3)")
+    if not np.all(np.isfinite(positions)):
+        raise ValueError("sensor_positions_mm must contain finite entries")
+
+    center = (
+        np.asarray(center_mm, dtype=float)
+        if center_mm is not None
+        else np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0], dtype=float)
+    )
+    if center.shape != (3,):
+        raise ValueError("center_mm must have shape (3,)")
+
+    radial = positions - center[None, :]
+    radii = np.linalg.norm(radial, axis=1)
+    if np.any(radii <= 0.0):
+        raise ValueError("sensor positions must not coincide with the scalp center")
+
+    unit = radial / radii[:, None]
+    cos_angles = np.clip(unit @ unit.T, -1.0, 1.0)
+    angles = np.arccos(cos_angles)
+    radius = float(np.mean(radii))
+    return radius * angles
+
+
+def sensor_distance_matrix(
+    sensor_positions_mm: np.ndarray,
+    *,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return pairwise sensor distances in mm using a scalp-aware metric."""
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    if distance_metric == "geodesic":
+        return scalp_geodesic_distance_matrix(positions, center_mm=center_mm)
+    if distance_metric == "euclidean":
+        delta = positions[:, None, :] - positions[None, :, :]
+        return np.linalg.norm(delta, axis=2)
+    raise ValueError(f"Unsupported distance_metric {distance_metric!r}")
+
+
+def distance_correlation_matrix(
+    distances_mm: np.ndarray,
+    *,
+    correlation_length_mm: float,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+) -> np.ndarray:
+    """Return a unit-diagonal correlation matrix from pairwise distances."""
+    distances = np.asarray(distances_mm, dtype=float)
+    if distances.ndim != 2 or distances.shape[0] != distances.shape[1]:
+        raise ValueError("distances_mm must be a square matrix")
+    if correlation_length_mm <= 0.0 or not math.isfinite(correlation_length_mm):
+        raise ValueError("correlation_length_mm must be positive and finite")
+    if not np.all(np.isfinite(distances)):
+        raise ValueError("distances_mm must contain finite entries")
+    if np.any(distances < -1e-12):
+        raise ValueError("distances_mm must be non-negative")
+
+    clipped = np.maximum(distances, 0.0)
+    if kernel == "gaussian":
+        corr = np.exp(-0.5 * (clipped / correlation_length_mm) ** 2)
+    elif kernel == "exponential":
+        corr = np.exp(-clipped / correlation_length_mm)
+    else:
+        raise ValueError(f"Unsupported correlation kernel {kernel!r}")
+    np.fill_diagonal(corr, 1.0)
+    return 0.5 * (corr + corr.T)
+
+
+def covariance_to_correlation_matrix(covariance: np.ndarray) -> np.ndarray:
+    """Return the normalized correlation matrix for a covariance matrix."""
+    cov = np.asarray(covariance, dtype=float)
+    if cov.ndim != 2 or cov.shape[0] != cov.shape[1]:
+        raise ValueError("covariance must be a square matrix")
+    if not np.all(np.isfinite(cov)):
+        raise ValueError("covariance must contain finite entries")
+    cov = 0.5 * (cov + cov.T)
+    variance = np.diag(cov)
+    if np.any(variance <= 0.0):
+        raise ValueError("covariance must have positive diagonal entries")
+    corr = cov / np.sqrt(np.outer(variance, variance))
+    np.fill_diagonal(corr, 1.0)
+    return 0.5 * (corr + corr.T)
+
+
+def estimate_effective_correlation_length_mm(
+    sensor_positions_mm: np.ndarray,
+    covariance: np.ndarray,
+    *,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    center_mm: np.ndarray | None = None,
+    min_correlation: float = 0.0,
+    max_distance_mm: float | None = None,
+) -> NoiseCorrelationLengthFit:
+    """Fit a scalar distance-kernel length to positive covariance correlations.
+
+    The fit is least squares in log-correlation over off-diagonal sensor pairs:
+    ``log(rho) ~= -d/L`` for ``kernel='exponential'`` and
+    ``log(rho) ~= -0.5 * (d/L)^2`` for ``kernel='gaussian'``.  Non-positive
+    correlations cannot be represented by these kernels, so they are excluded.
+    """
+    if min_correlation < 0.0 or not math.isfinite(min_correlation):
+        raise ValueError("min_correlation must be non-negative and finite")
+    if max_distance_mm is not None:
+        _validate_positive_finite(max_distance_mm, "max_distance_mm")
+
+    corr = covariance_to_correlation_matrix(covariance)
+    distances = sensor_distance_matrix(
+        sensor_positions_mm,
+        distance_metric=distance_metric,
+        center_mm=center_mm,
+    )
+    if distances.shape != corr.shape:
+        raise ValueError("sensor_positions_mm and covariance dimensions must match")
+
+    mask = np.triu(np.ones_like(corr, dtype=bool), k=1)
+    mask &= distances > 0.0
+    mask &= corr > min_correlation
+    if max_distance_mm is not None:
+        mask &= distances <= max_distance_mm
+
+    d = distances[mask]
+    rho = corr[mask]
+    if d.size == 0:
+        raise ValueError("no positive off-diagonal correlations are available to fit")
+
+    y = -np.log(rho)
+    if kernel == "exponential":
+        x = d
+        beta = float(np.dot(x, y) / np.dot(x, x))
+        length = 1.0 / beta
+        predicted = np.exp(-d / length)
+    elif kernel == "gaussian":
+        x = d**2
+        beta = float(np.dot(x, y) / np.dot(x, x))
+        length = math.sqrt(0.5 / beta)
+        predicted = np.exp(-0.5 * (d / length) ** 2)
+    else:
+        raise ValueError(f"Unsupported correlation kernel {kernel!r}")
+
+    if length <= 0.0 or not math.isfinite(length):
+        raise ValueError("estimated correlation length is not positive and finite")
+    log_rmse = float(np.sqrt(np.mean((np.log(rho) - np.log(predicted)) ** 2)))
+    return NoiseCorrelationLengthFit(
+        kernel=kernel,
+        length_mm=float(length),
+        log_rmse=log_rmse,
+        n_pairs=int(d.size),
+        min_correlation=float(min_correlation),
+        max_distance_mm=float(np.max(d)),
+    )
+
+
+def _validate_positive_finite(value: float, name: str) -> float:
+    value = float(value)
+    if value <= 0.0 or not math.isfinite(value):
+        raise ValueError(f"{name} must be positive and finite")
+    return value
+
+
+def _coerce_noise_std_vector(noise_std: float | np.ndarray, n_ports: int) -> np.ndarray:
+    std = np.asarray(noise_std, dtype=float)
+    if std.ndim == 0:
+        std = np.full(n_ports, float(std))
+    elif std.shape != (n_ports,):
+        raise ValueError("noise_std must be scalar or have shape (n_ports,)")
+    if np.any(std <= 0.0) or not np.all(np.isfinite(std)):
+        raise ValueError("noise_std values must be positive and finite")
+    return std
+
+
+def _add_series_resistance(
+    impedance: np.ndarray,
+    series_resistance_ohm: float | np.ndarray | None,
+) -> np.ndarray:
+    if series_resistance_ohm is None:
+        return impedance
+
+    n_terminals = impedance.shape[-1]
+    resistance = np.asarray(series_resistance_ohm, dtype=float)
+    if resistance.ndim == 0:
+        resistance = np.full(n_terminals, float(resistance))
+    elif resistance.shape != (n_terminals,):
+        raise ValueError(
+            "series_resistance_ohm must be scalar or have shape (n_terminals,)"
+        )
+    if np.any(resistance < 0.0) or not np.all(np.isfinite(resistance)):
+        raise ValueError("series_resistance_ohm values must be non-negative and finite")
+
+    series_matrix = np.diag(resistance)
+    if impedance.ndim == 2:
+        return impedance + series_matrix
+    return impedance + series_matrix[None, :, :]
+
+
+def _apply_montage_to_impedance(
+    impedance: np.ndarray,
+    montage_matrix: np.ndarray | None,
+) -> np.ndarray:
+    if montage_matrix is None:
+        return impedance
+
+    montage_dtype = np.result_type(
+        impedance.dtype,
+        np.asarray(montage_matrix).dtype,
+        float,
+    )
+    impedance = np.asarray(impedance, dtype=montage_dtype)
+    montage = np.asarray(montage_matrix, dtype=montage_dtype)
+    if montage.ndim != 2:
+        raise ValueError("montage_matrix must be a 2D array")
+    if montage.shape[1] != impedance.shape[-1]:
+        raise ValueError(
+            "montage_matrix columns must match the impedance terminal dimension"
+        )
+    if not np.all(np.isfinite(montage)):
+        raise ValueError("montage_matrix must contain finite entries")
+
+    if impedance.ndim == 2:
+        return montage @ impedance @ np.conjugate(montage).T
+    return np.einsum(
+        "pi,fij,qj->fpq",
+        montage,
+        impedance,
+        np.conjugate(montage),
+        optimize=True,
+    )
+
+
+def _dissipative_impedance_part(impedance: np.ndarray) -> np.ndarray:
+    if impedance.ndim == 2:
+        return 0.5 * (impedance + np.conjugate(impedance).T)
+    return 0.5 * (impedance + np.swapaxes(np.conjugate(impedance), -1, -2))
+
+
+def _as_real_covariance(covariance: np.ndarray) -> np.ndarray:
+    real_covariance = np.real_if_close(covariance, tol=1000)
+    if np.iscomplexobj(real_covariance):
+        imag_scale = float(np.max(np.abs(np.imag(real_covariance))))
+        real_scale = float(np.max(np.abs(np.real(real_covariance))))
+        if imag_scale > 1e-10 * max(real_scale, 1.0):
+            raise ValueError(
+                "Johnson covariance has a non-negligible imaginary part; "
+                "capacity.py expects a real covariance matrix"
+            )
+        real_covariance = np.real(real_covariance)
+
+    real_covariance = np.asarray(real_covariance, dtype=float)
+    return 0.5 * (real_covariance + real_covariance.T)
+
+
+def _frequency_independent_bandwidth(
+    *,
+    bandwidth_hz: float | None,
+    frequency_band_hz: tuple[float, float] | None,
+) -> float:
+    if frequency_band_hz is not None:
+        if bandwidth_hz is not None:
+            raise ValueError("Pass either bandwidth_hz or frequency_band_hz, not both")
+        if len(frequency_band_hz) != 2:
+            raise ValueError("frequency_band_hz must be a (f1, f2) pair")
+        f1, f2 = (float(frequency_band_hz[0]), float(frequency_band_hz[1]))
+        if not (math.isfinite(f1) and math.isfinite(f2)) or f2 <= f1:
+            raise ValueError("frequency_band_hz must satisfy finite f2 > f1")
+        return f2 - f1
+
+    if bandwidth_hz is None:
+        raise ValueError(
+            "bandwidth_hz or frequency_band_hz is required for a "
+            "frequency-independent impedance"
+        )
+    return _validate_positive_finite(bandwidth_hz, "bandwidth_hz")
+
+
+def compute_johnson_noise_covariance(
+    transfer_impedance: np.ndarray,
+    *,
+    bandwidth_hz: float | None = None,
+    frequency_band_hz: tuple[float, float] | None = None,
+    frequencies_hz: np.ndarray | None = None,
+    temperature_k: float = BODY_TEMP_K,
+    series_resistance_ohm: float | np.ndarray | None = None,
+    montage_matrix: np.ndarray | None = None,
+    noise_std: float | np.ndarray | None = None,
+    outputs_per_sensor: int = 1,
+) -> np.ndarray:
+    """Return Johnson-Nyquist output covariance from a passive port impedance.
+
+    Implements the one-sided fluctuation-dissipation relation
+    ``S_v(f) = 4 k_B T Re_H[Z(f)]`` and its band integral.  For a real
+    frequency-independent transfer resistance ``R``, this reduces to
+    ``C_v = 4 k_B T bandwidth_hz R``.
+
+    ``transfer_impedance`` can be either a square frequency-independent matrix
+    or a stack with shape ``(n_frequencies, n_ports, n_ports)``.  Use
+    ``montage_matrix`` for a congruence transform from terminal coordinates to
+    measured channels; use ``series_resistance_ohm`` to add passive contact or
+    front-end series resistance before that transform.
+
+    If ``noise_std`` is supplied, the Johnson matrix is used only for its
+    normalized correlation structure and the diagonal is replaced by
+    ``noise_std ** 2``.  This is useful when a modality already has a trusted
+    scalar detector-noise model but the spatial covariance should come from
+    deterministic unit-current transfer overlaps rather than a distance
+    length-scale.
+    """
+    temperature = _validate_positive_finite(temperature_k, "temperature_k")
+    impedance = np.asarray(transfer_impedance)
+    if impedance.ndim not in (2, 3):
+        raise ValueError(
+            "transfer_impedance must be a square matrix or a frequency stack"
+        )
+    if impedance.shape[-1] != impedance.shape[-2]:
+        raise ValueError("transfer_impedance matrices must be square")
+    if not np.all(np.isfinite(impedance)):
+        raise ValueError("transfer_impedance must contain finite entries")
+
+    if frequencies_hz is None:
+        if impedance.ndim != 2:
+            raise ValueError(
+                "frequencies_hz is required when transfer_impedance is a stack"
+            )
+        bandwidth = _frequency_independent_bandwidth(
+            bandwidth_hz=bandwidth_hz,
+            frequency_band_hz=frequency_band_hz,
+        )
+        impedance = _add_series_resistance(impedance, series_resistance_ohm)
+        impedance = _apply_montage_to_impedance(impedance, montage_matrix)
+        covariance = 4.0 * K_B * temperature * bandwidth * _dissipative_impedance_part(
+            impedance
+        )
+    else:
+        if bandwidth_hz is not None or frequency_band_hz is not None:
+            raise ValueError(
+                "frequency-dependent integration uses frequencies_hz; do not "
+                "also pass bandwidth_hz or frequency_band_hz"
+            )
+        if impedance.ndim != 3:
+            raise ValueError(
+                "transfer_impedance must have shape "
+                "(n_frequencies, n_ports, n_ports) with frequencies_hz"
+            )
+        frequencies = np.asarray(frequencies_hz, dtype=float)
+        if frequencies.ndim != 1 or frequencies.shape[0] != impedance.shape[0]:
+            raise ValueError(
+                "frequencies_hz must be 1D and match transfer_impedance.shape[0]"
+            )
+        if not np.all(np.isfinite(frequencies)):
+            raise ValueError("frequencies_hz must contain finite entries")
+        if np.any(np.diff(frequencies) <= 0.0):
+            raise ValueError("frequencies_hz must be strictly increasing")
+        impedance = _add_series_resistance(impedance, series_resistance_ohm)
+        impedance = _apply_montage_to_impedance(impedance, montage_matrix)
+        spectral_density = (
+            4.0 * K_B * temperature * _dissipative_impedance_part(impedance)
+        )
+        # np.trapezoid (np.trapz was removed in NumPy 2.0)
+        _trapezoid = getattr(np, "trapezoid", None) or np.trapz
+        covariance = _trapezoid(spectral_density, frequencies, axis=0)
+
+    covariance = _as_real_covariance(covariance)
+    diag = np.diag(covariance)
+    if np.any(diag <= 0.0) or not np.all(np.isfinite(diag)):
+        raise ValueError(
+            "Johnson covariance must have positive finite diagonal entries"
+        )
+
+    if noise_std is not None:
+        std = _coerce_noise_std_vector(noise_std, covariance.shape[0])
+        corr = covariance / np.sqrt(np.outer(diag, diag))
+        np.fill_diagonal(corr, 1.0)
+        covariance = corr * np.outer(std, std)
+        covariance = 0.5 * (covariance + covariance.T)
+
+    return expand_sensor_noise_covariance(
+        covariance,
+        outputs_per_sensor=outputs_per_sensor,
+    )
+
+
+def compute_sensor_noise_covariance(
+    sensor_positions_mm: np.ndarray,
+    noise_std: float | np.ndarray,
+    *,
+    correlation_length_mm: float = DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return correlated sensor-noise covariance from geometry and variances.
+
+    ``noise_std`` may be a scalar per-sensor standard deviation or one value per
+    sensor.  Off-diagonal covariance is ``corr(distance) * sigma_i * sigma_j``.
+    """
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("sensor_positions_mm must have shape (n_sensors, 3)")
+    n_sensors = positions.shape[0]
+    std = np.asarray(noise_std, dtype=float)
+    if std.ndim == 0:
+        std = np.full(n_sensors, float(std))
+    elif std.shape != (n_sensors,):
+        raise ValueError("noise_std must be scalar or have shape (n_sensors,)")
+    if np.any(std <= 0.0) or not np.all(np.isfinite(std)):
+        raise ValueError("noise_std values must be positive and finite")
+
+    distances = sensor_distance_matrix(
+        positions,
+        distance_metric=distance_metric,
+        center_mm=center_mm,
+    )
+    corr = distance_correlation_matrix(
+        distances,
+        correlation_length_mm=correlation_length_mm,
+        kernel=kernel,
+    )
+    covariance = corr * np.outer(std, std)
+    return 0.5 * (covariance + covariance.T)
+
+
+def expand_sensor_noise_covariance(
+    sensor_covariance: np.ndarray,
+    *,
+    outputs_per_sensor: int = 1,
+) -> np.ndarray:
+    """Expand a sensor covariance to rows grouped by sensor then output index."""
+    covariance = np.asarray(sensor_covariance, dtype=float)
+    if covariance.ndim != 2 or covariance.shape[0] != covariance.shape[1]:
+        raise ValueError("sensor_covariance must be a square matrix")
+    if outputs_per_sensor <= 0:
+        raise ValueError("outputs_per_sensor must be positive")
+    if outputs_per_sensor == 1:
+        return covariance
+    return np.kron(covariance, np.eye(outputs_per_sensor, dtype=float))
+
+
+def compute_output_noise_covariance(
+    sensor_positions_mm: np.ndarray,
+    noise_std: float | np.ndarray,
+    *,
+    correlation_length_mm: float = DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    outputs_per_sensor: int = 1,
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return output covariance for rows grouped by sensor then output index."""
+    sensor_covariance = compute_sensor_noise_covariance(
+        sensor_positions_mm,
+        noise_std,
+        correlation_length_mm=correlation_length_mm,
+        kernel=kernel,
+        distance_metric=distance_metric,
+        center_mm=center_mm,
+    )
+    return expand_sensor_noise_covariance(
+        sensor_covariance,
+        outputs_per_sensor=outputs_per_sensor,
+    )
+
+
+def compute_modality_output_noise_covariance(
+    modality_name: str,
+    sensor_positions_mm: np.ndarray,
+    *,
+    n_sensors: int | None = None,
+    outputs_per_sensor: int = 1,
+    correlation_length_mm: float = DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    kernel: NoiseCorrelationKernel = DEFAULT_NOISE_CORRELATION_KERNEL,
+    distance_metric: NoiseDistanceMetric = "geodesic",
+    tier: str = "today",
+    bandwidth_hz: float | None = None,
+    frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
+    noise_multiplier: float = 1.0,
+    noise_scale: float = 1.0,
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return correlated output-noise covariance for a registered modality."""
+    if noise_multiplier <= 0.0 or not math.isfinite(noise_multiplier):
+        raise ValueError("noise_multiplier must be positive and finite")
+    if noise_scale <= 0.0 or not math.isfinite(noise_scale):
+        raise ValueError("noise_scale must be positive and finite")
+    positions = np.asarray(sensor_positions_mm, dtype=float)
+    sensor_count = n_sensors if n_sensors is not None else positions.shape[0]
+    noise_std = compute_output_noise_std(
+        modality_name,
+        n_sensors=sensor_count,
+        bandwidth_hz=bandwidth_hz,
+        tier=tier,
+        frequency_hz=frequency_hz,
+        voxel_size_mm=voxel_size_mm,
+        tr_s=tr_s,
+        bold_contrast=bold_contrast,
+        bold_snr=bold_snr,
+    )
+    return compute_output_noise_covariance(
+        positions,
+        noise_std * noise_multiplier * noise_scale,
+        correlation_length_mm=correlation_length_mm,
+        kernel=kernel,
+        distance_metric=distance_metric,
+        outputs_per_sensor=outputs_per_sensor,
+        center_mm=center_mm,
+    )
+
 
 NOISE_MODELS = {
     "eeg_openmeeg": NoiseModel(
@@ -257,7 +857,7 @@ NOISE_MODELS = {
         noise_source="Johnson noise at the electrode-contact / front-end",
         measurement_units="V",
         reference_sensor_count=256,
-        sensor_count_noise_exponent=0.5,
+        sensor_count_noise_exponent=0.25, # because resistance scales with square root of area
         reference_bandwidth_hz=100.0,
         today_best_noise=_EEG_NOISE_TODAY,
         physical_floor_noise=_EEG_NOISE_TODAY,  # Johnson IS fundamental
@@ -305,7 +905,7 @@ NOISE_MODELS = {
         noise_source="SQUID flux noise mapped to field noise",
         measurement_units="T",
         reference_sensor_count=1000,
-        sensor_count_noise_exponent=1.0,
+        sensor_count_noise_exponent=0.0,
         reference_bandwidth_hz=100.0,
         today_best_noise=_MEG_SQUID_NOISE_TODAY,
         physical_floor_noise=_MEG_SQUID_NOISE_FUND,
@@ -317,12 +917,13 @@ NOISE_MODELS = {
                               "field amplitudes are somewhat lower, but 100 fT is a good midpoint.",
         reference_total_snr=100.0,
         notes=(
-            "Fixed helmet coverage, loop area ∝ 1/N.  Area-independent flux "
-            "noise → field noise ∝ N."
+            "Sensor-count sweeps hold the quoted per-channel field sensitivity "
+            "fixed.  This represents adding comparable SQUID channels rather "
+            "than splitting a fixed pickup area into smaller loops."
         ),
     ),
-    "fnirs_analytical_cw": NoiseModel(
-        canonical_name="fnirs_analytical_cw",
+    "cw_fnirs": NoiseModel(
+        canonical_name="cw_fnirs",
         noise_source="Shot noise (photon counting)",
         measurement_units="dimensionless (ΔI/I)",
         reference_sensor_count=_FNIRS_CW_N_REF,
@@ -363,27 +964,50 @@ NOISE_MODELS = {
             "Fundamental: ANSI max power ~35 mW at 830 nm."
         ),
     ),
+    "fmri_bold": NoiseModel(
+        canonical_name="fmri_bold",
+        noise_source="Thermal/reconstruction noise plus physiological BOLD fluctuations",
+        measurement_units="fractional BOLD signal",
+        reference_sensor_count=40_000,
+        sensor_count_noise_exponent=0.0,
+        reference_bandwidth_hz=1.0 / _FMRI_REF_TR_S,
+        today_best_noise=_FMRI_TODAY_REL_NOISE,
+        physical_floor_noise=_FMRI_HIGH_QUALITY_REL_NOISE,
+        source_amplitude=_FMRI_BOLD_CONTRAST,
+        source_amplitude_units="fractional BOLD contrast",
+        typical_signal_amplitude=_FMRI_BOLD_CONTRAST,
+        typical_signal_notes="1% fractional BOLD contrast; same response scale used by the physical input-amplitude path.",
+        reference_total_snr=_FMRI_TODAY_BOLD_SNR,
+        notes=(
+            "Reconstructed-BOLD model.  The capacity parameter is BOLD response "
+            "SNR, not raw time-series tSNR.  The default fallback derives "
+            "response SNR=0.8 from 1% BOLD contrast and tSNR=80 for 3 mm voxels "
+            "at TR=2 s; high-quality fallback response SNR=2.0.  This is not a "
+            "Bloch-equation scanner simulator."
+        ),
+    ),
     "us_analytical": NoiseModel(
         canonical_name="us_analytical",
-        noise_source="Acoustic thermal (Mellen) + electronic Johnson noise",
+        noise_source="Acoustic thermal modal power + electronic Johnson noise",
         measurement_units="dimensionless (pressure amplitude ratio)",
         reference_sensor_count=6000,
         sensor_count_noise_exponent=0.0,
-        reference_bandwidth_hz=_US_DEFAULT_CENTER_FREQ,  # BW = center freq
+        reference_bandwidth_hz=_us_effective_bandwidth_hz(_US_DEFAULT_CENTER_FREQ),
         today_best_noise=_US_NOISE_FWD_50K,
         physical_floor_noise=_US_NOISE_FWD_50K,  # thermal IS fundamental
         source_amplitude=_US_REFLECTIVITY,
         source_amplitude_units="dimensionless (ΔZ/Z reflectivity)",
-        typical_signal_amplitude=1e-3,  # ~0.1% reflectivity change; in fwd-model units noise_eff is already dimensionless
+        typical_signal_amplitude=1e-3,  # ~0.1% reflectivity change in dimensionless forward-model units
         typical_signal_notes="0.1% acoustic reflectivity change (ΔZ/Z ≈ 0.001). US fwd model is already in "
-                              "dimensionless units so noise is already noise_eff; typical_signal here is "
+                              "dimensionless units; typical_signal here is "
                               "the dimensionless reflectivity contrast expected from brain tissue.",
         reference_total_snr=2000.0,
         notes=(
-            "Frequency-aware: use frequency_hz kwarg in compute_noise_effective. "
-            "Acoustic thermal noise (Mellen 1952) scales as f²; dominates "
-            "electronic Johnson (~0.93 µPa/√Hz) above ~10 kHz.  "
-            "Defaults to 50 kHz.  At 2 MHz noise is ~195× higher."
+            "Frequency-aware: use frequency_hz kwarg in compute_detector_noise_std. "
+            "Acoustic thermal noise uses modal power "
+            "P_n=A_elem·2π/λ²·kBT·Δf, converted to pressure with I=p²/(ρc). "
+            "Electronic Johnson (~0.93 µPa/√Hz) is added in RSS. "
+            "Defaults to 50 kHz with pulse-averaged effective bandwidth."
         ),
     ),
 }
@@ -394,6 +1018,15 @@ NOISE_MODELS = {
 # ---------------------------------------------------------------------------
 
 def canonicalize_modality_name(modality_name: str) -> str:
+    folder_name_aliases = {
+        "eeg": "eeg_openmeeg",
+        "td_fnirs": "td_fnirs_analytical",
+        "us": "us_analytical",
+        "fnirs_analytical_cw": "cw_fnirs",
+    }
+    if modality_name in folder_name_aliases:
+        return folder_name_aliases[modality_name]
+
     if modality_name in NOISE_MODELS:
         return modality_name
 
@@ -405,7 +1038,10 @@ def canonicalize_modality_name(modality_name: str) -> str:
         return "us_analytical"
 
     if modality_name.startswith("fnirs_analytical"):
-        return "fnirs_analytical_cw"
+        return "cw_fnirs"
+
+    if modality_name.startswith("fmri"):
+        return "fmri_bold"
 
     raise KeyError(f"No noise model registered for modality '{modality_name}'")
 
@@ -424,6 +1060,10 @@ def compute_detector_noise_std(
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
     Noise std per sensor in SI measurement units, scaled from reference
@@ -433,18 +1073,30 @@ def compute_detector_noise_std(
     ----------
     tier : "today" or "fundamental"
     frequency_hz : float, optional
-        Center frequency — only used for ultrasound, where acoustic thermal
-        noise scales as f² (Mellen 1952).  Defaults to 50 kHz.
+        Center frequency — only used for ultrasound, where modal acoustic
+        thermal noise scales through λ.  Defaults to 50 kHz.
+    bandwidth_hz : float, optional
+        Measurement bandwidth.  For ultrasound this overrides the default
+        pulse-averaged effective bandwidth.
     """
     canon = canonicalize_modality_name(modality_name)
     model = NOISE_MODELS[canon]
 
     n = n_sensors if n_sensors is not None else model.reference_sensor_count
 
-    # Ultrasound: recompute noise from scratch (frequency + aperture aware)
+    # Ultrasound: recompute noise from scratch (frequency + modal bandwidth aware)
     if canon == "us_analytical":
         freq = frequency_hz if frequency_hz is not None else _US_DEFAULT_CENTER_FREQ
-        return _us_total_noise_fwd(freq, n_sensors=n)
+        return _us_total_noise_fwd(freq, n_sensors=n, bandwidth_hz=bandwidth_hz)
+
+    if canon == "fmri_bold":
+        return _fmri_relative_noise(
+            voxel_size_mm=voxel_size_mm,
+            tr_s=tr_s,
+            bold_contrast=bold_contrast,
+            bold_snr=bold_snr,
+            tier=tier,
+        )
 
     base_noise = (
         model.today_best_noise if tier == "today" else model.physical_floor_noise
@@ -459,33 +1111,104 @@ def compute_detector_noise_std(
     return base_noise * bw_factor * n_factor
 
 
+def compute_average_output_power(modality_name: str) -> float:
+    """Return per-output-channel average signal power for compatibility paths."""
+    model = get_noise_model(modality_name)
+    if model.typical_signal_amplitude <= 0.0:
+        raise ValueError(f"No typical_signal_amplitude set for '{modality_name}'")
+    return model.typical_signal_amplitude**2
+
+
+def compute_output_noise_std(
+    modality_name: str,
+    n_sensors: int | None = None,
+    bandwidth_hz: float | None = None,
+    tier: str = "today",
+    frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
+) -> float:
+    """Return detector/output noise in measurement units for compatibility paths."""
+    return compute_detector_noise_std(
+        modality_name,
+        n_sensors=n_sensors,
+        bandwidth_hz=bandwidth_hz,
+        tier=tier,
+        frequency_hz=frequency_hz,
+        voxel_size_mm=voxel_size_mm,
+        tr_s=tr_s,
+        bold_contrast=bold_contrast,
+        bold_snr=bold_snr,
+    )
+
+
+def compute_input_amplitude(
+    modality_name: str,
+    bold_contrast: float | None = None,
+) -> float:
+    """Return the physical per-source input amplitude for a modality."""
+    canon = canonicalize_modality_name(modality_name)
+    model = NOISE_MODELS[canon]
+    if canon == "fmri_bold" and bold_contrast is not None:
+        return bold_contrast
+    return model.source_amplitude
+
+
+def compute_total_input_power(
+    modality_name: str,
+    *,
+    n_sources: int,
+    bold_contrast: float | None = None,
+) -> float:
+    """Return total input power from the modality's physical source amplitude."""
+    if n_sources <= 0:
+        raise ValueError("n_sources must be positive")
+    input_amplitude = compute_input_amplitude(
+        modality_name,
+        bold_contrast=bold_contrast,
+    )
+    return float(n_sources * input_amplitude**2)
+
+
 def compute_noise_effective(
     modality_name: str,
     n_sensors: int | None = None,
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
-    Effective noise in forward-model units: detector_noise / source_amplitude.
+    Compatibility effective noise in forward-model units.
 
-    This is the value to pass directly to ``get_bitrate(s, noise, ...)``,
-    where *s* are the raw (un-normalised) singular values of the forward model.
-    The ratio ``s_i / noise_effective`` is then dimensionless.
+    New code should prefer detector/output noise plus total input power.  This
+    helper preserves the older ``detector_noise / source_amplitude`` convention
+    for tests, notebooks, and historical scripts.
 
     Parameters
     ----------
     frequency_hz : float, optional
-        Center frequency — only used for ultrasound (Mellen acoustic thermal
-        noise scales as f²).  Defaults to 50 kHz.
+        Center frequency — only used for ultrasound, where modal acoustic
+        thermal noise scales through λ.  Defaults to 50 kHz.
+    bandwidth_hz : float, optional
+        Measurement bandwidth.  For ultrasound this overrides the default
+        pulse-averaged effective bandwidth.
     """
-    canon = canonicalize_modality_name(modality_name)
-    model = NOISE_MODELS[canon]
     detector_noise = compute_detector_noise_std(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
+        tier=tier, frequency_hz=frequency_hz, voxel_size_mm=voxel_size_mm, tr_s=tr_s,
+        bold_contrast=bold_contrast, bold_snr=bold_snr,
     )
-    return detector_noise / model.source_amplitude
+    source_amplitude = compute_input_amplitude(
+        modality_name,
+        bold_contrast=bold_contrast,
+    )
+    return detector_noise / source_amplitude
 
 
 def capacity_forward_gain_scale(
@@ -523,6 +1246,10 @@ def compute_empirical_snr(
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
     SNR derived from empirically observed signal amplitudes.
@@ -537,7 +1264,8 @@ def compute_empirical_snr(
         raise ValueError(f"No typical_signal_amplitude set for '{modality_name}'")
     detector_noise = compute_detector_noise_std(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
+        tier=tier, frequency_hz=frequency_hz, voxel_size_mm=voxel_size_mm, tr_s=tr_s,
+        bold_contrast=bold_contrast, bold_snr=bold_snr,
     )
     return model.typical_signal_amplitude / detector_noise
 
@@ -549,17 +1277,26 @@ def compute_noise_empirical(
     bandwidth_hz: float | None = None,
     tier: str = "today",
     frequency_hz: float | None = None,
+    voxel_size_mm: float | None = None,
+    tr_s: float | None = None,
+    bold_contrast: float | None = None,
+    bold_snr: float | None = None,
 ) -> float:
     """
     Noise floor in SVD units anchored to empirically observed signal amplitudes.
 
     Uses noise_floor_from_total_snr(s, SNR_empirical) so that the total
     output SNR equals SNR_empirical = typical_signal / detector_noise.
-    Pass the result directly to get_bitrate(s, noise, ...).
+    This is useful as an observed-SNR diagnostic, but it normalizes away the
+    absolute gain of the forward model.  For first-principles detector-floor
+    capacity estimates, use detector/output noise with total input power from
+    compute_total_input_power(...), which preserves raw SVD gain without
+    folding source amplitude into the noise value.
     """
     snr = compute_empirical_snr(
         modality_name, n_sensors=n_sensors, bandwidth_hz=bandwidth_hz,
-        tier=tier, frequency_hz=frequency_hz,
+        tier=tier, frequency_hz=frequency_hz, voxel_size_mm=voxel_size_mm, tr_s=tr_s,
+        bold_contrast=bold_contrast, bold_snr=bold_snr,
     )
     return noise_floor_from_total_snr(s, snr)
 

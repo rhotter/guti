@@ -195,7 +195,7 @@ def get_valid_source_detector_pairs(
     head_center: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Get all valid source-detector pairs satisfying the distance criterion,
+    Get unique source-detector pairs satisfying the distance criterion,
     together with their outward normals on the hemisphere surface.
 
     Parameters
@@ -208,6 +208,7 @@ def get_valid_source_detector_pairs(
     Returns
     -------
     sources, source_normals, detectors, detector_normals : each (n_pairs, 3)
+        Source-detector pairs are unordered; reciprocal pairs are not duplicated.
     """
     if head_center is None:
         from guti.core import BRAIN_RADIUS

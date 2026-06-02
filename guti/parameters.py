@@ -43,6 +43,9 @@ class Parameters:
     time_resolution: Optional[float] = None
     comment: Optional[str] = None
     noise_full_brain: Optional[float] = None
+    noise_correlation_length_mm: Optional[float] = None
+    noise_correlation_kernel: Optional[str] = None
+    noise_distance_metric: Optional[str] = None
     matrix_size: Optional[tuple[int, int]] = None
     vincent_trick: Optional[bool] = None
     frequency_hz: Optional[float] = None
@@ -54,11 +57,26 @@ class Parameters:
     # for fnirs
     max_dist: Optional[float] = None
 
+    # for us (free-field ultrasound)
+    temporal_sampling: Optional[int] = None
+
+    # bitrate pipeline selection: "svd" (spectrum) or "slq" (matrix-free trace est.)
+    bitrate_method: Optional[str] = None
+    slq_num_probes: Optional[int] = None
+    slq_num_lanczos: Optional[int] = None
+
     # for td_fnirs
     n_time_gates: Optional[int] = None
     forward_model_convention: Optional[str] = None
     forward_model_units: Optional[str] = None
     voxel_volume_mm3: Optional[float] = None
+
+    # for reconstructed image modalities such as fMRI
+    psf_fwhm_mm: Optional[float] = None
+    bold_contrast: Optional[float] = None
+    bold_snr: Optional[float] = None
+    tsnr: Optional[float] = None
+    hrf_type: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict) -> "Parameters":

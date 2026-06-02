@@ -6,9 +6,10 @@ Usage:
     python run_modality.py <modality_name> [--param value ...]
 
 Example:
-    python run_modality.py 1d_blurring --num_brain_grid_points 256
-    python run_modality.py eeg --num_sensors 64
-    python run_modality.py us --num_voxels 128
+    python run_modality.py blur_1d --num_brain_grid_points 256
+    python run_modality.py cw_fnirs --num_sensors 400
+    python run_modality.py cw_fnirs --scaled-up          # asymptotic-bitrate config
+    python run_modality.py td_fnirs --scaled-up --no-save
 """
 
 import argparse
@@ -19,19 +20,18 @@ from guti.parameters import Parameters
 
 
 def get_available_modalities():
-    """Get list of available modalities."""
+    """Get list of available modalities (dirs with a modality.py, skipping _private)."""
     modalities = []
     modalities_dir = Path(__file__).parent / "guti" / "modalities"
     for item in sorted(modalities_dir.iterdir()):
         if item.is_dir() and not item.name.startswith("_"):
-            modality_file = item / "modality.py"
-            if modality_file.exists():
+            if (item / "modality.py").exists():
                 modalities.append(item.name)
     return modalities
 
 
 def get_parameters_help():
-    """Generate help text for available Parameters fields."""
+    """Generate help text for available modalities and Parameters fields."""
     help_lines = ["\nAvailable modalities:"]
     for modality in get_available_modalities():
         help_lines.append(f"  {modality}")
@@ -43,20 +43,39 @@ def get_parameters_help():
     return "\n".join(help_lines)
 
 
+def find_modality_class(mod):
+    """Return the ImagingModality subclass defined in a modality module."""
+    for name in dir(mod):
+        obj = getattr(mod, name)
+        if isinstance(obj, type) and hasattr(obj, "run") and name != "ImagingModality":
+            return obj
+    return None
+
+
 def main():
-    # Build epilog with parameter help
-    epilog = "Example: python run_modality.py 1d_blurring --num_brain_grid_points 256"
+    epilog = "Example: python run_modality.py cw_fnirs --scaled-up"
     epilog += get_parameters_help()
 
     parser = argparse.ArgumentParser(
         description="Run a GUTI imaging modality with custom parameters",
         epilog=epilog,
-        formatter_class=argparse.RawDescriptionHelpFormatter
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    parser.add_argument("modality_name", help="Modality name (e.g., 1d_blurring, eeg, us)")
-    parser.add_argument("--no-save", action="store_true", help="Don't save results to disk")
-    parser.add_argument("--default-run", action="store_true", help="Run as default configuration")
+    parser.add_argument(
+        "modality_name", help="Modality name (e.g., blur_1d, cw_fnirs, td_fnirs)"
+    )
+    parser.add_argument(
+        "--no-save", action="store_true", help="Don't save results to disk"
+    )
+    parser.add_argument(
+        "--default-run", action="store_true", help="Run as default configuration"
+    )
+    parser.add_argument(
+        "--scaled-up",
+        action="store_true",
+        help="Use the modality's asymptotic-bitrate config (scaled_up_params); "
+        "any --key value pairs override individual fields on top of it",
+    )
     args, unknown = parser.parse_known_args()
 
     # Parse remaining args as --key value pairs
@@ -65,7 +84,6 @@ def main():
         if unknown[i].startswith("--") and i + 1 < len(unknown):
             key = unknown[i][2:]
             value = unknown[i + 1]
-            # Try to convert to number
             try:
                 value = int(value)
             except ValueError:
@@ -77,41 +95,33 @@ def main():
 
     # Construct module path: guti.modalities.<modality_name>.modality
     modality_module = f"guti.modalities.{args.modality_name}.modality"
-
     try:
-        # Import the modality module
         mod = importlib.import_module(modality_module)
     except ModuleNotFoundError:
         print(f"Error: Could not find modality '{args.modality_name}'")
         print(f"Tried to import: {modality_module}")
         print("\nAvailable modalities:")
-
-        # List available modalities
-        modalities_dir = Path(__file__).parent / "guti" / "modalities"
-        for item in sorted(modalities_dir.iterdir()):
-            if item.is_dir() and not item.name.startswith("_"):
-                modality_file = item / "modality.py"
-                if modality_file.exists():
-                    print(f"  - {item.name}")
+        for name in get_available_modalities():
+            print(f"  - {name}")
         sys.exit(1)
 
-    # Find the modality class (look for subclass of ImagingModality)
-    modality_class = None
-    for name in dir(mod):
-        obj = getattr(mod, name)
-        if isinstance(obj, type) and hasattr(obj, 'run') and name != 'ImagingModality':
-            modality_class = obj
-            break
-
+    modality_class = find_modality_class(mod)
     if modality_class is None:
         print(f"Error: Could not find modality class in {modality_module}")
         sys.exit(1)
 
-    # Create and run modality
-    params = Parameters(**params_dict) if params_dict else None
-    modality = modality_class(params)
+    # Build parameters
+    if args.scaled_up:
+        # Start from the asymptotic-bitrate config, then apply explicit overrides
+        params = modality_class.scaled_up_params()
+        for key, value in params_dict.items():
+            setattr(params, key, value)
+    else:
+        params = Parameters(**params_dict) if params_dict else None
 
-    singular_values = modality.run(save_results=not args.no_save, default_run=args.default_run)
+    modality = modality_class(params)
+    modality.run(save_results=not args.no_save, default_run=args.default_run)
+
 
 if __name__ == "__main__":
     main()

@@ -834,6 +834,7 @@ def create_eeg_bem_model(
     n_radial_lines=None,
     n_dipoles_per_line=None,
     use_radial_orientations=False,
+    source_radius_margin_mm=0.0,
 ):
     """Create BEM model specifically for EEG with configurable parameters.
 
@@ -858,6 +859,10 @@ def create_eeg_bem_model(
         If True, creates a single radial dipole at each position pointing outward
         (normal to surface), instead of 3 orthogonal dipoles. Works with both
         radial lines method and grid-based method.
+    source_radius_margin_mm : float, optional
+        Exclude grid sources closer than this distance to the brain boundary.
+        OpenMEEG rejects dipoles exactly on an interface, so clean sweeps can set
+        a tiny positive margin without changing existing default behavior.
 
     Notes
     -----
@@ -917,6 +922,11 @@ def create_eeg_bem_model(
     else:
         # Use grid-based distribution
         brain_positions = get_grid_positions(grid_spacing_mm=source_spacing_mm)
+        if source_radius_margin_mm > 0:
+            distances = np.linalg.norm(brain_positions - center, axis=1)
+            brain_positions = brain_positions[
+                distances < BRAIN_RADIUS - source_radius_margin_mm
+            ]
 
         if use_radial_orientations:
             # Single radial dipole at each position pointing outward
@@ -1101,43 +1111,43 @@ def water_filling_spectrum(
     """
     # Binary search for water level mu
     # We want: sum_k s_k^2 * max(0, mu_tilde - (1/s_k)^2) = snr^2
-    
+
     # Precompute (noise/s_k)^2 for all k
     reciprocal_s_squared = (1 / s) ** 2
-    
+
     # Sort in ascending order for water-filling
     sorted_indices = np.argsort(reciprocal_s_squared)
     reciprocal_s_squared_sorted = reciprocal_s_squared[sorted_indices]
     s_sorted = s[sorted_indices]
     s_sq_sorted = s_sorted ** 2
-    
+
     # Binary search bounds
     mu_tilde_min = 0.0
     mu_tilde_max = reciprocal_s_squared_sorted[-1] + snr**2 / s_sq_sorted.min()
-    
+
     tolerance = 1e-10
     max_iterations = 1000
-    
+
     for _ in range(max_iterations):
         mu_tilde = (mu_tilde_min + mu_tilde_max) / 2
-        
+
         # Compute total output power for this mu
         power_allocation_tilde = np.maximum(0, mu_tilde - reciprocal_s_squared_sorted)
         output_snr_squared = np.sum(s_sq_sorted * power_allocation_tilde)
-        
+
         if abs(output_snr_squared - snr**2) < tolerance:
             break
-        
+
         if output_snr_squared < snr**2:
             mu_tilde_min = mu_tilde
         else:
             mu_tilde_max = mu_tilde
-    
+
     # Compute final power allocation and unsort
     power_allocation_tilde = np.maximum(0, mu_tilde - reciprocal_s_squared_sorted)
     P_tilde = np.zeros_like(s)
     P_tilde[sorted_indices] = power_allocation_tilde
-    
+
     return P_tilde
 
 def total_iid_input_power(
@@ -1168,48 +1178,18 @@ def get_bitrate_channel_capacity(
     return channel_capacity
 
 
-def get_bitrate_channel_capacity_temporal(
-    s: np.ndarray,                      # (K,) spatial singular values
-    freqs: np.ndarray,                  # (M,) frequency bins in Hz (uniform spacing)
-    H_magnitude: np.ndarray,            # (M,) |H(f_m)|, normalized so peak(|H|) = 1
-    snr_at_reference_nsensors: float,
-    snr_integration_time_s: float = 1.0,
-    nsensors_reference: int | None = None,
-    n_sensors: int | None = None,
-) -> float:
-    """Channel capacity in bits/s for a spatial-temporal MIMO Gaussian channel.
+def get_bitrate_channel_capacity_temporal(*args, **kwargs):
+    """Deprecated. Use :func:`guti.capacity.get_bitrate_temporal_filter`.
 
-    Each (spatial mode k, frequency bin m) is treated as a parallel Gaussian
-    channel with effective singular value σ_km = s_k · |H(f_m)|. Joint
-    water-filling over all (k, m) gives the capacity-achieving input PSD;
-    integrating over frequency (multiplying by df) converts the per-bin
-    capacity to bits per second.
-
-    SNR convention. ``snr_at_reference_nsensors`` is the peak received SNR for
-    the strongest spatial mode at the HRF peak frequency, measured over an
-    observation window of length ``snr_integration_time_s``. Because a
-    DFT-bin observation of length T = 1/df accumulates signal coherently
-    (∝ T) while noise grows as √T, the per-DFT-bin SNR scales as
-    √(T/T_ref). The function applies this scaling internally so the
-    resulting bits/s is invariant to ``df`` (once ``df`` is small enough to
-    resolve ``H(f)``).
+    The temporal spatial-filter bitrate now lives in ``guti.capacity`` under the
+    project-wide equal-power (i.i.d. input) convention, alongside the rest of the
+    capacity/bitrate utilities. This older water-filling variant has been removed
+    to keep a single source of truth; import the new function directly instead.
     """
-    if nsensors_reference is None:
-        snr_ref = snr_at_reference_nsensors
-    else:
-        snr_ref = snr_at_reference_nsensors * np.sqrt(nsensors_reference / n_sensors)
-
-    df = float(freqs[1] - freqs[0])
-    snr_bin = snr_ref * np.sqrt(1.0 / (df * snr_integration_time_s))
-
-    sigma_eff = np.outer(s, H_magnitude).ravel()
-    active = sigma_eff > 0
-    sigma_active = sigma_eff[active]
-
-    P_over_N = water_filling_spectrum(sigma_active, snr_bin)
-    log_terms = np.log2(1 + (sigma_active ** 2) * P_over_N)
-    return df * float(np.sum(log_terms))
-    
+    raise NotImplementedError(
+        "get_bitrate_channel_capacity_temporal has been removed. Use "
+        "guti.capacity.get_bitrate_temporal_filter (equal-power convention)."
+    )
 
 
 def noise_floor_heuristic(

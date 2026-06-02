@@ -1,0 +1,4 @@
+# Continuous-wave fNIRS modality
+numpy
+torch
+tqdm

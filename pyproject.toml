@@ -12,6 +12,12 @@ packages = [{ include = "guti" }]
 [tool.poetry.dependencies]
 python = "^3.8"
 
+[tool.pytest.ini_options]
+# Let tests import the analysis/driver scripts in scripts/ by bare module name
+# (e.g. compute_information_maps, export_svd_json), as they did when those
+# scripts lived at the repo root.
+pythonpath = ["scripts"]
+
 # [tool.poetry.group.dev.dependencies]
 # Add development dependencies here if needed
 # numpy=2.1.2

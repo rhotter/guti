@@ -44,11 +44,15 @@ class ImagingModality(ABC):
         ----------
         params : Parameters, optional
             Parameters object. If None, uses defaults from _get_default_modality_params().
+            When provided, non-None fields override the modality defaults.
         """
-        # Use provided params or defaults
-        self.params = (
-            params if params is not None else self._get_default_modality_params()
-        )
+        defaults = self._get_default_modality_params()
+        if params is None:
+            self.params = defaults
+        else:
+            merged = defaults.to_dict()
+            merged.update(params.to_dict())
+            self.params = Parameters.from_dict(merged)
 
     @property
     @abstractmethod
@@ -59,10 +63,21 @@ class ImagingModality(ABC):
         Returns
         -------
         str
-            Modality name (e.g., 'eeg', 'meg', 'fnirs_analytical_cw')
+            Modality name (e.g., 'eeg', 'meg', 'cw_fnirs')
             Used for results storage and identification.
         """
         pass
+
+    @property
+    def noise_model_name(self) -> str:
+        """
+        Return the canonical noise-model identifier for this modality.
+
+        This can differ from ``name`` when the runnable modality lives in a
+        short folder name but the physics/noise model has a more specific
+        historical key, such as ``eeg`` using ``eeg_openmeeg``.
+        """
+        return self.name
 
     @abstractmethod
     def setup_geometry(self) -> None:
@@ -119,22 +134,59 @@ class ImagingModality(ABC):
         """
         return Parameters()
 
-    def run(self, save_results: bool = True, default_run: bool = False) -> np.ndarray:
+    @classmethod
+    def scaled_up_params(cls) -> Parameters:
+        """Parameters for the maximally scaled-up configuration of this modality.
+
+        Returns the Parameters at which the channel capacity (bitrate) has
+        effectively reached its asymptote: pushing resolution / sensor count
+        further changes the bitrate by only a few percent while costing
+        substantially more compute. Use this when you want the best-case
+        information content a modality can deliver, rather than a representative
+        run from ``_get_default_modality_params()``.
+
+        Subclasses must override with concrete asymptotic values and a note on
+        what was swept to justify them.
         """
-        Execute complete pipeline: geometry → forward model → SVD → save.
+        raise NotImplementedError(
+            f"{cls.__name__} does not define a scaled-up (asymptotic-bitrate) "
+            "configuration. Override scaled_up_params() to declare it."
+        )
+
+    def forward_operator(self):
+        """Return this modality's forward model as a ForwardOperator.
+
+        Default: build the dense Jacobian via ``compute_forward_model()`` and
+        wrap it. Modalities whose forward model is too large to materialize
+        (e.g. scaled-up ultrasound) override this to return a matrix-free
+        :class:`guti.linop.ChunkedForwardOperator`, enabling the SLQ bitrate
+        path without ever forming the matrix.
+        """
+        from guti.linop import as_operator
+
+        return as_operator(self.compute_forward_model())
+
+    def run(self, save_results: bool = True, default_run: bool = False):
+        """
+        Execute the bitrate pipeline: geometry → forward model → estimate → save.
+
+        The estimator is chosen by ``params.bitrate_method``:
+          - ``"svd"`` (default): dense Jacobian → SVD → save spectrum; returns
+            the singular values.
+          - ``"slq"``: matrix-free forward operator → stochastic Lanczos
+            quadrature → save the bitrate scalar; returns the bitrate.
 
         Parameters
         ----------
         save_results : bool, default=True
-            Whether to save SVD results to disk with parameter tracking.
+            Whether to save results to disk with parameter tracking.
         default_run : bool, default=False
             Whether to save as default run configuration.
-
-        Returns
-        -------
-        np.ndarray
-            Singular values from SVD analysis.
         """
+        method = (self.params.bitrate_method or "svd").lower()
+        if method == "slq":
+            return self._run_slq(save_results=save_results, default_run=default_run)
+
         t0 = time.perf_counter()
         print(f"[{self.name}] Setting up geometry...")
         self.setup_geometry()
@@ -167,6 +219,66 @@ class ImagingModality(ABC):
         print(f"[{self.name}] Completed in {time.perf_counter() - t0:.2f} seconds")
         return singular_values
 
+    def _run_slq(self, save_results: bool = True, default_run: bool = False) -> float:
+        """Matrix-free SLQ bitrate pipeline (see :meth:`run`)."""
+        from guti.slq import bitrate_slq
+        from guti.hrf import is_hemodynamic
+
+        if is_hemodynamic(self.name):
+            # SLQ estimates the spatial bitrate from a matrix-free trace; it
+            # cannot carry the separable HRF |H(f)| temporal factor that
+            # hemodynamic modalities require. Use the SVD path instead.
+            raise ValueError(
+                f"Modality '{self.name}' is hemodynamic and must apply the HRF "
+                "temporal filter, which the SLQ path does not support. Use "
+                "bitrate_method='svd'."
+            )
+
+        t0 = time.perf_counter()
+        print(f"[{self.name}] Setting up geometry...")
+        self.setup_geometry()
+
+        print(f"[{self.name}] Building forward operator...")
+        op = self.forward_operator()
+        self.params.matrix_size = tuple(op.shape)
+        print(f"[{self.name}] Operator shape: {op.shape}")
+
+        noise = self.params.noise_full_brain
+        if noise is None:
+            raise ValueError(
+                "SLQ bitrate requires params.noise_full_brain (detector noise std) "
+                "to be set."
+            )
+
+        print(f"[{self.name}] Estimating bitrate via SLQ...")
+        start_time = time.perf_counter()
+        bitrate = bitrate_slq(
+            op,
+            noise_std=noise,
+            num_probes=self.params.slq_num_probes or 16,
+            num_lanczos=self.params.slq_num_lanczos or 40,
+            time_resolution=self.params.time_resolution or 1.0,
+        )
+        print(
+            f"[{self.name}] SLQ bitrate = {bitrate:.4f} bits/sample "
+            f"in {time.perf_counter() - start_time:.2f} seconds"
+        )
+
+        if save_results:
+            print(f"[{self.name}] Saving results...")
+            self.save_results(
+                None,
+                default_run=default_run,
+                extra_arrays={
+                    "bitrate": bitrate,
+                    "bitrate_method": "slq",
+                    "noise_level": noise,
+                },
+            )
+
+        print(f"[{self.name}] Completed in {time.perf_counter() - t0:.2f} seconds")
+        return bitrate
+
     def compute_svd(self) -> np.ndarray:
         """
         Perform SVD analysis with automatic GPU/CPU fallback.
@@ -180,20 +292,39 @@ class ImagingModality(ABC):
 
         return compute_svd_gpu(self.jacobian)
 
-    def save_results(self, singular_values: np.ndarray, default_run: bool = False) -> None:
+    def save_results(
+        self,
+        singular_values,
+        default_run: bool = False,
+        extra_arrays: Optional[dict] = None,
+    ) -> None:
         """
-        Save SVD results with parameter tracking.
+        Save results with parameter tracking.
 
         Parameters
         ----------
-        singular_values : np.ndarray
-            Singular values from SVD analysis.
+        singular_values : np.ndarray or None
+            Singular values from SVD analysis, or None for the SLQ path.
         default_run : bool, default=False
             Whether to save as default run configuration.
+        extra_arrays : dict, optional
+            Extra arrays/scalars to store (e.g. an SLQ ``bitrate``).
         """
         from guti.data_utils import save_svd
 
-        save_svd(singular_values, self.name, self.params, default_run=default_run)
+        arrays = {"modality_name": self.name}
+        if self.noise_model_name != self.name:
+            arrays["noise_model_name"] = self.noise_model_name
+        if extra_arrays is not None:
+            arrays.update(extra_arrays)
+
+        save_svd(
+            singular_values,
+            self.name,
+            self.params,
+            default_run=default_run,
+            extra_arrays=arrays,
+        )
 
     def __repr__(self) -> str:
         """String representation showing modality name and parameters."""

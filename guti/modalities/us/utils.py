@@ -1,289 +1,224 @@
-from guti.core import get_voxel_mask, get_sensor_positions, get_grid_positions, get_sensor_positions
-import jax.numpy as jnp
+"""Active ultrasound free-field propagation helpers.
+
+This module intentionally has no JAX/jwave dependency. The old heterogeneous
+jwave ultrasound helpers live under ``guti.modalities._legacy.us_jwave``.
+"""
+
+from __future__ import annotations
+
+import math
+
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
-import jax
-import jwave
-from jwave.geometry import Medium, TimeAxis
+
+from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
+from guti.linop import ChunkedForwardOperator
+
+# Free-field constants shared by every entry point (the in-process USModality
+# and the production analytical.py CLI), so the physics is defined exactly once.
+SOUND_SPEED_M_S = 1500.0          # water-like free-field approximation
+POINTS_PER_WAVELENGTH = 24        # voxel size = c / (PPW * f)
+TIME_DURATION_S = 120e-6          # simulated window
+RECEIVER_OFFSET_MM = 8.0          # receiver standoff from the scalp
+DEFAULT_CENTER_FREQ_HZ = 50e3
+DEFAULT_RECEIVER_BATCH = 256      # receivers per matrix-free row block
 
 
-def create_medium(central_frequency: float = 0.25e6, pad: int = None):
-    min_speed_of_sound = 1500.
-    PPW = 24
-    # Simulation parameters
-    dx_m = min_speed_of_sound / (PPW * central_frequency)
-    print(f"dx_m: {dx_m}")
-    dx = (dx_m, dx_m, dx_m)
+def free_field_source_spacing_mm(n_sources: int) -> float:
+    """Grid spacing (mm) giving ~``n_sources`` points in the brain hemisphere."""
+    volume_mm3 = (2.0 / 3.0) * np.pi * BRAIN_RADIUS**3
+    return (volume_mm3 / n_sources) ** (1.0 / 3.0)
 
-    tissues_map = get_voxel_mask(dx_m * 1e3, offset=8) #0.5mm resolution
-    if pad is not None:
-        if pad > 0:
-            # Positive pad: add padding around the domain
-            tissues_map = np.pad(tissues_map, ((pad, pad), (pad, pad), (pad, 0)), mode='constant', constant_values=0)
-        elif pad < 0:
-            # Negative pad: crop into the domain
-            tissues_map = tissues_map[-pad:pad, -pad:pad, -pad:]
-    N = tuple(tissues_map.shape)
-    print(f"Domain size: {N}")
-    domain = jwave.geometry.Domain(N, dx)
 
-    # Set sound speed values based on tissue type
-    # 0: outside (1500 m/s)
-    # 1: brain (1525 m/s)
-    # 2: skull (2400 m/s)
-    # 3: scalp (1530 m/s)
-    speed = jnp.ones_like(tissues_map, dtype=jnp.float32) * 1500.
-    speed = jnp.where(tissues_map == 1, 1525., speed)
-    speed = jnp.where(tissues_map == 2, 2400., speed)
-    speed = jnp.where(tissues_map == 3, 1530., speed)
-    sound_speed = jwave.FourierSeries(speed, domain)
-    # Create density map with same shell mask
-    # Use typical densities: ~1000 kg/m³ for water, ~2000 kg/m³ for the skull
-    density = jnp.where(tissues_map == 0, 1000., 1000.)
-    density = jnp.where(tissues_map == 1, 1000., 1000.)
-    density = jnp.where(tissues_map == 2, 2000., 1000.)
-    density = jnp.where(tissues_map == 3, 1000., 1000.)
-    density_field = jwave.FourierSeries(density, domain)
+def create_free_field_sources(
+    n_sources: int | None = None, *, source_spacing_mm: float | None = None
+) -> np.ndarray:
+    """Brain-grid source positions in **meters**.
 
-    pml_size = 7
-    # Pad the domain by the PML size to ensure proper absorption at boundaries
-    domain = jwave.geometry.Domain(N, dx)
-
-    extent = N[0] * dx[0]
-    time_duration = extent / min_speed_of_sound
-    print(f"time_duration: {time_duration}")
-
-    # Update the tissue masks to match the padded domain
-    medium = Medium(domain=domain, sound_speed=sound_speed, density=density_field, pml_size=pml_size)
-    time_axis = TimeAxis.from_medium(medium, cfl=0.15, t_end=time_duration)
-    # medium = jwave.geometry.Medium(domain=domain, sound_speed=sound_speed, density=density_field, pml_size=pml_size)
-    # time_axis = jwave.geometry.TimeAxis.from_medium(medium, cfl=0.15, t_end=50e-06)
-    # # time_axis = TimeAxis.from_medium(medium, cfl=0.3, t_end=5e-06)
-
-    brain_mask = tissues_map == 1
-    skull_mask = tissues_map == 2
-    scalp_mask = tissues_map == 3
-
-    return domain, medium, time_axis, brain_mask, skull_mask, scalp_mask
-
-def create_sources_real(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, pad: int = 0):
+    Provide either ``n_sources`` (spacing derived to hit that count) or an
+    explicit ``source_spacing_mm``.
     """
-    Create sources and source mask.
-    """
-    import jwave
-    N = domain.N
-    dx = domain.dx
+    if (n_sources is None) == (source_spacing_mm is None):
+        raise ValueError("Pass exactly one of n_sources or source_spacing_mm")
+    if source_spacing_mm is None:
+        source_spacing_mm = free_field_source_spacing_mm(n_sources)
+    return get_grid_positions(grid_spacing_mm=source_spacing_mm) * 1e-3
 
-    from guti.core import BRAIN_RADIUS
 
-    grid_spacing_mm = ((2/3) * np.pi * BRAIN_RADIUS**3 / n_sources)**(1/3)
+def create_free_field_receivers(n_sensors: int) -> np.ndarray:
+    """Ultrasound receiver positions in **meters**."""
+    return get_sensor_positions(n_sensors=n_sensors, offset=RECEIVER_OFFSET_MM) * 1e-3
 
-    # Get spiral source positions in world coordinates
-    if not inside:
-        source_positions = get_sensor_positions(n_sensors=n_sources, offset=8)
+
+def free_field_time_axis(center_frequency: float) -> tuple[np.ndarray, float]:
+    """Return ``(time_axis, time_step)`` for the free-field simulation window."""
+    time_step = 1e-1 / center_frequency
+    time_axis = np.arange(0, TIME_DURATION_S, time_step)
+    return time_axis, time_step
+
+
+def free_field_voxel_size(center_frequency: float) -> np.ndarray:
+    """Isotropic voxel size (m) = ``c / (PPW * f)`` per axis."""
+    dx_m = SOUND_SPEED_M_S / (POINTS_PER_WAVELENGTH * center_frequency)
+    return np.array([dx_m, dx_m, dx_m])
+
+
+def build_source_signal(
+    time_axis: np.ndarray,
+    center_frequency: float,
+    signal_type: str = "tone_burst",
+    signal_cycles: float = 2.0,
+    signal_window: str = "hann",
+) -> np.ndarray:
+    """Per-source excitation waveform: continuous wave or windowed tone burst."""
+    carrier = np.sin(2 * np.pi * time_axis * center_frequency)
+    if signal_type == "cw":
+        return carrier
+    if signal_type != "tone_burst":
+        raise ValueError(f"Unsupported signal_type={signal_type!r}")
+
+    if time_axis.size == 0:
+        return carrier
+    if signal_cycles <= 0:
+        raise ValueError("signal_cycles must be positive")
+
+    if time_axis.size == 1:
+        dt = 1.0 / (10.0 * center_frequency)
     else:
-        source_positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
-    print("Got source positions")
-    # Convert to voxel indices
-    source_positions_voxels = jnp.floor(source_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
-    x_real, y_real, z_real = source_positions[:, 0], source_positions[:, 1], source_positions[:, 2]
-    return np.stack([x_real, y_real, z_real], axis=1)*1e-3
+        dt = float(time_axis[1] - time_axis[0])
+    active_duration = signal_cycles / center_frequency
+    active_samples = max(1, min(time_axis.size, int(round(active_duration / dt))))
 
-def create_receivers_real(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
-    N = domain.N
-    dx = domain.dx
-    # Get spiral sensor positions in world coordinates
-    if spiral:
-        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
-    else:
-        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
-    print("Got sensor positions")
-    # Convert to voxel indices
-    sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
-    x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
-    return np.stack([x_real, y_real, z_real], axis=1)*1e-3
+    envelope = np.ones(active_samples, dtype=np.float64)
+    if signal_window == "hann":
+        if active_samples > 1:
+            envelope = np.hanning(active_samples)
+    elif signal_window != "rect":
+        raise ValueError(f"Unsupported signal_window={signal_window!r}")
+
+    signal = np.zeros_like(carrier)
+    signal[:active_samples] = carrier[:active_samples] * envelope
+    return signal
 
 
-# Create sources and receivers used for non-free field simulations
+def make_free_field_chunk_fn(
+    source_positions_t: torch.Tensor,
+    receiver_positions: np.ndarray,
+    source_signals_t: torch.Tensor,
+    *,
+    time_step: float,
+    center_frequency: float,
+    voxel_size_t: torch.Tensor,
+    temporal_sampling: int,
+    device: str,
+    num_sources: int,
+    use_complex_amplitudes: bool = False,
+):
+    """Return ``compute_chunk(start, end)`` for a batch of receivers.
 
-def create_sources(domain, time_axis, freq_Hz=0.25e6, inside: bool = False, n_sources: int = 400, pad: int = 0):
+    The closure yields the sensor-time rows for receivers ``[start:end)`` as a
+    ``((end-start) * nt, num_sources)`` float tensor — the single definition of
+    the receiver-batch chunk shared by ``USModality`` and ``analytical.py``.
     """
-    Create sources and source mask.
+
+    def compute_chunk(start: int, end: int) -> torch.Tensor:
+        receivers_t = torch.as_tensor(receiver_positions[start:end], device=device)
+        pf = simulate_free_field_propagation(
+            source_positions_t,
+            receivers_t,
+            source_signals_t,
+            time_step,
+            center_frequency,
+            voxel_size_t,
+            device=device,
+            compute_time_series=not use_complex_amplitudes,
+            temporal_sampling=temporal_sampling,
+        )
+        if use_complex_amplitudes:
+            return torch.cat([pf.real, pf.imag], dim=0).float()
+        # (batch, n_sources, nt) -> (batch*nt, n_sources)
+        return pf.permute(0, 2, 1).reshape(-1, num_sources).float()
+
+    return compute_chunk
+
+
+def build_free_field_operator(
+    source_positions_m: np.ndarray,
+    receiver_positions_m: np.ndarray,
+    *,
+    center_frequency: float = DEFAULT_CENTER_FREQ_HZ,
+    temporal_sampling: int = 1,
+    source_signals: np.ndarray | None = None,
+    signal_type: str = "cw",
+    signal_cycles: float = 2.0,
+    signal_window: str = "hann",
+    receiver_batch: int = DEFAULT_RECEIVER_BATCH,
+    backend: str = "torch",
+    device: str = "cpu",
+    dtype=None,
+) -> tuple[ChunkedForwardOperator, dict]:
+    """Assemble the matrix-free free-field forward operator.
+
+    Returns ``(operator, meta)`` where ``meta`` carries ``time_step``,
+    ``time_resolution`` (``time_step * temporal_sampling``), ``nt`` and
+    ``n_outputs``. Positions are in meters. When ``source_signals`` is omitted a
+    per-source waveform is built from ``signal_type`` and tiled across sources.
     """
-    import jwave
-    N = domain.N
-    dx = domain.dx
+    if dtype is None:
+        dtype = torch.float32
+    time_axis, time_step = free_field_time_axis(center_frequency)
+    nt = len(range(0, time_axis.shape[0], temporal_sampling))
+    n_sources = len(source_positions_m)
+    n_receivers = len(receiver_positions_m)
 
-    from guti.core import BRAIN_RADIUS
+    if source_signals is None:
+        waveform = build_source_signal(
+            time_axis,
+            center_frequency,
+            signal_type=signal_type,
+            signal_cycles=signal_cycles,
+            signal_window=signal_window,
+        )
+        source_signals = np.tile(waveform, (n_sources, 1))
 
-    grid_spacing_mm = ((2/3) * np.pi * BRAIN_RADIUS**3 / n_sources)**(1/3)
+    source_positions_t = torch.as_tensor(source_positions_m, device=device)
+    source_signals_t = torch.as_tensor(source_signals, device=device)
+    voxel_size_t = torch.as_tensor(free_field_voxel_size(center_frequency), device=device)
 
-    # Get spiral source positions in world coordinates
-    if not inside:
-        source_positions = get_sensor_positions(n_sensors=n_sources, offset=8)
-    else:
-        source_positions = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
-    print("Got source positions")
-    # Convert to voxel indices
-    source_positions_voxels = jnp.floor(source_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
-    x_real, y_real, z_real = source_positions[:, 0], source_positions[:, 1], source_positions[:, 2]
-    x, y, z = source_positions_voxels[:, 0], source_positions_voxels[:, 1], source_positions_voxels[:, 2]
-    pad_x = pad_y = pad_z = pad
-    # Filter positions within the padded volume
-    valid_indices = (
-        (x_real >= -pad_x * dx[0] * 1e3) & (x_real < N[0] * dx[0] * 1e3 + pad_x * dx[0] * 1e3) &
-        (y_real >= -pad_y * dx[1] * 1e3) & (y_real < N[1] * dx[1] * 1e3 + pad_y * dx[1] * 1e3) &
-        (z_real >= -pad_z * dx[2] * 1e3) & (z_real < N[2] * dx[2] * 1e3 + pad_z * dx[2] * 1e3)
+    chunk_fn = make_free_field_chunk_fn(
+        source_positions_t,
+        receiver_positions_m,
+        source_signals_t,
+        time_step=time_step,
+        center_frequency=center_frequency,
+        voxel_size_t=voxel_size_t,
+        temporal_sampling=temporal_sampling,
+        device=device,
+        num_sources=n_sources,
     )
-    x += pad_x; y += pad_y; z += pad_z
-    x, y, z = x[valid_indices], y[valid_indices], z[valid_indices]
-    N_sources = x.shape[0]
 
-    # Create source signals
-    signal = jnp.sin(2 * jnp.pi * freq_Hz * time_axis.to_array())
-    T = 1 / freq_Hz
-    max_signal_index = int(T / time_axis.dt)
-    signal = signal.at[max_signal_index * 2 :].set(0)
-    signals = jnp.stack([signal] * N_sources)
-
-    # Instantiate sources
-    sources = jwave.geometry.Sources(positions=(x, y, z), signals=signals, dt=time_axis.dt, domain=domain)
-
-    # Create source mask
-    source_mask = jnp.full((1,) + N, False)
-    source_mask = source_mask.at[:, x, y, z].set(True)
-
-    return sources, source_mask
-
-
-def create_receivers(domain, time_axis, freq_Hz=0.25e6, n_sensors: int = 200, start_n: int = 0, end_n: int | None = None, spiral: bool = True, pad: int = 0):
-    N = domain.N
-    dx = domain.dx
-    # Get spiral sensor positions in world coordinates
-    if spiral:
-        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
-    else:
-        sensor_positions = get_sensor_positions(n_sensors=n_sensors, offset=8, start_n=start_n, end_n=end_n)
-    print("Got sensor positions")
-    # Convert to voxel indices
-    sensor_positions_voxels = jnp.floor(sensor_positions / (jnp.array(dx) * 1e3)).astype(jnp.int32)
-    x_real, y_real, z_real = sensor_positions[:, 0], sensor_positions[:, 1], sensor_positions[:, 2]
-
-    x, y, z = sensor_positions_voxels[:, 0], sensor_positions_voxels[:, 1], sensor_positions_voxels[:, 2]
-    pad_x = pad_y = pad_z = pad
-    # Filter positions within the padded volume
-    valid_indices = (
-        (x_real >= -pad_x * dx[0] * 1e3) & (x_real < N[0] * dx[0] * 1e3 + pad_x * dx[0] * 1e3) &
-        (y_real >= -pad_y * dx[1] * 1e3) & (y_real < N[1] * dx[1] * 1e3 + pad_y * dx[1] * 1e3) &
-        (z_real >= -pad_z * dx[2] * 1e3) & (z_real < N[2] * dx[2] * 1e3 + pad_z * dx[2] * 1e3)
+    operator = ChunkedForwardOperator.from_item_batches(
+        n_sources,
+        n_receivers,
+        nt,
+        chunk_fn,
+        batch_size=receiver_batch,
+        backend=backend,
+        dtype=dtype,
+        device=device,
     )
-    x += pad_x; y += pad_y; z += pad_z
-    x, y, z = x[valid_indices], y[valid_indices], z[valid_indices]
-
-    # Create receiver mask
-    receivers_mask = jnp.full(N, False)
-    receivers_mask = receivers_mask.at[x, y, z].set(True)
-    receiver_positions = jnp.argwhere(receivers_mask)
-
-    # Instantiate sensors
-    sensors = jwave.geometry.Sensors(positions=tuple(receiver_positions.T.tolist()))
-    sensors_all = jwave.geometry.Sensors(positions=tuple(jnp.argwhere(jnp.ones(N)).T.tolist()))
-    return sensors, sensors_all, receivers_mask
-
-def plot_medium(medium, sources, sensors, time_axis):
-    N = medium.domain.N
-    dx = medium.domain.dx
-    
-    # Plot the speed of sound map with sources and receivers overlaid
-    plt.figure(figsize=(10, 8))
-    plt.imshow(medium.sound_speed.on_grid[N[0]//2, :, :, 0].T, cmap='viridis', origin='lower')
-    plt.colorbar(label='Speed of Sound (m/s)')
-    
-    # Convert world coordinates (mm) to voxel indices for plotting
-    if sources is not None and len(sources) > 0:
-        # sources are in mm, convert to voxel indices
-        sources_voxels = sources / (np.array(dx) * 1e3)
-        plt.scatter(sources_voxels[:, 1], sources_voxels[:, 2], c='red', s=10, alpha=0.5, label='Sources', edgecolors='black', linewidths=0.5)
-    
-    if sensors is not None and len(sensors) > 0:
-        # sensors are in mm, convert to voxel indices
-        sensors_voxels = sensors / (np.array(dx) * 1e3)
-        plt.scatter(sensors_voxels[:, 1], sensors_voxels[:, 2], c='blue', s=10, alpha=0.5, label='Receivers', edgecolors='black', linewidths=0.5)
-    
-    plt.title('Speed of Sound Distribution with Sources and Receivers')
-    plt.xlabel('y (grid points)')
-    plt.ylabel('z (grid points)')
-    plt.legend()
-    plt.savefig('speed_of_sound.png')
-
-    # Plot the source locations
-    plt.figure(figsize=(10, 8))
-    plt.imshow(np.ones((N[1], N[2])), cmap='binary', origin='lower')
-    # Overlay source positions as scatter plot
-    if sources is not None and len(sources) > 0:
-        sources_voxels = sources / (np.array(dx) * 1e3)
-        plt.scatter(sources_voxels[:, 1], sources_voxels[:, 2], c='red', s=10, alpha=0.5, label='Sources')
-    plt.title('Source Locations')
-    plt.xlabel('y (grid points)')
-    plt.ylabel('z (grid points)')
-    plt.colorbar(label='Source Present')
-    plt.legend()
-    plt.savefig('source_mask.png')
-
-    # Plot the receivers locations
-    plt.figure(figsize=(10, 8))
-    plt.imshow(np.ones((N[1], N[2])), cmap='binary', origin='lower')
-    # Overlay sensor positions as scatter plot
-    if sensors is not None and len(sensors) > 0:
-        sensors_voxels = sensors / (np.array(dx) * 1e3)
-        plt.scatter(sensors_voxels[:, 1], sensors_voxels[:, 2], c='blue', s=10, alpha=0.5, label='Receivers')
-    plt.title('Receivers Locations')
-    plt.xlabel('y (grid points)')
-    plt.ylabel('z (grid points)')
-    plt.colorbar(label='Receivers Present')
-    plt.legend()
-    plt.savefig('receivers_mask.png')
-
-    # Plot the signal used for sources
-    # Generate a sample signal based on time_axis and center frequency
-    signal = np.sin(2 * np.pi * time_axis.to_array() * 0.25e6)  # Default center frequency
-    plt.figure(figsize=(10, 4))
-    plt.plot(time_axis.to_array() * 1e6, signal)  # Convert time to microseconds
-    plt.title('Source Signal')
-    plt.xlabel('Time (μs)')
-    plt.ylabel('Amplitude')
-    plt.grid(True)
-    plt.savefig('source_signal.png')
-
-
-
-# Define function that converts the waveforms at the receiver sensors, to the final sensor output. In this case, we define the final sensor output to be the arrival time of the waveform for each sensor.
-
-def find_arrival_time(signal2, sources):
-  signal = sources.signals[0]
-  # Cross-correlate with signal to get arrival times
-
-  correlation = jnp.correlate(signal2, signal, mode='full')[-len(signal):]
-
-  max_idx = jnp.argmax(correlation)
-  correlation = correlation / (jnp.max(correlation) + 1e-8)  # Normalize for numerical stability
-
-  # Use softmax-based differentiable argmax
-  # Temperature parameter controls sharpness of the softmax
-  temperature = 1e-2
-  softmax_weights = jax.nn.softmax(correlation / temperature, axis=0)
-
-  # Compute weighted sum of time indices
-  time_axis_array = time_axis.to_array()
-  arrival_times = jnp.sum(softmax_weights * time_axis_array, axis=0)
-
-  return arrival_times
+    meta = {
+        "time_step": time_step,
+        "time_resolution": time_step * temporal_sampling,
+        "nt": nt,
+        "n_outputs": n_receivers * nt,
+    }
+    return operator, meta
 
 
 def simulate_free_field_propagation(
     source_positions: torch.Tensor,
-    receiver_positions: torch.Tensor, 
+    receiver_positions: torch.Tensor,
     source_signals: torch.Tensor,
     time_step: float,
     center_frequency: float,
@@ -292,113 +227,90 @@ def simulate_free_field_propagation(
     compute_time_series: bool = False,
     temporal_sampling: int = 1,
 ) -> torch.Tensor:
+    """Simulate homogeneous free-field ultrasound propagation.
+
+    Positions are in meters. ``source_signals`` has shape
+    ``(n_sources, n_time_steps)``. When ``compute_time_series`` is true, the
+    result has shape ``(n_receivers, n_sources, ceil(n_time_steps / stride))``.
     """
-    Simulates free field propagation using a free field propagator.
-    
-    Args:
-        source_positions: Source positions in voxel coordinates [n_sources, 3]
-        receiver_positions: Receiver positions in voxel coordinates [n_receivers, 3]
-        source_signals: Source waveforms [n_sources, n_time_steps]
-        time_step: Time step in seconds
-        center_frequency: Base frequency in Hz
-        voxel_size: Voxel size in meters [3]
-        device: Device to run computation on
-        compute_time_series: If True, returns the time-resolved pressure field
-            sampled every ``temporal_sampling`` steps with shape
-            [n_receivers, n_sources, ⌈n_time_steps/temporal_sampling⌉].
-            If False (default), returns only the spatial propagator matrix
-            [n_receivers, n_sources].
-        temporal_sampling: Positive integer stride that determines the temporal
-            subsampling factor applied when ``compute_time_series`` is True. A
-            value of 1 (default) keeps the original resolution, whereas larger
-            values reduce memory usage by computing only every *temporal_sampling*-th
-            time sample.
-        
-    Returns:
-        Tensor of shape depending on ``compute_time_series`` (see above).
-    """
-    # Free field medium properties (water-like)
-    sound_speed = 1500.0  # Speed of sound in m/s
-    
-    # Move tensors to device
+    if temporal_sampling < 1:
+        raise ValueError("temporal_sampling must be a positive integer >= 1")
+
+    sound_speed = 1500.0  # m/s, water-like free-field approximation
+
     source_positions = source_positions.to(device)
     receiver_positions = receiver_positions.to(device)
     source_signals = source_signals.to(device)
     voxel_size = voxel_size.to(device)
-    
-    # Calculate distances between all source-receiver pairs
+
     distances = torch.cdist(
-        receiver_positions.float().unsqueeze(0), 
-        source_positions.float().unsqueeze(0)
+        receiver_positions.float().unsqueeze(0),
+        source_positions.float().unsqueeze(0),
     )[0]
 
-    # Check for zero distances which would cause division by zero
     zero_distances = distances == 0
     if torch.any(zero_distances):
-        print("Found zero distances which would cause division by zero")
-        # Replace zeros with small epsilon to avoid division by zero
-        distances = torch.where(zero_distances, torch.tensor(1e-10, device=device), distances)
-    
-    # Calculate expected pressure based on point source formula from acoustic wave theory
-    # Combines point source pressure equation p = (4πR)^(-1) * m''(t-R/c) (see Pierce's acoustics formula 4.3.8)
-    # with K-wave's pressure-to-density source conversion
-    # The mass source acceleration m'' is related to pressure through the wavenumber k
-    # Final formula: P = 1/(4πR) * (2π/λ) * peak_pressure * dx^2
-    # where R is distance, λ is wavelength, dx is voxel size
-    
-    # Calculate propagator factor (spatial Green's function component)
+        eps = torch.tensor(1e-10, dtype=distances.dtype, device=device)
+        distances = torch.where(zero_distances, eps, distances)
+
+    # Scale by source-cell volume, not simulation voxel size. This keeps sweeps
+    # tied to source discretization rather than medium-resolution dx.
+    num_sources = source_signals.shape[0]
+    source_volume_m3 = (2.0 / 3.0) * np.pi * (BRAIN_RADIUS * 1e-3) ** 3
+    source_cell_volume = source_volume_m3 / float(num_sources)
+
     wavelength = sound_speed / center_frequency
     wavenumber = 2 * torch.pi / wavelength
-    spatial_step = torch.mean(voxel_size)
-    propagator_factor = (2 * wavenumber * spatial_step**2) / (4 * torch.pi * distances)
-    
-    # If only the propagator matrix is required, return early
+    propagator_factor = (
+        2 * wavenumber * source_cell_volume
+    ) / (4 * torch.pi * distances)
+
     if not compute_time_series:
         return propagator_factor * torch.exp(-1j * wavenumber * distances)
-    
-    # Calculate retardation times and time steps (only needed when computing full time series)
+
     travel_times = distances / sound_speed
-    delay_steps = (torch.floor(travel_times / time_step)).int()
-    
-    num_sources = source_signals.shape[0]
+    delay_steps = torch.floor(travel_times / time_step).int()
+
     num_receivers = receiver_positions.shape[0]
     num_time_steps = source_signals.shape[1]
-    
-    # Determine which time indices will be computed based on temporal sampling
-    if temporal_sampling < 1:
-        raise ValueError("temporal_sampling must be a positive integer >= 1")
+    selected_time_indices = torch.arange(
+        0,
+        num_time_steps,
+        temporal_sampling,
+        device=device,
+    )
 
-    selected_time_indices = torch.arange(0, num_time_steps, temporal_sampling, device=device)
-    
-    # Pad source waveforms with zeros at the beginning
-    padded_source_signals = torch.cat([
-        torch.zeros(num_sources, 1, device=device, dtype=source_signals.dtype), 
-        source_signals
-    ], dim=1)
-    
-    # Create source indices for broadcasting
-    source_idx = torch.arange(num_sources).unsqueeze(0).expand(num_receivers, num_sources).to(device)
-    
-    # ------------------------------------------------------------------
-    # Serial computation across the selected time steps to save memory
-    # ------------------------------------------------------------------
-    n_selected = selected_time_indices.shape[0]
+    padded_source_signals = torch.cat(
+        [
+            torch.zeros(
+                num_sources,
+                1,
+                device=device,
+                dtype=source_signals.dtype,
+            ),
+            source_signals,
+        ],
+        dim=1,
+    )
+
+    source_idx = torch.arange(num_sources, device=device).unsqueeze(0).expand(
+        num_receivers,
+        num_sources,
+    )
     pressure_field = torch.empty(
-        (num_receivers, num_sources, n_selected),
+        (num_receivers, num_sources, selected_time_indices.shape[0]),
         dtype=padded_source_signals.dtype,
         device=device,
     )
 
     for idx, t_idx in enumerate(selected_time_indices):
-        # Compute delayed time indices for this specific time step
         time_idx_matrix = t_idx - delay_steps + 1
-        time_idx_matrix = torch.clamp(time_idx_matrix, min=0, max=padded_source_signals.shape[1] - 1)
+        time_idx_matrix = torch.clamp(
+            time_idx_matrix,
+            min=0,
+            max=padded_source_signals.shape[1] - 1,
+        )
+        delayed_signals = padded_source_signals[source_idx, time_idx_matrix]
+        pressure_field[:, :, idx] = delayed_signals * propagator_factor
 
-        # Gather delayed signals for the current time step
-        delayed_signals_step = padded_source_signals[source_idx, time_idx_matrix]
-
-        # Apply propagator factor and store in output tensor
-        pressure_field[:, :, idx] = delayed_signals_step * propagator_factor
-
-    # Return the serially computed pressure field
     return pressure_field

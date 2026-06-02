@@ -2,15 +2,15 @@
 
 ### Channel Capacities
 
-![Birate](./bitrate.png)
+![Birate](./results/bitrate.png)
 
 ### Spatial Channel Capacities
 
-![Spatial Channel Capacities](./spatial_channel_capacity.png?v=2)
+![Spatial Channel Capacities](./results/spatial_channel_capacity.png?v=2)
 
 ### SVD Spectrum
 
-![Singular value spectrum](./spectrum.png)
+![Singular value spectrum](./results/spectrum.png)
 
 ### Explanation
 

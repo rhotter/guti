@@ -95,12 +95,11 @@ def surface_impedance_by_degree(layers: tuple[Layer, ...], lmax: int) -> np.ndar
             # Shell basis at x = r/radius:
             # V = C*x^ell + D*x^-(ell+1)
             # q = (sigma/radius) * dV/dx
-            a = lam**ell
-            b = lam ** (-(ell + 1))
-            c = (sigma / radius) * ell * lam ** (ell - 1)
-            d = -(sigma / radius) * (ell + 1) * lam ** (-(ell + 2))
-
-            ratio = (c - admittance * a) / (admittance * b - d)
+            lam_2ell = lam ** (2 * ell)
+            ratio = (
+                (sigma / radius) * ell * lam_2ell
+                - admittance * lam_2ell * lam
+            ) / (admittance + (sigma / radius) * (ell + 1) / lam)
             admittance = (sigma / radius) * (
                 ell - (ell + 1) * ratio
             ) / (1.0 + ratio)
@@ -191,7 +190,12 @@ def write_csv(rows: list[dict[str, float]], path: Path) -> None:
         writer.writerows(rows)
 
 
-def plot_rows(rows: list[dict[str, float]], path: Path, layers: tuple[Layer, ...]) -> None:
+def plot_rows(
+    rows: list[dict[str, float]],
+    path: Path,
+    layers: tuple[Layer, ...],
+    log_y: bool = False,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     areas = np.array([row["area_cm2"] for row in rows])
     resistance = np.array([row["resistance_ohm"] for row in rows])
@@ -200,12 +204,31 @@ def plot_rows(rows: list[dict[str, float]], path: Path, layers: tuple[Layer, ...
     ax.plot(areas, resistance, color="#16718f", linewidth=2.6)
     ax.scatter(areas[::7], resistance[::7], color="#16718f", s=18, zorder=3)
     ax.set_xscale("log")
+    if log_y:
+        ax.set_yscale("log")
     ax.set_xlim(areas.min() * 0.92, areas.max() * 1.08)
-    ax.set_xticks([0.25, 0.5, 1, 2, 5, 10, 25])
-    ax.set_xticklabels(["0.25", "0.5", "1", "2", "5", "10", "25"])
+    candidate_ticks = [
+        1e-6,
+        1e-5,
+        1e-4,
+        1e-3,
+        1e-2,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2,
+        5,
+        10,
+        25,
+    ]
+    x_ticks = [tick for tick in candidate_ticks if areas.min() <= tick <= areas.max()]
+    ax.set_xticks(x_ticks)
+    ax.set_xticklabels([f"{tick:g}" for tick in x_ticks])
     ax.set_xlabel("Circular electrode area (cm^2, log scale)")
     ax.set_ylabel("Effective head volume resistance (ohm)")
-    ax.set_title("Layered spherical EEG scalp resistance")
+    title_suffix = " (log-log)" if log_y else ""
+    ax.set_title(f"Layered spherical EEG scalp resistance{title_suffix}")
     ax.grid(True, which="both", color="#d6dadd", linewidth=0.8)
 
     layer_text = "\n".join(
@@ -245,7 +268,12 @@ def write_summary(
     def closest(area: float) -> dict[str, float]:
         return min(rows, key=lambda row: abs(math.log(row["area_cm2"] / area)))
 
-    selected = [closest(area) for area in [0.25, 0.5, 1, 2, 5, 10, 25]]
+    candidate_areas = [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25]
+    selected = [
+        closest(area)
+        for area in candidate_areas
+        if rows[0]["area_cm2"] <= area <= rows[-1]["area_cm2"]
+    ]
     log_area = np.log(np.array([row["area_cm2"] for row in rows]))
     log_resistance = np.log(np.array([row["resistance_ohm"] for row in rows]))
     slope, intercept = np.polyfit(log_area, log_resistance, 1)
@@ -318,6 +346,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=REPO_ROOT / "results" / "eeg_scalp_resistance_summary.txt",
     )
+    parser.add_argument("--log-y", action="store_true", help="Use a logarithmic y-axis.")
     return parser.parse_args()
 
 
@@ -333,7 +362,7 @@ def main() -> None:
         layers=layers,
     )
     write_csv(rows, args.csv)
-    plot_rows(rows, args.plot, layers)
+    plot_rows(rows, args.plot, layers, log_y=args.log_y)
     write_summary(rows, args.summary, layers, args.spacing_cm, args.lmax)
 
     for area in [0.25, 1.0, 5.0, 25.0]:
