@@ -264,15 +264,21 @@ def _build_remote_result(job_spec: dict[str, Any]) -> dict[str, Any]:
         npz_payload = latest_npz.read_bytes()
 
     result_record = dict(analytical_record or {})
+    realized_frequency_khz = result_record.get("frequency_khz", job_spec.get("frequency_khz"))
+    realized_n_sources = result_record.get("n_sources", job_spec.get("n_sources"))
+    realized_n_sensors = result_record.get("n_sensors", job_spec.get("n_sensors"))
     result_record.update(
         {
             "status": "ok" if returncode == 0 else "failed",
             "index": job_spec.get("index"),
             "total": job_spec.get("total"),
             "label": label,
-            "frequency_khz": job_spec.get("frequency_khz"),
-            "n_sources": job_spec.get("n_sources"),
-            "n_sensors": job_spec.get("n_sensors"),
+            "frequency_khz": realized_frequency_khz,
+            "n_sources": realized_n_sources,
+            "n_sensors": realized_n_sensors,
+            "requested_frequency_khz": job_spec.get("frequency_khz"),
+            "requested_n_sources": job_spec.get("n_sources"),
+            "requested_n_sensors": job_spec.get("n_sensors"),
             "analytical_args": job_spec["analytical_args"],
             "returncode": returncode,
             "modal_gpu_type": os.environ.get("MODAL_GPU_TYPE", "H100"),

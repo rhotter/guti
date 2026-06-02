@@ -43,9 +43,14 @@ class Parameters:
     time_resolution: Optional[float] = None
     comment: Optional[str] = None
     noise_full_brain: Optional[float] = None
+    noise_covariance_model: Optional[str] = None
     noise_correlation_length_mm: Optional[float] = None
     noise_correlation_kernel: Optional[str] = None
     noise_distance_metric: Optional[str] = None
+    noise_voxel_resolution_mm: Optional[float] = None
+    noise_solver: Optional[str] = None
+    noise_absolute_scale: Optional[bool] = None
+    noise_sensor_components: Optional[str] = None
     matrix_size: Optional[tuple[int, int]] = None
     vincent_trick: Optional[bool] = None
     frequency_hz: Optional[float] = None
@@ -64,6 +69,20 @@ class Parameters:
     bitrate_method: Optional[str] = None
     slq_num_probes: Optional[int] = None
     slq_num_lanczos: Optional[int] = None
+
+    # output frequency spectrum for bitrate/capacity calculations
+    output_spectrum_type: Optional[str] = None
+    output_spectrum_beta: Optional[float] = None
+    output_spectrum_min_freq_hz: Optional[float] = None
+    output_spectrum_max_freq_hz: Optional[float] = None
+    output_spectrum_bin_width_hz: Optional[float] = None
+
+    # optional noise frequency spectrum for bitrate/capacity calculations
+    noise_spectrum_type: Optional[str] = None
+    noise_spectrum_beta: Optional[float] = None
+    noise_spectrum_min_freq_hz: Optional[float] = None
+    noise_spectrum_max_freq_hz: Optional[float] = None
+    noise_spectrum_bin_width_hz: Optional[float] = None
 
     # for td_fnirs
     n_time_gates: Optional[int] = None

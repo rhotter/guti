@@ -73,9 +73,8 @@ class ImagingModality(ABC):
         """
         Return the canonical noise-model identifier for this modality.
 
-        This can differ from ``name`` when the runnable modality lives in a
-        short folder name but the physics/noise model has a more specific
-        historical key, such as ``eeg`` using ``eeg_openmeeg``.
+        This can differ from ``name`` when a runnable modality has variants that
+        share one implementation but use distinct noise models.
         """
         return self.name
 
@@ -165,6 +164,18 @@ class ImagingModality(ABC):
         from guti.linop import as_operator
 
         return as_operator(self.compute_forward_model())
+
+    def output_frequency_spectrum_kwargs(self) -> dict:
+        """Return capacity kwargs for this modality's default output spectrum."""
+        from guti.capacity import output_frequency_spectrum_kwargs_from_params
+
+        return output_frequency_spectrum_kwargs_from_params(self.params)
+
+    def frequency_spectrum_kwargs(self) -> dict:
+        """Return capacity kwargs for this modality's output/noise spectra."""
+        from guti.capacity import frequency_spectrum_kwargs_from_params
+
+        return frequency_spectrum_kwargs_from_params(self.params)
 
     def run(self, save_results: bool = True, default_run: bool = False):
         """

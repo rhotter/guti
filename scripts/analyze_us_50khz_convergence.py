@@ -29,7 +29,7 @@ from guti.parameters import Parameters
 
 
 FREQUENCY_HZ = 50_000.0
-CANONICAL_PATH = Path("results/us_analytical_svd_spectrum.npz")
+CANONICAL_PATH = Path("results/us_svd_spectrum.npz")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,8 +119,8 @@ def matrix_shape_from_params(params: Parameters, n_singular_values: int) -> tupl
 def load_sweep_rows(input_dir: Path, input_power_convention_override: str = "auto") -> list[dict[str, Any]]:
     json_records = load_json_records(input_dir)
     rows: list[dict[str, Any]] = []
-    average_output_power = compute_average_output_power("us_analytical")
-    physical_total_source_power = compute_input_amplitude("us_analytical") ** 2
+    average_output_power = compute_average_output_power("us")
+    physical_total_source_power = compute_input_amplitude("us") ** 2
 
     for path in sorted(input_dir.glob("*.npz")):
         data = np.load(path, allow_pickle=True)
@@ -148,7 +148,7 @@ def load_sweep_rows(input_dir: Path, input_power_convention_override: str = "aut
         n_outputs, n_sources = matrix_shape_from_params(params, len(singular_values))
         time_resolution = float(params.time_resolution or 1.0)
         output_noise = compute_output_noise_std(
-            "us_analytical",
+            "us",
             n_sensors=int(n_sensors),
             frequency_hz=frequency_hz,
         )

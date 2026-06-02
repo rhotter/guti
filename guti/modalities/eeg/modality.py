@@ -1,28 +1,20 @@
-"""EEG imaging modality (OpenMEEG BEM forward model).
+"""EEG imaging modality (OpenMEEG BEM forward model)."""
 
-Unlike MEG, the EEG forward problem depends on the skull/scalp conductivities,
-so there is no simple closed form for the 3-layer head — the lead field is
-assembled with OpenMEEG via a boundary-element pipeline.
-
-``compute_forward_model``:
-  1. writes the 3-layer BEM model + source/sensor geometry (guti.core), then
-  2. assembles the lead field in-process with OpenMEEG's Python bindings
-     (HeadMat → invert → DipSourceMat / Head2EEGMat → GainEEG), the same
-     pipeline the ``om_assemble``/``om_minverser``/``om_gain`` CLI tools run,
-     and returns the gain as a dense array (n_sensors x 3*n_grid_points).
-
-Requires the ``openmeeg`` Python package; it is imported lazily so the class
-can be imported/inspected without it. This path has not been executed in the
-current environment (OpenMEEG not installed).
-"""
+from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
-
 from guti.base_modality import ImagingModality
+from guti.capacity import (
+    DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+    DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+    DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
+)
 from guti.parameters import Parameters
 from guti.core import create_eeg_bem_model, get_grid_positions
+from guti.modalities.eeg.compute_eeg_leadfield import (
+    compute_eeg_leadfield_from_bem_dir,
+)
 
 _HERE = Path(__file__).parent
 _MODEL_DIR = _HERE / "_openmeeg_model"
@@ -33,15 +25,16 @@ class EEGModality(ImagingModality):
     def name(self) -> str:
         return "eeg"
 
-    @property
-    def noise_model_name(self) -> str:
-        return "eeg_openmeeg"
-
     def _get_default_modality_params(self) -> Parameters:
         return Parameters(
             num_sensors=256,
             source_spacing_mm=5.0,
             grid_resolution_mm=20.0,
+            output_spectrum_type="power_law",
+            output_spectrum_beta=1.4,
+            output_spectrum_min_freq_hz=DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+            output_spectrum_max_freq_hz=DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+            output_spectrum_bin_width_hz=DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
         )
 
     @classmethod
@@ -59,6 +52,11 @@ class EEGModality(ImagingModality):
             num_sensors=512,
             source_spacing_mm=3.0,
             grid_resolution_mm=15.0,
+            output_spectrum_type="power_law",
+            output_spectrum_beta=1.4,
+            output_spectrum_min_freq_hz=DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
+            output_spectrum_max_freq_hz=DEFAULT_NEURAL_SPECTRUM_MAX_FREQ_HZ,
+            output_spectrum_bin_width_hz=DEFAULT_OUTPUT_POWER_LAW_BIN_WIDTH_HZ,
         )
 
     def setup_geometry(self) -> None:
@@ -68,14 +66,6 @@ class EEGModality(ImagingModality):
         self.params.num_brain_grid_points = len(self.sources)
 
     def compute_forward_model(self) -> np.ndarray:
-        try:
-            import openmeeg as om
-        except ImportError as e:
-            raise ImportError(
-                "EEG forward model needs the OpenMEEG Python bindings; "
-                "install with `pip install openmeeg` (or `conda install -c conda-forge openmeeg`)."
-            ) from e
-
         _MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
         create_eeg_bem_model(
@@ -85,22 +75,7 @@ class EEGModality(ImagingModality):
             output_dir=str(_MODEL_DIR),
         )
 
-        # In-process equivalent of the om_assemble / om_minverser / om_gain CLI:
-        geom = om.read_geometry(
-            str(_MODEL_DIR / "sphere_head.geom"),
-            str(_MODEL_DIR / "sphere_head.cond"),
-        )
-        dipoles = om.Matrix(str(_MODEL_DIR / "dipole_locations.txt"))
-        electrodes = om.Sensors(str(_MODEL_DIR / "sensor_locations.txt"), geom)
-
-        hm = om.HeadMat(geom)
-        hm.invert()  # in place; replaces om_minverser (GainEEG wants HM^{-1})
-        dsm = om.DipSourceMat(geom, dipoles, "Brain")  # -DSM (dipoles live in the Brain domain)
-        h2em = om.Head2EEGMat(geom, electrodes)  # -H2EM
-        gain = om.GainEEG(hm, dsm, h2em)  # -EEG
-
-        # gain is (n_sensors x 3*n_grid_points); copy out of the OpenMEEG buffer.
-        return np.array(gain.array(), dtype=np.float64)
+        return compute_eeg_leadfield_from_bem_dir(_MODEL_DIR)
 
 
 if __name__ == "__main__":

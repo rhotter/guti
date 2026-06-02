@@ -28,7 +28,7 @@ Extension: /Users/nudge/.pyenv/versions/venv/bin/python run_modal_us_analytical_
 
 ## Canonical Result
 
-The canonical result was updated at `results/us_analytical_svd_spectrum.npz` from `results/variants/us_free_field_analytical_50khz_convergence_20260531/002_50khz_44000src_6000sensors__5e7ae3d4.npz`.
+The canonical result was updated at `results/us_svd_spectrum.npz` from `results/variants/us_free_field_analytical_50khz_convergence_20260531/002_50khz_44000src_6000sensors__5e7ae3d4.npz`.
 
 | quantity | value |
 | --- | ---: |

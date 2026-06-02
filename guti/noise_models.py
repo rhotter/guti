@@ -53,6 +53,12 @@ class NoiseModel:
     typical_signal_amplitude: float = 0.0
     typical_signal_notes: str = ""
 
+    # Literature single-channel amplitude SNR for a canonical fixed-depth source,
+    # used by the empirically anchored capacity path (EEG, where the BEM absolute
+    # gain is unreliable). 0.0 ⇒ anchoring not used for this modality.
+    anchor_snr_today: float = 0.0
+    anchor_snr_fundamental: float = 0.0
+
     # Legacy field kept for backward compatibility with get_bitrate_channel_capacity
     reference_total_snr: float = 100.0
 
@@ -88,16 +94,16 @@ DEFAULT_NOISE_CORRELATION_KERNEL: NoiseCorrelationKernel = "gaussian"
 # noise = sqrt(4 * 1.38e-23 * 310 * 5000 * 100) ≈ 9.25e-8 V
 _EEG_NOISE_TODAY = math.sqrt(4 * K_B * BODY_TEMP_K * 5_000 * 100)  # ~9.25e-8 V
 
-# MEG SQUID: 5 fT/√Hz today, 0.1 fT/√Hz fundamental, BW_ref = 100 Hz
-_MEG_SQUID_NOISE_TODAY = 5e-15 * math.sqrt(100)  # 5e-14 T
+# MEG SQUID: 1 fT/√Hz today, 0.1 fT/√Hz fundamental, BW_ref = 100 Hz
+_MEG_SQUID_NOISE_TODAY = 1e-15 * math.sqrt(100)  # 1e-14 T
 _MEG_SQUID_NOISE_FUND = 0.1e-15 * math.sqrt(100)  # 1e-15 T
 
-# MEG OPM: 15 fT/√Hz today, 0.5 fT/√Hz fundamental (spin projection noise, 1 cm³ SERF cell).
+# MEG OPM: 5 fT/√Hz today, 0.5 fT/√Hz fundamental (spin projection noise, 1 cm³ SERF cell).
 # The body thermal floor (0.1 fT/√Hz) is NOT the binding limit for wearable OPMs:
 # spin projection noise δB ∝ 1/√(N_atoms·T) gives ~0.5 fT/√Hz for a 1 cm³ cell (~10¹⁴ atoms).
 # Reaching body thermal would require ~40 cm³ cells — incompatible with wearable use.
 # SQUIDs ARE body-thermal-limited (quantum limit ~0.0001 fT/√Hz is far below body thermal).
-_MEG_OPM_NOISE_TODAY = 15e-15 * math.sqrt(100)  # 1.5e-13 T
+_MEG_OPM_NOISE_TODAY = 5e-15 * math.sqrt(100)  # 5e-14 T
 _MEG_OPM_NOISE_FUND = 0.5e-15 * math.sqrt(100)  # 5e-15 T  (spin projection, 1 cm³ cell)
 
 # fNIRS CW shot noise (dimensionless relative intensity noise)
@@ -852,8 +858,8 @@ def compute_modality_output_noise_covariance(
 
 
 NOISE_MODELS = {
-    "eeg_openmeeg": NoiseModel(
-        canonical_name="eeg_openmeeg",
+    "eeg": NoiseModel(
+        canonical_name="eeg",
         noise_source="Johnson noise at the electrode-contact / front-end",
         measurement_units="V",
         reference_sensor_count=256,
@@ -867,6 +873,12 @@ NOISE_MODELS = {
         typical_signal_notes="5 µV: midpoint of 1–10 µV range for evoked responses (ERPs, SSEPs). "
                               "Spontaneous alpha/beta can be 20–100 µV but those are bulk rhythms, "
                               "not single-source events.",
+        # Single-channel amplitude SNR of a 20 nA·m dipole through the skull: ~1 vs a
+        # 30 nV/√Hz front-end amplifier (today), ~3.4 vs 9 nV/√Hz electrode Johnson
+        # noise (fundamental). The multilayer-skull lead field carries shape, not
+        # absolute V/(A·mm), so EEG capacity anchors to these rather than the BEM gain.
+        anchor_snr_today=1.0,
+        anchor_snr_fundamental=3.4,
         reference_total_snr=100.0,
         notes=(
             "R=5kΩ at 256 electrodes.  If electrode area shrinks as 1/N, "
@@ -1019,7 +1031,6 @@ NOISE_MODELS = {
 
 def canonicalize_modality_name(modality_name: str) -> str:
     folder_name_aliases = {
-        "eeg": "eeg_openmeeg",
         "td_fnirs": "td_fnirs_analytical",
         "us": "us_analytical",
         "fnirs_analytical_cw": "cw_fnirs",

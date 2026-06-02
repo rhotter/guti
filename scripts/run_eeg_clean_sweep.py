@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Run a clean EEG OpenMEEG SVD sweep over voxel and sensor counts."""
+"""Run a clean EEG SVD sweep over voxel and sensor counts."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -22,11 +20,21 @@ from guti.core import (
     get_grid_positions,
     get_sensor_positions,
 )
+from guti.modalities.eeg.compute_eeg_leadfield import (
+    compute_eeg_leadfield_from_bem_dir,
+)
+from guti.modalities.eeg.scalp_resistance import (
+    DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
+    DEFAULT_JOHNSON_LMAX,
+    surface_impedance_kernel_matrix,
+)
 from guti.noise_models import (
     DEFAULT_NOISE_CORRELATION_KERNEL,
     DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    compute_johnson_noise_covariance,
     compute_output_noise_std,
     compute_sensor_noise_covariance,
+    get_noise_model,
 )
 from guti.parameters import Parameters
 
@@ -35,17 +43,15 @@ DEFAULT_SOURCE_SPACING_MM = (40.0, 30.0, 20.0, 15.0, 10.0, 8.0, 6.0, 5.0, 4.0)
 DEFAULT_SENSOR_COUNTS = (32, 64, 128, 256, 512, 1024, 2048, 10000)
 DEFAULT_GRID_RESOLUTION_MM = 20.0
 DEFAULT_SOURCE_RADIUS_MARGIN_MM = 5.0
-DEFAULT_OUTPUT_DIR = Path("results/variants/eeg_openmeeg_clean_sweep_20260601_margin5mm")
-DEFAULT_WORK_DIR = Path("results/tmp/eeg_openmeeg_clean_sweep_20260601")
+DEFAULT_OUTPUT_DIR = Path("results/variants/eeg_clean_sweep_20260601_margin5mm")
+DEFAULT_WORK_DIR = Path("results/tmp/eeg_clean_sweep_20260601")
 DEFAULT_BEM_DIR = DEFAULT_WORK_DIR / "bem_model/eeg"
-DEFAULT_LEADFIELD_PATH = DEFAULT_WORK_DIR / "leadfields/eeg/eeg_leadfield.mat"
-DEFAULT_OPENMEEG_TMP_DIR = DEFAULT_WORK_DIR / "openmeeg_tmp/eeg"
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate EEG OpenMEEG singular-value spectra for a rectangular "
+            "Generate EEG singular-value spectra for a rectangular "
             "source-spacing by sensor-count sweep."
         )
     )
@@ -91,18 +97,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scratch directory for OpenMEEG model files.",
     )
     parser.add_argument(
-        "--leadfield-path",
-        type=Path,
-        default=DEFAULT_LEADFIELD_PATH,
-        help="Leadfield .mat path written by the OpenMEEG shell script.",
-    )
-    parser.add_argument(
-        "--openmeeg-tmp-dir",
-        type=Path,
-        default=DEFAULT_OPENMEEG_TMP_DIR,
-        help="Scratch directory for intermediate OpenMEEG matrices.",
-    )
-    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -122,13 +116,67 @@ def build_parser() -> argparse.ArgumentParser:
         "--noise-correlation-length-mm",
         type=float,
         default=DEFAULT_NOISE_CORRELATION_LENGTH_MM,
-        help="Scalp noise-correlation length in mm. Default: 5.",
+        help=(
+            "Scalp noise-correlation length in mm for "
+            "--noise-covariance-model=distance_kernel. Default: 5."
+        ),
     )
     parser.add_argument(
         "--noise-correlation-kernel",
         choices=("gaussian", "exponential"),
         default=DEFAULT_NOISE_CORRELATION_KERNEL,
-        help="Spatial noise-correlation kernel. Default: gaussian.",
+        help=(
+            "Spatial distance-correlation kernel for "
+            "--noise-covariance-model=distance_kernel. Default: gaussian."
+        ),
+    )
+    parser.add_argument(
+        "--noise-covariance-model",
+        choices=("spherical_johnson", "distance_kernel"),
+        default="spherical_johnson",
+        help=(
+            "Noise covariance used for --save-noise-normalized. "
+            "spherical_johnson uses the layered spherical-harmonic EEG "
+            "surface-impedance kernel; distance_kernel keeps the older "
+            "phenomenological Gaussian/exponential distance model."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-electrode-area-cm2",
+        type=float,
+        default=DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
+        help=(
+            "Circular electrode patch area for the spherical Johnson kernel. "
+            f"Default: {DEFAULT_JOHNSON_ELECTRODE_AREA_CM2:g} cm^2."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-lmax",
+        type=int,
+        default=DEFAULT_JOHNSON_LMAX,
+        help=(
+            "Spherical-harmonic truncation for the Johnson impedance kernel. "
+            f"Default: {DEFAULT_JOHNSON_LMAX}."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-series-resistance-ohm",
+        type=float,
+        default=None,
+        help=(
+            "Optional independent per-electrode series resistance added before "
+            "forming the Johnson covariance. By default only the layered volume "
+            "conductor impedance determines the correlation structure."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-absolute-scale",
+        action="store_true",
+        help=(
+            "Use the absolute Johnson covariance diagonal. By default the "
+            "spherical Johnson matrix supplies only the correlation structure, "
+            "and the diagonal is matched to the existing EEG detector-noise model."
+        ),
     )
     parser.add_argument(
         "--save-noise-normalized",
@@ -151,16 +199,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def check_dependencies() -> list[str]:
-    missing = [
-        executable
-        for executable in ("om_assemble", "om_minverser", "om_gain")
-        if shutil.which(executable) is None
-    ]
     try:
-        import h5py  # noqa: F401
+        import openmeeg  # noqa: F401
     except ImportError:
-        missing.append("python package h5py")
-    return missing
+        return ["python package openmeeg"]
+    return []
 
 
 def eeg_grid_positions(source_spacing_mm: float, source_radius_margin_mm: float) -> np.ndarray:
@@ -172,47 +215,9 @@ def eeg_grid_positions(source_spacing_mm: float, source_radius_margin_mm: float)
     return positions[distances < BRAIN_RADIUS - source_radius_margin_mm]
 
 
-def load_mat73_linop(path: Path) -> np.ndarray:
-    import h5py
-
-    with h5py.File(path, "r") as f:
-        if "linop" not in f:
-            raise ValueError(f"{path} does not contain a 'linop' dataset")
-        linop = f["linop"][()]
-    return np.asarray(linop, dtype=np.float64)
-
-
 def count_dipoles(path: Path) -> int:
     with path.open() as f:
         return sum(1 for line in f if line.strip())
-
-
-def run_openmeeg(
-    bem_dir: Path,
-    leadfield_path: Path,
-    tmp_dir: Path,
-) -> None:
-    geometry = bem_dir / "sphere_head.geom"
-    conductivities = bem_dir / "sphere_head.cond"
-    dipoles = bem_dir / "dipole_locations.txt"
-    electrodes = bem_dir / "sensor_locations.txt"
-
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    leadfield_path.parent.mkdir(parents=True, exist_ok=True)
-    hm = tmp_dir / "tmp.hm"
-    hm_inv = tmp_dir / "tmp.hm_inv"
-    dsm = tmp_dir / "tmp.dsm"
-    h2em = tmp_dir / "tmp.h2em"
-
-    commands = (
-        ["om_assemble", "-HM", str(geometry), str(conductivities), str(hm)],
-        ["om_minverser", str(hm), str(hm_inv)],
-        ["om_assemble", "-DSM", str(geometry), str(conductivities), str(dipoles), str(dsm)],
-        ["om_assemble", "-H2EM", str(geometry), str(conductivities), str(electrodes), str(h2em)],
-        ["om_gain", "-EEG", str(hm_inv), str(dsm), str(h2em), str(leadfield_path)],
-    )
-    for command in commands:
-        subprocess.run(command, check=True, cwd=Path.cwd())
 
 
 def save_clean_svd(
@@ -248,6 +253,46 @@ def sweep_key(params: Parameters | dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def noise_key(params: Parameters | dict[str, Any]) -> tuple[Any, ...]:
+    if isinstance(params, Parameters):
+        data = asdict(params)
+    else:
+        data = params
+    key = (
+        data.get("noise_correlation_kernel"),
+        _float_key(data.get("noise_correlation_length_mm")),
+        data.get("noise_distance_metric"),
+    )
+    if data.get("noise_correlation_kernel") == "spherical_johnson":
+        key = (*key, data.get("comment"))
+    return key
+
+
+def run_comment_for_args(args: argparse.Namespace) -> str:
+    base = "clean EEG n_voxels x n_sensors convergence sweep"
+    if not args.save_noise_normalized:
+        return base
+    if args.noise_covariance_model == "distance_kernel":
+        return (
+            f"{base}; noise_covariance=distance_kernel "
+            f"kernel={args.noise_correlation_kernel} "
+            f"length_mm={float(args.noise_correlation_length_mm):g}"
+        )
+    scale = "absolute" if args.johnson_absolute_scale else "matched_detector_diagonal"
+    series = (
+        "none"
+        if args.johnson_series_resistance_ohm is None
+        else f"{float(args.johnson_series_resistance_ohm):g}"
+    )
+    return (
+        f"{base}; noise_covariance=spherical_johnson "
+        f"electrode_area_cm2={float(args.johnson_electrode_area_cm2):g} "
+        f"lmax={int(args.johnson_lmax)} "
+        f"series_resistance_ohm={series} "
+        f"scale={scale}"
+    )
+
+
 def find_existing_npz(
     output_dir: Path,
     params: Parameters,
@@ -267,6 +312,10 @@ def find_existing_npz(
                     and "noise_normalized_singular_values" not in data.files
                 ):
                     continue
+                if require_noise_normalized and noise_key(existing_params) != noise_key(
+                    params
+                ):
+                    continue
         except Exception:
             continue
         candidate = (path.stat().st_mtime, path.name, path)
@@ -284,6 +333,54 @@ def compute_singular_values(leadfield: np.ndarray) -> np.ndarray:
     eigvals = np.linalg.eigvalsh(gram)
     singular_values = np.sqrt(np.clip(eigvals, 0.0, None))
     return singular_values[::-1]
+
+
+def noise_params_for_args(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.save_noise_normalized:
+        return {
+            "noise_correlation_length_mm": None,
+            "noise_correlation_kernel": None,
+            "noise_distance_metric": None,
+        }
+    if args.noise_covariance_model == "spherical_johnson":
+        return {
+            "noise_correlation_length_mm": None,
+            "noise_correlation_kernel": "spherical_johnson",
+            "noise_distance_metric": "spherical_harmonic",
+        }
+    return {
+        "noise_correlation_length_mm": float(args.noise_correlation_length_mm),
+        "noise_correlation_kernel": args.noise_correlation_kernel,
+        "noise_distance_metric": "geodesic",
+    }
+
+
+def compute_sensor_noise_covariance_for_args(
+    sensor_positions: np.ndarray,
+    *,
+    detector_noise: float,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    if args.noise_covariance_model == "distance_kernel":
+        return compute_sensor_noise_covariance(
+            sensor_positions,
+            detector_noise,
+            correlation_length_mm=float(args.noise_correlation_length_mm),
+            kernel=args.noise_correlation_kernel,
+        )
+
+    impedance = surface_impedance_kernel_matrix(
+        sensor_positions,
+        electrode_area_cm2=float(args.johnson_electrode_area_cm2),
+        lmax=int(args.johnson_lmax),
+    )
+    noise_std = None if args.johnson_absolute_scale else detector_noise
+    return compute_johnson_noise_covariance(
+        impedance,
+        bandwidth_hz=get_noise_model("eeg").reference_bandwidth_hz,
+        series_resistance_ohm=args.johnson_series_resistance_ohm,
+        noise_std=noise_std,
+    )
 
 
 def main() -> int:
@@ -313,7 +410,7 @@ def main() -> int:
                 f"{args.max_save_noise_normalized_sensors}."
             )
 
-    print(f"Planned EEG OpenMEEG jobs: {len(jobs)}")
+    print(f"Planned EEG jobs: {len(jobs)}")
     for source_spacing_mm, num_sensors in jobs:
         n_voxels = len(
             eeg_grid_positions(source_spacing_mm, args.source_radius_margin_mm)
@@ -339,6 +436,7 @@ def main() -> int:
             eeg_grid_positions(source_spacing_mm, args.source_radius_margin_mm)
         )
         expected_n_dipoles = 3 * n_voxels
+        noise_params = noise_params_for_args(args)
         params = Parameters(
             num_sensors=int(num_sensors),
             source_spacing_mm=float(source_spacing_mm),
@@ -346,10 +444,10 @@ def main() -> int:
             num_brain_grid_points=int(n_voxels),
             voxel_volume_mm3=float(source_spacing_mm**3),
             matrix_size=(int(num_sensors), int(expected_n_dipoles)),
-            noise_correlation_length_mm=float(args.noise_correlation_length_mm),
-            noise_correlation_kernel=args.noise_correlation_kernel,
-            noise_distance_metric="geodesic",
-            comment="clean EEG OpenMEEG n_voxels x n_sensors convergence sweep",
+            noise_correlation_length_mm=noise_params["noise_correlation_length_mm"],
+            noise_correlation_kernel=noise_params["noise_correlation_kernel"],
+            noise_distance_metric=noise_params["noise_distance_metric"],
+            comment=run_comment_for_args(args),
         )
         existing_npz_path = find_existing_npz(
             output_dir,
@@ -361,7 +459,7 @@ def main() -> int:
             continue
 
         print(
-            f"[{index}/{len(jobs)}] EEG OpenMEEG "
+            f"[{index}/{len(jobs)}] EEG "
             f"source_spacing_mm={source_spacing_mm:g} "
             f"n_voxels={n_voxels} num_sensors={num_sensors}"
         )
@@ -374,9 +472,8 @@ def main() -> int:
             use_radial_orientations=False,
             source_radius_margin_mm=args.source_radius_margin_mm,
         )
-        run_openmeeg(args.bem_dir, args.leadfield_path, args.openmeeg_tmp_dir)
 
-        leadfield = load_mat73_linop(args.leadfield_path)
+        leadfield = compute_eeg_leadfield_from_bem_dir(args.bem_dir)
         n_dipoles = count_dipoles(args.bem_dir / "dipole_locations.txt")
         if n_dipoles != 3 * n_voxels:
             raise ValueError(
@@ -386,32 +483,63 @@ def main() -> int:
 
         singular_values = compute_singular_values(leadfield)
         s_noise_normalized = None
+        noise_extra_arrays: dict[str, np.ndarray] = {}
         if args.save_noise_normalized:
-            sensor_noise_covariance = compute_sensor_noise_covariance(
+            detector_noise = compute_output_noise_std(
+                "eeg",
+                n_sensors=num_sensors,
+            )
+            sensor_noise_covariance = compute_sensor_noise_covariance_for_args(
                 get_sensor_positions(num_sensors),
-                compute_output_noise_std("eeg_openmeeg", n_sensors=num_sensors),
-                correlation_length_mm=float(args.noise_correlation_length_mm),
-                kernel=args.noise_correlation_kernel,
+                detector_noise=detector_noise,
+                args=args,
             )
             s_noise_normalized = sensor_noise_normalized_singular_values(
                 leadfield.T,
                 sensor_noise_covariance=sensor_noise_covariance,
                 outputs_per_sensor=1,
             )
+            noise_extra_arrays = {
+                "noise_covariance_model": np.array(args.noise_covariance_model),
+                "noise_detector_std_v": np.array(detector_noise, dtype=np.float64),
+                "noise_absolute_scale": np.array(
+                    bool(args.johnson_absolute_scale),
+                    dtype=bool,
+                ),
+            }
+            if args.noise_covariance_model == "spherical_johnson":
+                noise_extra_arrays.update(
+                    {
+                        "johnson_electrode_area_cm2": np.array(
+                            args.johnson_electrode_area_cm2,
+                            dtype=np.float64,
+                        ),
+                        "johnson_lmax": np.array(args.johnson_lmax, dtype=np.int64),
+                        "johnson_series_resistance_ohm": np.array(
+                            np.nan
+                            if args.johnson_series_resistance_ohm is None
+                            else args.johnson_series_resistance_ohm,
+                            dtype=np.float64,
+                        ),
+                    }
+                )
         extra_arrays: dict[str, np.ndarray] = {}
         if s_noise_normalized is not None:
             extra_arrays.update(
                 {
                     "noise_normalized_singular_values": s_noise_normalized,
                     "noise_correlation_length_mm": np.array(
-                        args.noise_correlation_length_mm,
+                        np.nan
+                        if noise_params["noise_correlation_length_mm"] is None
+                        else noise_params["noise_correlation_length_mm"],
                         dtype=np.float64,
                     ),
                     "noise_correlation_kernel": np.array(
-                        args.noise_correlation_kernel
+                        noise_params["noise_correlation_kernel"]
                     ),
                 }
             )
+            extra_arrays.update(noise_extra_arrays)
         npz_path = save_clean_svd(
             singular_values,
             params,
@@ -432,8 +560,30 @@ def main() -> int:
             "matrix_size": params.matrix_size,
             "n_singular_values": int(len(singular_values)),
             "svd_method": "gram_eigvalsh",
-            "noise_correlation_length_mm": args.noise_correlation_length_mm,
-            "noise_correlation_kernel": args.noise_correlation_kernel,
+            "noise_correlation_length_mm": noise_params["noise_correlation_length_mm"],
+            "noise_correlation_kernel": noise_params["noise_correlation_kernel"],
+            "noise_distance_metric": noise_params["noise_distance_metric"],
+            "noise_covariance_model": args.noise_covariance_model,
+            "johnson_electrode_area_cm2": (
+                args.johnson_electrode_area_cm2
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
+            "johnson_lmax": (
+                args.johnson_lmax
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
+            "johnson_series_resistance_ohm": (
+                args.johnson_series_resistance_ohm
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
+            "johnson_absolute_scale": (
+                bool(args.johnson_absolute_scale)
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
             "elapsed_s": time.time() - start_time,
         }
         if s_noise_normalized is not None:

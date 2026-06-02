@@ -38,6 +38,8 @@ DEFAULT_AREA_MIN_CM2 = 0.25
 DEFAULT_AREA_MAX_CM2 = 25.0
 DEFAULT_AREA_POINTS = 50
 DEFAULT_LMAX = 5000
+DEFAULT_JOHNSON_ELECTRODE_AREA_CM2 = 1.0
+DEFAULT_JOHNSON_LMAX = 2000
 
 
 @dataclass(frozen=True)
@@ -125,6 +127,66 @@ def normalized_cap_axisymmetric_coeffs(
         np.sqrt((2.0 * ell + 1.0) / (4.0 * math.pi)) * integral / denom
     )
     return coeffs
+
+
+def surface_impedance_kernel_matrix(
+    sensor_positions_mm: np.ndarray,
+    *,
+    electrode_area_cm2: float = DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
+    lmax: int = DEFAULT_JOHNSON_LMAX,
+    layers: tuple[Layer, ...] | None = None,
+    center_mm: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return the zero-mean terminal surface-impedance kernel in ohms.
+
+    The kernel maps unit-integral circular scalp electrode currents to terminal
+    scalp potentials in the layered spherical EEG model. The l=0 mode is
+    omitted because electrode currents must sum to zero, so the result is the
+    passive port impedance relevant for Johnson-noise covariance.
+    """
+    if electrode_area_cm2 <= 0.0 or not math.isfinite(electrode_area_cm2):
+        raise ValueError("electrode_area_cm2 must be positive and finite")
+    if lmax <= 1:
+        raise ValueError("lmax must be greater than 1")
+
+    positions = np.asarray(sensor_positions_mm, dtype=np.float64)
+    if positions.ndim != 2 or positions.shape[1] != 3:
+        raise ValueError("sensor_positions_mm must have shape (n_sensors, 3)")
+
+    if layers is None:
+        layers = default_layers()
+    scalp_radius_m = layers[-1].outer_radius_m
+    cap_half_angle = math.acos(
+        1.0 - electrode_area_cm2 * 1e-4 / (2.0 * math.pi * scalp_radius_m**2)
+    )
+    transfer = surface_impedance_by_degree(layers, lmax)
+    cap_coeffs = normalized_cap_axisymmetric_coeffs(cap_half_angle, lmax)
+    weights = transfer[1:] * cap_coeffs[1:] ** 2 / scalp_radius_m**2
+
+    if center_mm is None:
+        center = np.array([BRAIN_RADIUS, BRAIN_RADIUS, 0.0], dtype=np.float64)
+    else:
+        center = np.asarray(center_mm, dtype=np.float64)
+        if center.shape != (3,):
+            raise ValueError("center_mm must have shape (3,)")
+
+    radial = positions - center
+    radii = np.linalg.norm(radial, axis=1)
+    if np.any(radii <= 0.0) or not np.all(np.isfinite(radii)):
+        raise ValueError("sensor positions must have finite nonzero radius")
+    unit = radial / radii[:, None]
+    cos_theta = np.clip(unit @ unit.T, -1.0, 1.0)
+
+    kernel = np.zeros_like(cos_theta)
+    p_prev = np.ones_like(cos_theta)
+    p_curr = cos_theta.copy()
+    kernel += weights[0] * p_curr
+    for ell in range(1, lmax - 1):
+        p_next = ((2 * ell + 1) * cos_theta * p_curr - ell * p_prev) / (ell + 1)
+        kernel += weights[ell] * p_next
+        p_prev, p_curr = p_curr, p_next
+
+    return 0.5 * (kernel + kernel.T)
 
 
 def resistance_for_area(

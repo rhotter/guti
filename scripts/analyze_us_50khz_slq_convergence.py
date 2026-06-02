@@ -227,13 +227,10 @@ def plot_relative_bitrate_vs_sources(rows: list[dict[str, Any]], output_path: Pa
 def plot_bitrate_vs_sensors(slq_rows: list[dict[str, Any]], output_path: Path) -> list[dict[str, Any]]:
     if not slq_rows:
         return []
-    max_source = max(row["num_brain_grid_points"] for row in slq_rows)
-    selected = [row for row in slq_rows if row["num_brain_grid_points"] == max_source]
-    if not selected:
-        selected = []
-        for n_sensors in sorted({row["num_sensors"] for row in slq_rows}):
-            sensor_rows = [row for row in slq_rows if row["num_sensors"] == n_sensors]
-            selected.append(max(sensor_rows, key=lambda row: row["num_brain_grid_points"]))
+    selected = []
+    for n_sensors in sorted({row["num_sensors"] for row in slq_rows}):
+        sensor_rows = [row for row in slq_rows if row["num_sensors"] == n_sensors]
+        selected.append(max(sensor_rows, key=lambda row: row["num_brain_grid_points"]))
     selected.sort(key=lambda row: row["num_sensors"])
 
     fig, ax = plt.subplots(figsize=(7.5, 4.8))
@@ -246,12 +243,37 @@ def plot_bitrate_vs_sensors(slq_rows: list[dict[str, Any]], output_path: Path) -
     )
     ax.set_xlabel("sensors")
     ax.set_ylabel("SLQ bitrate estimate (bit/s)")
-    ax.set_title(f"50 kHz US SLQ bitrate vs sensors near {max_source} sources")
+    ax.set_title("50 kHz US SLQ bitrate vs sensors at largest completed source count")
     ax.grid(True, linestyle="--", alpha=0.35)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
     return selected
+
+
+def convergence_status_rows(slq_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for n_sensors in sorted({row["num_sensors"] for row in slq_rows}):
+        sensor_rows = [row for row in slq_rows if row["num_sensors"] == n_sensors]
+        sensor_rows.sort(key=lambda row: row["num_brain_grid_points"])
+        if len(sensor_rows) < 2:
+            continue
+        previous = sensor_rows[-2]
+        latest = sensor_rows[-1]
+        change_percent = (
+            latest["bitrate_bits_per_s"] / previous["bitrate_bits_per_s"] - 1.0
+        ) * 100.0
+        rows.append(
+            {
+                "num_sensors": n_sensors,
+                "previous_sources": previous["num_brain_grid_points"],
+                "latest_sources": latest["num_brain_grid_points"],
+                "previous_bitrate": previous["bitrate_bits_per_s"],
+                "latest_bitrate": latest["bitrate_bits_per_s"],
+                "change_percent": change_percent,
+            }
+        )
+    return rows
 
 
 def write_readme(
@@ -260,6 +282,7 @@ def write_readme(
     selected_sensor_rows: list[dict[str, Any]],
     outdir: Path,
 ) -> None:
+    status_rows = convergence_status_rows(slq_rows)
     slq_time_resolutions = sorted(
         {
             row.get("effective_time_resolution_seconds")
@@ -312,7 +335,9 @@ def write_readme(
         "- [relative_bitrate_vs_sources_exact_plus_slq.png](relative_bitrate_vs_sources_exact_plus_slq.png)",
         "- [bitrate_vs_sensors_largest_slq_sources.png](bitrate_vs_sensors_largest_slq_sources.png)",
         "",
-        "## Largest-Source Sensor Sweep",
+        "## Sensor Sweep",
+        "",
+        "This uses the largest completed source count for each sensor count.",
         "",
         "| sensors | realized sources | SLQ bitrate bit/s |",
         "| ---: | ---: | ---: |",
@@ -321,6 +346,22 @@ def write_readme(
         lines.append(
             f"| {row['num_sensors']} | {row['num_brain_grid_points']} | {row['bitrate_bits_per_s']:.6g} |"
         )
+    if status_rows:
+        lines.extend(
+            [
+                "",
+                "## Convergence Status",
+                "",
+                "| sensors | previous realized sources | latest realized sources | previous bitrate bit/s | latest bitrate bit/s | latest-step change |",
+                "| ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        for row in status_rows:
+            lines.append(
+                f"| {row['num_sensors']} | {row['previous_sources']} | {row['latest_sources']} | "
+                f"{row['previous_bitrate']:.6g} | {row['latest_bitrate']:.6g} | "
+                f"{row['change_percent']:.4g}% |"
+            )
     lines.extend(
         [
             "",

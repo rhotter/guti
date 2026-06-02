@@ -9,6 +9,7 @@ from guti.capacity import (
     get_capacity,
     get_capacity_temporal_filter,
     get_capacity_from_average_output_power,
+    power_law_frequency_spectrum,
     sensor_noise_normalized_singular_values,
     resolve_total_input_power,
     total_input_power_from_average_output_power,
@@ -552,6 +553,199 @@ class CapacityPowerTests(unittest.TestCase):
             s, freqs, H, n_sources=4, total_input_power=0.0, noise=0.2
         )
         self.assertEqual(val, 0.0)
+
+    def test_output_frequency_spectrum_splits_total_output_power(self):
+        s = np.array([2.0, 0.5])
+        average_output_power = 1.2
+        n_sources = 4
+        n_outputs = 3
+        noise = 0.3
+        output_spectrum = np.array([1.0, 3.0])
+        bandwidth_hz = 8.0
+        time_resolution = 1.0 / bandwidth_hz
+        df = 2.0
+
+        actual = get_bitrate(
+            s,
+            n_sources=n_sources,
+            n_outputs=n_outputs,
+            average_output_power=average_output_power,
+            noise=noise,
+            time_resolution=time_resolution,
+            output_frequency_spectrum=output_spectrum,
+            output_frequency_bin_width=df,
+        )
+
+        weights = output_spectrum / np.sum(output_spectrum)
+        bin_noise = noise * np.sqrt(df / bandwidth_hz)
+        expected = sum(
+            get_bitrate(
+                s,
+                n_sources=n_sources,
+                n_outputs=n_outputs,
+                average_output_power=average_output_power * weight,
+                noise=bin_noise,
+                time_resolution=1.0 / df,
+            )
+            for weight in weights
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_noise_frequency_spectrum_with_scalar_noise_scales_per_bin_noise(self):
+        s = np.array([1.5, 0.25])
+        total_input_power = 2.0
+        noise = 0.4
+        output_spectrum = np.array([1.0, 1.0])
+        noise_spectrum = np.array([1.0, 3.0])
+        bandwidth_hz = 6.0
+        time_resolution = 1.0 / bandwidth_hz
+        df = 1.5
+
+        actual = get_bitrate(
+            s,
+            n_sources=2,
+            total_input_power=total_input_power,
+            noise=noise,
+            time_resolution=time_resolution,
+            output_frequency_spectrum=output_spectrum,
+            output_frequency_bin_width=df,
+            noise_frequency_spectrum=noise_spectrum,
+            noise_frequency_bin_width=df,
+        )
+
+        output_weights = output_spectrum / np.sum(output_spectrum)
+        bin_noise_base = noise * np.sqrt(df / bandwidth_hz)
+        expected = sum(
+            get_bitrate(
+                s,
+                n_sources=2,
+                total_input_power=total_input_power * output_weight,
+                noise=bin_noise_base * noise_level_scale,
+                time_resolution=1.0 / df,
+            )
+            for output_weight, noise_level_scale in zip(
+                output_weights,
+                noise_spectrum,
+            )
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_absolute_noise_frequency_spectrum_can_replace_scalar_noise(self):
+        s = np.array([1.25, 0.75])
+        total_input_power = 3.0
+        noise_spectrum = np.array([0.2, 0.5])
+        df = 1.0
+
+        actual = get_bitrate(
+            s,
+            n_sources=2,
+            total_input_power=total_input_power,
+            noise_frequency_spectrum=noise_spectrum,
+            noise_frequency_bin_width=df,
+        )
+
+        expected = sum(
+            get_bitrate(
+                s,
+                n_sources=2,
+                total_input_power=0.5 * total_input_power,
+                noise=noise_level,
+                time_resolution=1.0 / df,
+            )
+            for noise_level in noise_spectrum
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_power_law_frequency_spectrum_matches_explicit_spectrum(self):
+        s = np.array([2.0, 1.0, 0.25])
+        kwargs = dict(
+            beta=1.0,
+            min_freq_hz=1.0,
+            max_freq_hz=4.0,
+            freq_bin_width_hz=1.0,
+        )
+        explicit = power_law_frequency_spectrum(**kwargs)
+
+        actual = get_bitrate(
+            s,
+            n_sources=3,
+            total_input_power=2.5,
+            noise=0.2,
+            output_power_law_beta=kwargs["beta"],
+            output_power_law_min_freq_hz=kwargs["min_freq_hz"],
+            output_power_law_max_freq_hz=kwargs["max_freq_hz"],
+            output_power_law_bin_width_hz=kwargs["freq_bin_width_hz"],
+        )
+        expected = get_bitrate(
+            s,
+            n_sources=3,
+            total_input_power=2.5,
+            noise=0.2,
+            output_frequency_spectrum=explicit,
+            output_frequency_bin_width=kwargs["freq_bin_width_hz"],
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_capacity_frequency_spectrum_sums_per_bin_capacity(self):
+        s = np.array([2.0, 0.5])
+        total_input_power = 4.0
+        output_spectrum = np.array([2.0, 1.0])
+        noise_spectrum = np.array([0.25, 0.5])
+        df = 2.0
+
+        actual = get_capacity(
+            s,
+            n_sources=2,
+            total_input_power=total_input_power,
+            output_frequency_spectrum=output_spectrum,
+            output_frequency_bin_width=df,
+            noise_frequency_spectrum=noise_spectrum,
+            noise_frequency_bin_width=df,
+        )
+
+        output_weights = output_spectrum / np.sum(output_spectrum)
+        expected = sum(
+            get_capacity(
+                s,
+                total_input_power=total_input_power * output_weight,
+                noise=noise_level,
+                time_resolution=1.0 / df,
+            )
+            for output_weight, noise_level in zip(output_weights, noise_spectrum)
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+    def test_capacity_frequency_spectrum_scales_scalar_noise_to_bin_bandwidth(self):
+        s = np.array([1.8, 0.6])
+        total_input_power = 3.5
+        output_spectrum = np.array([1.0, 2.0])
+        noise = 0.45
+        bandwidth_hz = 12.0
+        time_resolution = 1.0 / bandwidth_hz
+        df = 3.0
+
+        actual = get_capacity(
+            s,
+            n_sources=2,
+            total_input_power=total_input_power,
+            noise=noise,
+            time_resolution=time_resolution,
+            output_frequency_spectrum=output_spectrum,
+            output_frequency_bin_width=df,
+        )
+
+        output_weights = output_spectrum / np.sum(output_spectrum)
+        bin_noise = noise * np.sqrt(df / bandwidth_hz)
+        expected = sum(
+            get_capacity(
+                s,
+                total_input_power=total_input_power * output_weight,
+                noise=bin_noise,
+                time_resolution=1.0 / df,
+            )
+            for output_weight in output_weights
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-12)
 
     def test_average_output_power_workflow_handles_consistent_global_scaling(self):
         A = np.array(

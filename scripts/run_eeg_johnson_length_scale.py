@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -14,18 +13,15 @@ import numpy as np
 
 os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/mpl-config")
 
-from guti.core import SCALP_RADIUS, get_sensor_positions
+from guti.core import get_sensor_positions
 from guti.modalities.eeg.scalp_resistance import (
-    default_layers,
-    normalized_cap_axisymmetric_coeffs,
-    surface_impedance_by_degree,
+    surface_impedance_kernel_matrix,
 )
 from guti.noise_models import (
     BODY_TEMP_K,
     compute_johnson_noise_covariance,
     covariance_to_correlation_matrix,
     estimate_effective_correlation_length_mm,
-    scalp_geodesic_distance_matrix,
 )
 
 
@@ -40,33 +36,11 @@ def surface_kernel_matrix(
     lmax: int,
 ) -> np.ndarray:
     """Return zero-mean terminal surface impedance kernel in ohms."""
-    if electrode_area_cm2 <= 0.0:
-        raise ValueError("electrode_area_cm2 must be positive")
-    if lmax <= 1:
-        raise ValueError("lmax must be greater than 1")
-
-    layers = default_layers()
-    scalp_radius_m = layers[-1].outer_radius_m
-    cap_half_angle = math.acos(
-        1.0 - electrode_area_cm2 * 1e-4 / (2.0 * math.pi * scalp_radius_m**2)
+    return surface_impedance_kernel_matrix(
+        sensor_positions_mm,
+        electrode_area_cm2=electrode_area_cm2,
+        lmax=lmax,
     )
-    transfer = surface_impedance_by_degree(layers, lmax)
-    cap_coeffs = normalized_cap_axisymmetric_coeffs(cap_half_angle, lmax)
-    weights = transfer[1:] * cap_coeffs[1:] ** 2 / scalp_radius_m**2
-
-    distances_mm = scalp_geodesic_distance_matrix(sensor_positions_mm)
-    cos_theta = np.cos(distances_mm / SCALP_RADIUS)
-    kernel = np.zeros_like(cos_theta)
-
-    p_prev = np.ones_like(cos_theta)
-    p_curr = cos_theta.copy()
-    kernel += weights[0] * p_curr
-    for ell in range(1, lmax - 1):
-        p_next = ((2 * ell + 1) * cos_theta * p_curr - ell * p_prev) / (ell + 1)
-        kernel += weights[ell] * p_next
-        p_prev, p_curr = p_curr, p_next
-
-    return 0.5 * (kernel + kernel.T)
 
 
 def summarize_covariance(

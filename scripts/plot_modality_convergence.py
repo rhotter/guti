@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from guti.capacity import (
+    default_output_frequency_spectrum_kwargs,
+    frequency_spectrum_kwargs_from_params,
     get_bitrate,
     get_capacity,
     total_input_power_from_average_output_power,
@@ -44,13 +46,15 @@ class SweepSpec:
 
 SWEEP_SPECS = (
     SweepSpec(
-        name="eeg_openmeeg",
-        label="EEG OpenMEEG",
-        noise_model="eeg_openmeeg",
+        name="eeg",
+        label="EEG",
+        noise_model="eeg",
         variant_dirs=(
-            "results/variants/eeg_openmeeg_clean_sweep_20260601_margin5mm",
-            "results/variants/eeg_openmeeg_correlated_noise_20260601_margin5mm",
-            "results/variants/eeg_openmeeg_correlated_noise_exponential_L18p688mm_20260601_margin5mm",
+            "results/variants/eeg_clean_sweep_20260601_margin5mm",
+            "results/variants/eeg_correlated_noise_20260601_margin5mm",
+            "results/variants/eeg_correlated_noise_exponential_L18p688mm_20260601_margin5mm",
+            "results/variants/eeg_johnson_volume_covariance_20260601_margin5mm",
+            "results/variants/eeg_spherical_johnson_covariance_20260602_margin5mm",
         ),
         source_orientations=3,
     ),
@@ -108,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated metric noise types to include, or 'all'. "
             "Known: scalar_iid, spatial_covariance."
+        ),
+    )
+    parser.add_argument(
+        "--noise-plot-tags",
+        default="all",
+        help=(
+            "Comma-separated plot tags to include after noise-model filtering, "
+            "or 'all'. Use 'none' for scalar/no-tag records."
         ),
     )
     return parser
@@ -171,6 +183,39 @@ def load_variant(
             data,
             "spectrum_scale_factor",
         ),
+        "noise_covariance_model": _optional_np_scalar(data, "noise_covariance_model"),
+        "noise_detector_std_t": _optional_np_scalar(data, "noise_detector_std_t"),
+        "noise_detector_std_v": _optional_np_scalar(data, "noise_detector_std_v"),
+        "noise_absolute_scale": _optional_np_scalar(data, "noise_absolute_scale"),
+        "johnson_voxel_resolution_mm": _optional_np_scalar(
+            data,
+            "johnson_voxel_resolution_mm",
+        ),
+        "johnson_solver": _optional_np_scalar(data, "johnson_solver"),
+        "johnson_sensor_components": _optional_np_scalar(
+            data,
+            "johnson_sensor_components",
+        ),
+        "johnson_n_voxels": _optional_np_scalar(data, "johnson_n_voxels"),
+        "johnson_raw_body_noise_median_T_per_sqrtHz": _optional_np_scalar(
+            data,
+            "johnson_raw_body_noise_median_T_per_sqrtHz",
+        ),
+        "johnson_regularization_jitter_T2": _optional_np_scalar(
+            data,
+            "johnson_regularization_jitter_T2",
+        ),
+        "johnson_electrode_area_cm2": _optional_np_scalar(
+            data,
+            "johnson_electrode_area_cm2",
+        ),
+        "johnson_lmax": _optional_np_scalar(data, "johnson_lmax"),
+        "johnson_series_resistance_ohm": _optional_np_scalar(
+            data,
+            "johnson_series_resistance_ohm",
+        ),
+        "johnson_bandwidth_hz": _optional_np_scalar(data, "johnson_bandwidth_hz"),
+        "johnson_noise_diagonal": _optional_np_scalar(data, "johnson_noise_diagonal"),
     }
     return (
         np.asarray(data["singular_values"], dtype=np.float64),
@@ -254,18 +299,23 @@ def variant_record(spec: SweepSpec, path: Path) -> dict[str, Any]:
             n_sources=n_sources,
             n_outputs=n_outputs,
         )
+        spectrum_kwargs = frequency_spectrum_kwargs_from_params(
+            params
+        ) or default_output_frequency_spectrum_kwargs(spec.noise_model)
         bitrate = get_bitrate(
             s_noise_normalized,
             n_sources=n_sources,
             total_input_power=total_input_power,
             noise=1.0,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
         capacity = get_capacity(
             s_noise_normalized[s_noise_normalized > 0],
             total_input_power=total_input_power,
             noise=1.0,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
     else:
         total_input_power = total_input_power_from_average_output_power(
@@ -274,18 +324,23 @@ def variant_record(spec: SweepSpec, path: Path) -> dict[str, Any]:
             n_sources=n_sources,
             n_outputs=n_outputs,
         )
+        spectrum_kwargs = frequency_spectrum_kwargs_from_params(
+            params
+        ) or default_output_frequency_spectrum_kwargs(spec.noise_model)
         bitrate = get_bitrate(
             s_capacity,
             n_sources=n_sources,
             total_input_power=total_input_power,
             noise=output_noise,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
         capacity = get_capacity(
             s_capacity[s_capacity > 0],
             total_input_power=total_input_power,
             noise=output_noise,
             time_resolution=time_resolution_s,
+            **spectrum_kwargs,
         )
     params_dict = asdict(params)
     return {
@@ -307,6 +362,10 @@ def variant_record(spec: SweepSpec, path: Path) -> dict[str, Any]:
         "noise_model_type": noise_model_type,
         "noise_correlation_length_mm": params.noise_correlation_length_mm,
         "noise_correlation_kernel": params.noise_correlation_kernel,
+        "noise_voxel_resolution_mm": params.noise_voxel_resolution_mm,
+        "noise_solver": params.noise_solver,
+        "noise_absolute_scale": params.noise_absolute_scale,
+        "noise_sensor_components": params.noise_sensor_components,
         "total_input_power": float(total_input_power),
         "bitrate_bits_per_s": float(bitrate),
         "channel_capacity_bits_per_s": float(capacity),
@@ -333,8 +392,13 @@ def _noise_record_key(record: dict[str, Any]) -> tuple[Any, ...]:
         return (record["noise_model_type"], None, None)
     return (
         record["noise_model_type"],
+        str(record.get("noise_covariance_model") or "unknown").lower(),
         str(record.get("noise_correlation_kernel") or "unknown").lower(),
         _noise_length_key(record.get("noise_correlation_length_mm")),
+        _noise_length_key(record.get("noise_voxel_resolution_mm")),
+        str(record.get("noise_solver") or "").lower(),
+        str(record.get("noise_sensor_components") or "").lower(),
+        bool(record.get("noise_absolute_scale") or False),
     )
 
 
@@ -391,8 +455,26 @@ def write_metrics(records: list[dict[str, Any]], errors: list[dict[str, str]], o
         "output_noise",
         "output_snr",
         "noise_model_type",
+        "noise_covariance_model",
         "noise_correlation_length_mm",
         "noise_correlation_kernel",
+        "noise_voxel_resolution_mm",
+        "noise_solver",
+        "noise_sensor_components",
+        "noise_detector_std_t",
+        "noise_detector_std_v",
+        "noise_absolute_scale",
+        "johnson_voxel_resolution_mm",
+        "johnson_solver",
+        "johnson_sensor_components",
+        "johnson_n_voxels",
+        "johnson_raw_body_noise_median_T_per_sqrtHz",
+        "johnson_regularization_jitter_T2",
+        "johnson_electrode_area_cm2",
+        "johnson_lmax",
+        "johnson_series_resistance_ohm",
+        "johnson_bandwidth_hz",
+        "johnson_noise_diagonal",
         "total_input_power",
         "bitrate_bits_per_s",
         "channel_capacity_bits_per_s",
@@ -493,8 +575,26 @@ def _plot_filename(filename: str, plot_tag: str | None) -> str:
 
 
 def _plot_title(label: str, plot_tag: str | None, ylabel: str, xlabel: str) -> str:
-    title_label = label if plot_tag is None else f"{label} {plot_tag}"
+    if plot_tag is None:
+        title_label = label
+    elif plot_tag == "correlated_noise":
+        title_label = f"{label} correlated noise"
+    elif plot_tag.startswith("correlated_noise_"):
+        title_label = f"{label} {_format_plot_tag_for_title(plot_tag)}"
+    else:
+        title_label = f"{label} {plot_tag}"
     return f"{title_label}: {ylabel} vs {xlabel}"
+
+
+def _format_plot_tag_for_title(plot_tag: str) -> str:
+    tag = plot_tag.removeprefix("correlated_noise_")
+    if tag in {"spherical_johnson", "johnson_volume"}:
+        return "spherical Johnson noise covariance"
+    if "_L" not in tag:
+        return f"correlated noise ({tag})"
+    kernel, length = tag.split("_L", maxsplit=1)
+    length = length.removesuffix("mm").replace("p", ".").replace("m", "-")
+    return f"correlated noise ({kernel}, L={length} mm)"
 
 
 def _format_noise_length_tag(value: Any) -> str | None:
@@ -510,6 +610,15 @@ def _format_noise_length_tag(value: Any) -> str | None:
 def noise_plot_tag(row: dict[str, Any]) -> str | None:
     if row["noise_model_type"] != "spatial_covariance":
         return None
+
+    covariance_model = str(row.get("noise_covariance_model") or "").lower()
+    if covariance_model.startswith("meg_johnson"):
+        components = str(row.get("noise_sensor_components") or "unknown").lower()
+        resolution = _format_noise_length_tag(row.get("noise_voxel_resolution_mm"))
+        scale = "absolute" if row.get("noise_absolute_scale") else "matched"
+        if resolution is None:
+            return f"{covariance_model}_{components}_{scale}"
+        return f"{covariance_model}_{components}_{resolution}mm_{scale}"
 
     kernel = str(row.get("noise_correlation_kernel") or "unknown").lower()
     length_mm = row.get("noise_correlation_length_mm")
@@ -578,7 +687,6 @@ def plot_modality(
         ),
     ):
         path = modality_dir / _plot_filename(filename, plot_tag)
-        title_label = label if plot_tag is None else f"{label} {plot_tag}"
         ok = plot_single_line(
             highest_voxel_rows,
             x_key="n_sensors",
@@ -586,7 +694,7 @@ def plot_modality(
             xlabel="sensors",
             ylabel=ylabel,
             title=(
-                f"{title_label}: {ylabel} vs sensors "
+                f"{_plot_title(label, plot_tag, ylabel, 'sensors')} "
                 f"at n_voxels={max_n_voxels:g}"
             ),
             output_path=path,
@@ -676,10 +784,17 @@ def select_noise_model_types(names: str) -> set[str] | None:
     return wanted
 
 
+def select_noise_plot_tags(names: str) -> set[str] | None:
+    if names == "all":
+        return None
+    return {name.strip() for name in names.split(",") if name.strip()}
+
+
 def main() -> int:
     args = build_parser().parse_args()
     outdir = Path(args.outdir)
     selected_noise_model_types = select_noise_model_types(args.noise_model_types)
+    selected_noise_plot_tags = select_noise_plot_tags(args.noise_plot_tags)
 
     all_records: list[dict[str, Any]] = []
     all_errors: list[dict[str, str]] = []
@@ -696,8 +811,14 @@ def main() -> int:
             for record in all_records
             if record["noise_model_type"] in selected_noise_model_types
         ]
+    if selected_noise_plot_tags is not None:
+        all_records = [
+            record
+            for record in all_records
+            if (noise_plot_tag(record) or "none") in selected_noise_plot_tags
+        ]
     if not all_records:
-        raise SystemExit("No sweep records matched the selected noise model types")
+        raise SystemExit("No sweep records matched the selected filters")
 
     write_metrics(all_records, all_errors, outdir)
 
