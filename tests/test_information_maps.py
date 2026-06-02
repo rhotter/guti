@@ -15,7 +15,7 @@ from compute_information_maps import (
     posterior_info_vector3,
 )
 from export_svd_json import compute_bitrate
-from guti.capacity import get_bitrate
+from guti.hrf import get_modality_bitrate
 from guti.core import get_sensor_positions
 from guti.noise_models import (
     capacity_forward_gain_scale,
@@ -191,12 +191,16 @@ class InformationMapMathTests(unittest.TestCase):
             params=params,
             noise_mode="physical_detector_floor",
         )
-        expected = get_bitrate(
+        # cw_fnirs is hemodynamic, so compute_bitrate routes through
+        # get_modality_bitrate (HRF-bandwidth-limited), not bare get_bitrate.
+        expected = get_modality_bitrate(
             s_integrated,
+            "cw_fnirs",
             n_sources=3,
             total_input_power=total_input_power,
             noise=noise,
             time_resolution=1.0,
+            hrf_type=getattr(params, "hrf_type", None),
         )
 
         np.testing.assert_allclose(actual, expected, rtol=1e-12)

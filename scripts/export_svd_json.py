@@ -36,8 +36,7 @@ import numpy as np
 
 from guti.data_utils import list_svd_variants, load_svd_variant
 from guti.parameters import Parameters
-from guti.capacity import get_bitrate, get_bitrate_temporal_filter
-from guti.hrf import get_canonical_hrf_spectrum
+from guti.hrf import get_modality_bitrate, is_hemodynamic
 from guti.noise_models import (
     capacity_forward_gain_scale,
     compute_detector_noise_std,
@@ -71,6 +70,7 @@ MODALITIES = {
     "meg_squid":          "MEG SQUID",
     "eeg_openmeeg":       "EEG (OpenMEEG)",
     "cw_fnirs": "fNIRS CW",
+    "td_fnirs": "fNIRS TD",
     "fmri_bold":          "fMRI BOLD",
     "us_free_field_analytical_frequency_sweep": "Ultrasound",
 }
@@ -81,6 +81,7 @@ TIME_RESOLUTION = {
     "meg_squid":          0.01,
     "eeg_openmeeg":       0.01,
     "cw_fnirs": 1.0,  # 1 Hz hemodynamic
+    "td_fnirs": 1.0,  # 1 Hz hemodynamic
     "fmri_bold":           2.0,  # TR = 2 s; HRF handled explicitly below
     "us_free_field_analytical_frequency_sweep": 1.0,
 }
@@ -159,12 +160,14 @@ def compute_bitrate(
             **kwargs,
         )
         return float(
-            get_bitrate(
+            get_modality_bitrate(
                 s_capacity,
+                modality,
                 n_sources=n_sources,
                 total_input_power=float(n_sources),
                 noise=noise,
                 time_resolution=time_resolution,
+                hrf_type=getattr(params, "hrf_type", None),
             )
         )
 
@@ -186,32 +189,22 @@ def compute_bitrate(
         bold_contrast=kwargs["bold_contrast"],
     )
 
-    if modality == "fmri_bold":
-        tr_s = kwargs["tr_s"] or time_resolution
-        freqs, H = get_canonical_hrf_spectrum(
-            f_max=0.5 / tr_s,
-            df=0.002,
-            hrf_type=getattr(params, "hrf_type", None) or "spm",
-            tr=0.01,
-        )
-        return float(
-            get_bitrate_temporal_filter(
-                s_capacity,
-                freqs,
-                H,
-                n_sources=n_sources,
-                total_input_power=total_input_power,
-                noise=detector_noise,
-            )
-        )
+    # Hemodynamic modalities set their HRF bandwidth from the BOLD/optical TR
+    # (params override, else the modality default); other modalities use a flat
+    # per-sample time_resolution scaling inside get_modality_bitrate.
+    tr_for_bitrate = time_resolution
+    if is_hemodynamic(modality):
+        tr_for_bitrate = kwargs["tr_s"] or time_resolution
 
     return float(
-        get_bitrate(
+        get_modality_bitrate(
             s_capacity,
+            modality,
             n_sources=n_sources,
             total_input_power=total_input_power,
             noise=detector_noise,
-            time_resolution=time_resolution,
+            time_resolution=tr_for_bitrate,
+            hrf_type=getattr(params, "hrf_type", None),
         )
     )
 

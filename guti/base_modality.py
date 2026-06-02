@@ -222,6 +222,17 @@ class ImagingModality(ABC):
     def _run_slq(self, save_results: bool = True, default_run: bool = False) -> float:
         """Matrix-free SLQ bitrate pipeline (see :meth:`run`)."""
         from guti.slq import bitrate_slq
+        from guti.hrf import is_hemodynamic
+
+        if is_hemodynamic(self.name):
+            # SLQ estimates the spatial bitrate from a matrix-free trace; it
+            # cannot carry the separable HRF |H(f)| temporal factor that
+            # hemodynamic modalities require. Use the SVD path instead.
+            raise ValueError(
+                f"Modality '{self.name}' is hemodynamic and must apply the HRF "
+                "temporal filter, which the SLQ path does not support. Use "
+                "bitrate_method='svd'."
+            )
 
         t0 = time.perf_counter()
         print(f"[{self.name}] Setting up geometry...")

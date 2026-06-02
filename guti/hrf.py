@@ -55,6 +55,72 @@ def get_canonical_hrf_spectrum(
     return freqs, H_mag
 
 
+# Modalities whose temporal bandwidth is set by the hemodynamic response
+# (slow blood-oxygenation dynamics), rather than by direct neural/structural
+# sampling. These route their bitrate through the HRF temporal filter.
+HEMODYNAMIC_MODALITIES = frozenset({"fmri_bold", "cw_fnirs", "td_fnirs"})
+
+
+def is_hemodynamic(modality: str) -> bool:
+    """Return True if ``modality``'s temporal bottleneck is the HRF."""
+    return modality in HEMODYNAMIC_MODALITIES
+
+
+def get_modality_bitrate(
+    s,
+    modality: str,
+    *,
+    n_sources: int,
+    noise: float,
+    time_resolution: float,
+    total_input_power: float | None = None,
+    hrf_type: str | None = None,
+    **kwargs,
+) -> float:
+    """Bitrate for spectrum ``s``, HRF-aware by modality.
+
+    For hemodynamic modalities (see :data:`HEMODYNAMIC_MODALITIES`) the slow
+    hemodynamic response is the temporal bottleneck, so the spatial spectrum is
+    combined with the HRF transfer magnitude ``|H(f)|`` via
+    :func:`guti.capacity.get_bitrate_temporal_filter` (the Fourier magnitude of
+    an LTI convolution operator *is* its singular spectrum). ``|H(f)|`` is taken
+    up to the sampling Nyquist ``f_max = 0.5 / time_resolution``.
+
+    For all other modalities the temporal axis is a flat per-sample scaling, so
+    this defers to :func:`guti.capacity.get_bitrate` with ``time_resolution``.
+
+    Both branches return bits/second.
+    """
+    from guti.capacity import get_bitrate, get_bitrate_temporal_filter
+
+    if is_hemodynamic(modality):
+        tr_s = time_resolution or 1.0
+        freqs, H = get_canonical_hrf_spectrum(
+            f_max=0.5 / tr_s,
+            df=0.002,
+            hrf_type=hrf_type or "spm",
+            tr=0.01,
+        )
+        return get_bitrate_temporal_filter(
+            s,
+            freqs,
+            H,
+            n_sources=n_sources,
+            total_input_power=total_input_power,
+            noise=noise,
+            **kwargs,
+        )
+
+    return get_bitrate(
+        s,
+        n_sources=n_sources,
+        total_input_power=total_input_power,
+        noise=noise,
+        time_resolution=time_resolution,
+        **kwargs,
+    )
+
+
 def get_empirical_hrf():
     """Extract an empirical HRF from real fMRI data via FIR deconvolution."""
     from nilearn.maskers import NiftiSpheresMasker
