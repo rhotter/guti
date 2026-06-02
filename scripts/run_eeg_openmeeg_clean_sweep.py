@@ -22,11 +22,18 @@ from guti.core import (
     get_grid_positions,
     get_sensor_positions,
 )
+from guti.modalities.eeg.scalp_resistance import (
+    DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
+    DEFAULT_JOHNSON_LMAX,
+    surface_impedance_kernel_matrix,
+)
 from guti.noise_models import (
     DEFAULT_NOISE_CORRELATION_KERNEL,
     DEFAULT_NOISE_CORRELATION_LENGTH_MM,
+    compute_johnson_noise_covariance,
     compute_output_noise_std,
     compute_sensor_noise_covariance,
+    get_noise_model,
 )
 from guti.parameters import Parameters
 
@@ -122,13 +129,67 @@ def build_parser() -> argparse.ArgumentParser:
         "--noise-correlation-length-mm",
         type=float,
         default=DEFAULT_NOISE_CORRELATION_LENGTH_MM,
-        help="Scalp noise-correlation length in mm. Default: 5.",
+        help=(
+            "Scalp noise-correlation length in mm for "
+            "--noise-covariance-model=distance_kernel. Default: 5."
+        ),
     )
     parser.add_argument(
         "--noise-correlation-kernel",
         choices=("gaussian", "exponential"),
         default=DEFAULT_NOISE_CORRELATION_KERNEL,
-        help="Spatial noise-correlation kernel. Default: gaussian.",
+        help=(
+            "Spatial distance-correlation kernel for "
+            "--noise-covariance-model=distance_kernel. Default: gaussian."
+        ),
+    )
+    parser.add_argument(
+        "--noise-covariance-model",
+        choices=("spherical_johnson", "distance_kernel"),
+        default="spherical_johnson",
+        help=(
+            "Noise covariance used for --save-noise-normalized. "
+            "spherical_johnson uses the layered spherical-harmonic EEG "
+            "surface-impedance kernel; distance_kernel keeps the older "
+            "phenomenological Gaussian/exponential distance model."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-electrode-area-cm2",
+        type=float,
+        default=DEFAULT_JOHNSON_ELECTRODE_AREA_CM2,
+        help=(
+            "Circular electrode patch area for the spherical Johnson kernel. "
+            f"Default: {DEFAULT_JOHNSON_ELECTRODE_AREA_CM2:g} cm^2."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-lmax",
+        type=int,
+        default=DEFAULT_JOHNSON_LMAX,
+        help=(
+            "Spherical-harmonic truncation for the Johnson impedance kernel. "
+            f"Default: {DEFAULT_JOHNSON_LMAX}."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-series-resistance-ohm",
+        type=float,
+        default=None,
+        help=(
+            "Optional independent per-electrode series resistance added before "
+            "forming the Johnson covariance. By default only the layered volume "
+            "conductor impedance determines the correlation structure."
+        ),
+    )
+    parser.add_argument(
+        "--johnson-absolute-scale",
+        action="store_true",
+        help=(
+            "Use the absolute Johnson covariance diagonal. By default the "
+            "spherical Johnson matrix supplies only the correlation structure, "
+            "and the diagonal is matched to the existing EEG detector-noise model."
+        ),
     )
     parser.add_argument(
         "--save-noise-normalized",
@@ -248,6 +309,46 @@ def sweep_key(params: Parameters | dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def noise_key(params: Parameters | dict[str, Any]) -> tuple[Any, ...]:
+    if isinstance(params, Parameters):
+        data = asdict(params)
+    else:
+        data = params
+    key = (
+        data.get("noise_correlation_kernel"),
+        _float_key(data.get("noise_correlation_length_mm")),
+        data.get("noise_distance_metric"),
+    )
+    if data.get("noise_correlation_kernel") == "spherical_johnson":
+        key = (*key, data.get("comment"))
+    return key
+
+
+def run_comment_for_args(args: argparse.Namespace) -> str:
+    base = "clean EEG OpenMEEG n_voxels x n_sensors convergence sweep"
+    if not args.save_noise_normalized:
+        return base
+    if args.noise_covariance_model == "distance_kernel":
+        return (
+            f"{base}; noise_covariance=distance_kernel "
+            f"kernel={args.noise_correlation_kernel} "
+            f"length_mm={float(args.noise_correlation_length_mm):g}"
+        )
+    scale = "absolute" if args.johnson_absolute_scale else "matched_detector_diagonal"
+    series = (
+        "none"
+        if args.johnson_series_resistance_ohm is None
+        else f"{float(args.johnson_series_resistance_ohm):g}"
+    )
+    return (
+        f"{base}; noise_covariance=spherical_johnson "
+        f"electrode_area_cm2={float(args.johnson_electrode_area_cm2):g} "
+        f"lmax={int(args.johnson_lmax)} "
+        f"series_resistance_ohm={series} "
+        f"scale={scale}"
+    )
+
+
 def find_existing_npz(
     output_dir: Path,
     params: Parameters,
@@ -267,6 +368,10 @@ def find_existing_npz(
                     and "noise_normalized_singular_values" not in data.files
                 ):
                     continue
+                if require_noise_normalized and noise_key(existing_params) != noise_key(
+                    params
+                ):
+                    continue
         except Exception:
             continue
         candidate = (path.stat().st_mtime, path.name, path)
@@ -284,6 +389,54 @@ def compute_singular_values(leadfield: np.ndarray) -> np.ndarray:
     eigvals = np.linalg.eigvalsh(gram)
     singular_values = np.sqrt(np.clip(eigvals, 0.0, None))
     return singular_values[::-1]
+
+
+def noise_params_for_args(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.save_noise_normalized:
+        return {
+            "noise_correlation_length_mm": None,
+            "noise_correlation_kernel": None,
+            "noise_distance_metric": None,
+        }
+    if args.noise_covariance_model == "spherical_johnson":
+        return {
+            "noise_correlation_length_mm": None,
+            "noise_correlation_kernel": "spherical_johnson",
+            "noise_distance_metric": "spherical_harmonic",
+        }
+    return {
+        "noise_correlation_length_mm": float(args.noise_correlation_length_mm),
+        "noise_correlation_kernel": args.noise_correlation_kernel,
+        "noise_distance_metric": "geodesic",
+    }
+
+
+def compute_sensor_noise_covariance_for_args(
+    sensor_positions: np.ndarray,
+    *,
+    detector_noise: float,
+    args: argparse.Namespace,
+) -> np.ndarray:
+    if args.noise_covariance_model == "distance_kernel":
+        return compute_sensor_noise_covariance(
+            sensor_positions,
+            detector_noise,
+            correlation_length_mm=float(args.noise_correlation_length_mm),
+            kernel=args.noise_correlation_kernel,
+        )
+
+    impedance = surface_impedance_kernel_matrix(
+        sensor_positions,
+        electrode_area_cm2=float(args.johnson_electrode_area_cm2),
+        lmax=int(args.johnson_lmax),
+    )
+    noise_std = None if args.johnson_absolute_scale else detector_noise
+    return compute_johnson_noise_covariance(
+        impedance,
+        bandwidth_hz=get_noise_model("eeg_openmeeg").reference_bandwidth_hz,
+        series_resistance_ohm=args.johnson_series_resistance_ohm,
+        noise_std=noise_std,
+    )
 
 
 def main() -> int:
@@ -339,6 +492,7 @@ def main() -> int:
             eeg_grid_positions(source_spacing_mm, args.source_radius_margin_mm)
         )
         expected_n_dipoles = 3 * n_voxels
+        noise_params = noise_params_for_args(args)
         params = Parameters(
             num_sensors=int(num_sensors),
             source_spacing_mm=float(source_spacing_mm),
@@ -346,10 +500,10 @@ def main() -> int:
             num_brain_grid_points=int(n_voxels),
             voxel_volume_mm3=float(source_spacing_mm**3),
             matrix_size=(int(num_sensors), int(expected_n_dipoles)),
-            noise_correlation_length_mm=float(args.noise_correlation_length_mm),
-            noise_correlation_kernel=args.noise_correlation_kernel,
-            noise_distance_metric="geodesic",
-            comment="clean EEG OpenMEEG n_voxels x n_sensors convergence sweep",
+            noise_correlation_length_mm=noise_params["noise_correlation_length_mm"],
+            noise_correlation_kernel=noise_params["noise_correlation_kernel"],
+            noise_distance_metric=noise_params["noise_distance_metric"],
+            comment=run_comment_for_args(args),
         )
         existing_npz_path = find_existing_npz(
             output_dir,
@@ -386,32 +540,63 @@ def main() -> int:
 
         singular_values = compute_singular_values(leadfield)
         s_noise_normalized = None
+        noise_extra_arrays: dict[str, np.ndarray] = {}
         if args.save_noise_normalized:
-            sensor_noise_covariance = compute_sensor_noise_covariance(
+            detector_noise = compute_output_noise_std(
+                "eeg_openmeeg",
+                n_sensors=num_sensors,
+            )
+            sensor_noise_covariance = compute_sensor_noise_covariance_for_args(
                 get_sensor_positions(num_sensors),
-                compute_output_noise_std("eeg_openmeeg", n_sensors=num_sensors),
-                correlation_length_mm=float(args.noise_correlation_length_mm),
-                kernel=args.noise_correlation_kernel,
+                detector_noise=detector_noise,
+                args=args,
             )
             s_noise_normalized = sensor_noise_normalized_singular_values(
                 leadfield.T,
                 sensor_noise_covariance=sensor_noise_covariance,
                 outputs_per_sensor=1,
             )
+            noise_extra_arrays = {
+                "noise_covariance_model": np.array(args.noise_covariance_model),
+                "noise_detector_std_v": np.array(detector_noise, dtype=np.float64),
+                "noise_absolute_scale": np.array(
+                    bool(args.johnson_absolute_scale),
+                    dtype=bool,
+                ),
+            }
+            if args.noise_covariance_model == "spherical_johnson":
+                noise_extra_arrays.update(
+                    {
+                        "johnson_electrode_area_cm2": np.array(
+                            args.johnson_electrode_area_cm2,
+                            dtype=np.float64,
+                        ),
+                        "johnson_lmax": np.array(args.johnson_lmax, dtype=np.int64),
+                        "johnson_series_resistance_ohm": np.array(
+                            np.nan
+                            if args.johnson_series_resistance_ohm is None
+                            else args.johnson_series_resistance_ohm,
+                            dtype=np.float64,
+                        ),
+                    }
+                )
         extra_arrays: dict[str, np.ndarray] = {}
         if s_noise_normalized is not None:
             extra_arrays.update(
                 {
                     "noise_normalized_singular_values": s_noise_normalized,
                     "noise_correlation_length_mm": np.array(
-                        args.noise_correlation_length_mm,
+                        np.nan
+                        if noise_params["noise_correlation_length_mm"] is None
+                        else noise_params["noise_correlation_length_mm"],
                         dtype=np.float64,
                     ),
                     "noise_correlation_kernel": np.array(
-                        args.noise_correlation_kernel
+                        noise_params["noise_correlation_kernel"]
                     ),
                 }
             )
+            extra_arrays.update(noise_extra_arrays)
         npz_path = save_clean_svd(
             singular_values,
             params,
@@ -432,8 +617,30 @@ def main() -> int:
             "matrix_size": params.matrix_size,
             "n_singular_values": int(len(singular_values)),
             "svd_method": "gram_eigvalsh",
-            "noise_correlation_length_mm": args.noise_correlation_length_mm,
-            "noise_correlation_kernel": args.noise_correlation_kernel,
+            "noise_correlation_length_mm": noise_params["noise_correlation_length_mm"],
+            "noise_correlation_kernel": noise_params["noise_correlation_kernel"],
+            "noise_distance_metric": noise_params["noise_distance_metric"],
+            "noise_covariance_model": args.noise_covariance_model,
+            "johnson_electrode_area_cm2": (
+                args.johnson_electrode_area_cm2
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
+            "johnson_lmax": (
+                args.johnson_lmax
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
+            "johnson_series_resistance_ohm": (
+                args.johnson_series_resistance_ohm
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
+            "johnson_absolute_scale": (
+                bool(args.johnson_absolute_scale)
+                if args.noise_covariance_model == "spherical_johnson"
+                else None
+            ),
             "elapsed_s": time.time() - start_time,
         }
         if s_noise_normalized is not None:

@@ -171,6 +171,18 @@ def load_variant(
             data,
             "spectrum_scale_factor",
         ),
+        "noise_covariance_model": _optional_np_scalar(data, "noise_covariance_model"),
+        "noise_detector_std_v": _optional_np_scalar(data, "noise_detector_std_v"),
+        "noise_absolute_scale": _optional_np_scalar(data, "noise_absolute_scale"),
+        "johnson_electrode_area_cm2": _optional_np_scalar(
+            data,
+            "johnson_electrode_area_cm2",
+        ),
+        "johnson_lmax": _optional_np_scalar(data, "johnson_lmax"),
+        "johnson_series_resistance_ohm": _optional_np_scalar(
+            data,
+            "johnson_series_resistance_ohm",
+        ),
     }
     return (
         np.asarray(data["singular_values"], dtype=np.float64),
@@ -391,8 +403,14 @@ def write_metrics(records: list[dict[str, Any]], errors: list[dict[str, str]], o
         "output_noise",
         "output_snr",
         "noise_model_type",
+        "noise_covariance_model",
         "noise_correlation_length_mm",
         "noise_correlation_kernel",
+        "noise_detector_std_v",
+        "noise_absolute_scale",
+        "johnson_electrode_area_cm2",
+        "johnson_lmax",
+        "johnson_series_resistance_ohm",
         "total_input_power",
         "bitrate_bits_per_s",
         "channel_capacity_bits_per_s",
