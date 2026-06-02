@@ -53,6 +53,12 @@ class NoiseModel:
     typical_signal_amplitude: float = 0.0
     typical_signal_notes: str = ""
 
+    # Literature single-channel amplitude SNR for a canonical fixed-depth source,
+    # used by the empirically anchored capacity path (EEG, where the BEM absolute
+    # gain is unreliable). 0.0 ⇒ anchoring not used for this modality.
+    anchor_snr_today: float = 0.0
+    anchor_snr_fundamental: float = 0.0
+
     # Legacy field kept for backward compatibility with get_bitrate_channel_capacity
     reference_total_snr: float = 100.0
 
@@ -867,6 +873,13 @@ NOISE_MODELS = {
         typical_signal_notes="5 µV: midpoint of 1–10 µV range for evoked responses (ERPs, SSEPs). "
                               "Spontaneous alpha/beta can be 20–100 µV but those are bulk rhythms, "
                               "not single-source events.",
+        # Single-channel amplitude SNR of a 20 nA·m dipole through the skull: ~1 vs a
+        # 30 nV/√Hz front-end amplifier (today), ~3.4 vs 9 nV/√Hz electrode Johnson
+        # noise (fundamental). The multilayer-skull lead field carries shape, not
+        # absolute V/(A·mm), so EEG capacity anchors to these (× the √N_eff array
+        # gain for the best spatial mode) rather than the BEM absolute gain.
+        anchor_snr_today=1.0,
+        anchor_snr_fundamental=3.4,
         reference_total_snr=100.0,
         notes=(
             "R=5kΩ at 256 electrodes.  If electrode area shrinks as 1/N, "

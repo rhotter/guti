@@ -35,6 +35,8 @@ interface Variant {
   bitrate_physical_fundamental: number | null;
   bitrate_empirical_today: number | null;
   bitrate_empirical_fundamental: number | null;
+  bitrate_anchored_today: number | null;
+  bitrate_anchored_fundamental: number | null;
   snr_empirical_today: number | null;
 }
 
@@ -52,7 +54,7 @@ interface ModalityData {
   variants: Variant[];
 }
 
-type NoiseMode = "physical_detector_floor" | "empirical_observed_snr";
+type NoiseMode = "physical_detector_floor" | "empirical_observed_snr" | "empirical_anchored";
 
 // ── constants ────────────────────────────────────────────────────────────────
 
@@ -86,6 +88,9 @@ const fmt = (x: number | null) =>
 const bitrateFor = (v: Variant, tier: "today" | "fundamental", mode: NoiseMode) => {
   if (mode === "empirical_observed_snr") {
     return tier === "today" ? v.bitrate_empirical_today : v.bitrate_empirical_fundamental;
+  }
+  if (mode === "empirical_anchored") {
+    return tier === "today" ? v.bitrate_anchored_today : v.bitrate_anchored_fundamental;
   }
   const physical = tier === "today" ? v.bitrate_physical_today : v.bitrate_physical_fundamental;
   return physical ?? (tier === "today" ? v.bitrate_today : v.bitrate_fundamental);
@@ -332,6 +337,9 @@ export default function ScalingPlots() {
                 >
                   <option value="physical_detector_floor">Physical detector floor</option>
                   <option value="empirical_observed_snr">Empirical observed SNR</option>
+                  {modalityData.variants[0]?.bitrate_anchored_today != null && (
+                    <option value="empirical_anchored">Empirically anchored</option>
+                  )}
                 </select>
               </label>
             )}
@@ -355,6 +363,12 @@ export default function ScalingPlots() {
               <>
                 Physical detector floor · noise today: {modalityData.noise_label_today} ·
                 source amplitude: {modalityData.source_amplitude} {modalityData.source_amplitude_units}
+              </>
+            ) : noiseMode === "empirical_anchored" ? (
+              <>
+                Empirically anchored · boundary voxels excluded; best spatial mode pinned to
+                the literature single-channel SNR × √N_eff array gain (single estimate from
+                the canonical 256-channel layout)
               </>
             ) : (
               <>
