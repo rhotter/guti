@@ -156,7 +156,7 @@ plt.show()
 from guti.data_utils import save_svd
 
 save_svd(s_meg, "meg_openmeeg")
-save_svd(s_eeg, "eeg_openmeeg")
+save_svd(s_eeg, "eeg")
 save_svd(s_eit, "eit_openmeeg")
 # save_svd(s_ip, 'ip_openmeeg')
 # save_svd(s_ecog, 'ecog_openmeeg')

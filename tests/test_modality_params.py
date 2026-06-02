@@ -74,7 +74,7 @@ def test_runnable_modality_names_match_folders_except_meg_variants():
 
 
 def test_folder_name_noise_model_aliases_keep_meg_explicit():
-    assert canonicalize_modality_name("eeg") == "eeg_openmeeg"
+    assert canonicalize_modality_name("eeg") == "eeg"
     assert canonicalize_modality_name("td_fnirs") == "td_fnirs_analytical"
     assert canonicalize_modality_name("us") == "us_analytical"
     assert canonicalize_modality_name("meg_opm") == "meg_opm"

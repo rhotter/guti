@@ -42,6 +42,9 @@ from guti.parameters import Parameters  # noqa: E402
 
 
 DEFAULT_OUTPUT_DIR = Path("results/modality_correlated_noise_summary")
+DEFAULT_MAIN_README = REPO_ROOT / "README.md"
+MAIN_README_TABLE_BEGIN = "<!-- BEGIN GENERATED MODALITY CAPACITY SUMMARY -->"
+MAIN_README_TABLE_END = "<!-- END GENERATED MODALITY CAPACITY SUMMARY -->"
 US_RBC_FREQ_HZ = 2_000_000.0
 US_RBC_REFERENCE_SVD_FREQ_HZ = 50_000.0
 US_RBC_RATE_BANDWIDTH_HZ = 1.0
@@ -65,6 +68,17 @@ US_N_SENSORS = 6000
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--outdir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument(
+        "--main-readme",
+        type=Path,
+        default=DEFAULT_MAIN_README,
+        help="Main README.md to update with the high-level capacity table.",
+    )
+    parser.add_argument(
+        "--no-main-readme",
+        action="store_true",
+        help="Only write the detailed summary outputs; do not update the root README.",
+    )
     return parser
 
 
@@ -312,15 +326,15 @@ def _us_rbc_lambda3_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _eeg_anchored_row(row: dict[str, Any]) -> dict[str, Any]:
-    model = get_noise_model("eeg_openmeeg")
+    model = get_noise_model("eeg")
     output_noise = _float(row, "output_noise")
     output_amplitude = float(model.typical_signal_amplitude)
     output_snr = output_amplitude / output_noise
     bandwidth_hz = _float(row, "bandwidth_hz")
     time_resolution = 1.0 / bandwidth_hz
-    spectrum_kwargs = default_output_frequency_spectrum_kwargs("eeg_openmeeg")
+    spectrum_kwargs = default_output_frequency_spectrum_kwargs("eeg")
     return {
-        "modality": "EEG OpenMEEG",
+        "modality": "EEG",
         "bandwidth_hz": bandwidth_hz,
         "frequency_spectrum_model": "power law beta=1.4, 1-100 Hz",
         "covariance_computation": "Layered spherical Johnson impedance covariance",
@@ -359,8 +373,8 @@ def _eeg_anchored_row(row: dict[str, Any]) -> dict[str, Any]:
 def build_summary(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     selections = [
         {
-            "modality": "eeg_openmeeg",
-            "label": "EEG OpenMEEG",
+            "modality": "eeg",
+            "label": "EEG",
             "output_units": "uV",
             "output_scale": 1e6,
             "frequency_spectrum_model": "power law beta=1.4, 1-100 Hz",
@@ -508,6 +522,60 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _fmt_integer(value: float) -> str:
+    return f"{int(round(value)):,}"
+
+
+def build_main_readme_capacity_section(rows: list[dict[str, Any]]) -> str:
+    lines = [
+        MAIN_README_TABLE_BEGIN,
+        "### Capacity Summary",
+        "",
+        "Generated from `scripts/make_modality_noise_summary.py`. Capacity is the",
+        "water-filled total capacity; capacity per sample is `total capacity / sample rate`.",
+        "",
+        "| Modality | Sample rate (Hz) | Capacity / sample (bits) | Total capacity (bits/s) | SNR | Voxels | Sensors |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in sorted(rows, key=lambda item: float(item["capacity_bits_per_s"]), reverse=True):
+        bandwidth_hz = float(row["bandwidth_hz"])
+        capacity_bits_per_s = float(row["capacity_bits_per_s"])
+        capacity_bits_per_sample = capacity_bits_per_s / bandwidth_hz
+        lines.append(
+            "| {modality} | {sample_rate} | {capacity_per_sample} | {capacity} | {snr} | {voxels} | {sensors} |".format(
+                modality=row["modality"],
+                sample_rate=_fmt_number(bandwidth_hz),
+                capacity_per_sample=_fmt_rate(capacity_bits_per_sample),
+                capacity=_fmt_rate(capacity_bits_per_s),
+                snr=_fmt_number(float(row["snr"])),
+                voxels=_fmt_integer(float(row["n_voxels"])),
+                sensors=_fmt_integer(float(row["n_sensors"])),
+            )
+        )
+    lines.extend(["", MAIN_README_TABLE_END])
+    return "\n".join(lines)
+
+
+def write_main_readme_capacity_table(path: Path, rows: list[dict[str, Any]]) -> None:
+    section = build_main_readme_capacity_section(rows)
+    text = path.read_text(encoding="utf-8")
+    if MAIN_README_TABLE_BEGIN in text and MAIN_README_TABLE_END in text:
+        start = text.index(MAIN_README_TABLE_BEGIN)
+        end = text.index(MAIN_README_TABLE_END) + len(MAIN_README_TABLE_END)
+        new_text = text[:start] + section + text[end:]
+    elif "### Channel Capacities" in text and "### SVD Spectrum" in text:
+        start = text.index("### Channel Capacities")
+        end = text.index("### SVD Spectrum")
+        new_text = text[:start] + section + "\n\n" + text[end:]
+    else:
+        first_break = text.find("\n\n")
+        if first_break == -1:
+            new_text = text.rstrip() + "\n\n" + section + "\n"
+        else:
+            new_text = text[: first_break + 2] + section + "\n\n" + text[first_break + 2 :]
+    path.write_text(new_text, encoding="utf-8")
+
+
 def write_markdown(
     path: Path,
     rows: list[dict[str, Any]],
@@ -604,7 +672,7 @@ def write_markdown(
             "",
             "| Modality | Output amplitude basis | Output noise basis |",
             "| --- | --- | --- |",
-            "| EEG OpenMEEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise, and bitrate/capacity use that same SNR through the anchored EEG mode-gain calculation with output power-law beta=1.4 over 1--100 Hz. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |",
+            "| EEG | `5 uV` typical evoked EEG signal amplitude from `guti/noise_models.py`; displayed SNR is this typical amplitude divided by detector noise, and bitrate/capacity use that same SNR through the anchored EEG mode-gain calculation with output power-law beta=1.4 over 1--100 Hz. | Johnson-Nyquist electrode/front-end noise with `R=5 kOhm`, `T=310 K`, `B=100 Hz`; Johnson covariance uses layered spherical EEG impedance for correlation. |",
             f"| MEG OPM | `100 fT` typical evoked MEG field amplitude | `5 fT/sqrt(Hz)` OPM field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
             f"| MEG SQUID | `100 fT` typical evoked MEG field amplitude | `1 fT/sqrt(Hz)` SQUID field noise integrated over `B=100 Hz`; {meg_noise_basis} |",
             "| fNIRS CW | `0.001` relative-intensity hemodynamic response (`1000 ppm`) | Photon shot noise from `P=5 mW`, `lambda=830 nm`, `OD=4`, divided over channels and bandwidth. |",
@@ -855,6 +923,9 @@ def main() -> int:
         encoding="utf-8",
     )
     write_markdown(args.outdir / "README.md", rows, notes, load_errors=errors)
+    if not args.no_main_readme:
+        write_main_readme_capacity_table(args.main_readme, rows)
+        print(f"Updated main README at {args.main_readme}")
     print(f"Wrote {len(rows)} rows to {args.outdir}")
     if errors:
         print(f"Skipped {len(errors)} load errors")

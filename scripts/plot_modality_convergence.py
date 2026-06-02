@@ -46,15 +46,15 @@ class SweepSpec:
 
 SWEEP_SPECS = (
     SweepSpec(
-        name="eeg_openmeeg",
-        label="EEG OpenMEEG",
-        noise_model="eeg_openmeeg",
+        name="eeg",
+        label="EEG",
+        noise_model="eeg",
         variant_dirs=(
-            "results/variants/eeg_openmeeg_clean_sweep_20260601_margin5mm",
-            "results/variants/eeg_openmeeg_correlated_noise_20260601_margin5mm",
-            "results/variants/eeg_openmeeg_correlated_noise_exponential_L18p688mm_20260601_margin5mm",
-            "results/variants/eeg_openmeeg_johnson_volume_covariance_20260601_margin5mm",
-            "results/variants/eeg_openmeeg_spherical_johnson_covariance_20260602_margin5mm",
+            "results/variants/eeg_clean_sweep_20260601_margin5mm",
+            "results/variants/eeg_correlated_noise_20260601_margin5mm",
+            "results/variants/eeg_correlated_noise_exponential_L18p688mm_20260601_margin5mm",
+            "results/variants/eeg_johnson_volume_covariance_20260601_margin5mm",
+            "results/variants/eeg_spherical_johnson_covariance_20260602_margin5mm",
         ),
         source_orientations=3,
     ),

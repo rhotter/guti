@@ -116,7 +116,7 @@ def default_output_frequency_spectrum_kwargs(
     the HRF temporal spectrum, and the remaining modalities keep the historical
     single-band behavior unless a caller supplies an explicit spectrum.
     """
-    if modality in {"eeg", "eeg_openmeeg"}:
+    if modality == "eeg":
         return {
             "output_power_law_beta": 1.4,
             "output_power_law_min_freq_hz": DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,

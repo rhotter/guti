@@ -76,7 +76,7 @@ BITRATE_MODES = {
 # Per-modality default mode. EEG's absolute BEM gain is unreliable, so it defaults
 # to the empirically anchored estimate; everything else keeps the physical floor.
 DEFAULT_BITRATE_MODE_BY_MODALITY = {
-    "eeg_openmeeg": "empirical_anchored",
+    "eeg": "empirical_anchored",
 }
 
 
@@ -86,7 +86,7 @@ def default_bitrate_mode_for(modality):
 MODALITIES = {
     "meg_opm":            "MEG OPM",
     "meg_squid":          "MEG SQUID",
-    "eeg_openmeeg":       "EEG (OpenMEEG)",
+    "eeg":       "EEG",
     "cw_fnirs": "fNIRS CW",
     "td_fnirs": "fNIRS TD",
     "fmri_bold":          "fMRI BOLD",
@@ -97,7 +97,7 @@ MODALITIES = {
 TIME_RESOLUTION = {
     "meg_opm":            0.01,   # 100 Hz
     "meg_squid":          0.01,
-    "eeg_openmeeg":       0.01,
+    "eeg":       0.01,
     "cw_fnirs": 1.0,  # 1 Hz hemodynamic
     "td_fnirs": 1.0,  # 1 Hz hemodynamic
     "fmri_bold":           2.0,  # TR = 2 s; HRF handled explicitly below
@@ -213,7 +213,7 @@ def compute_bitrate(
         )
         if snr_ref <= 0.0:
             return None
-        if modality == "eeg_openmeeg":
+        if modality == "eeg":
             from guti.modalities.eeg.calibration import anchored_eeg_bitrate
 
             return anchored_eeg_bitrate(snr_ref, time_resolution=time_resolution)
