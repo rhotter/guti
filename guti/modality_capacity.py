@@ -86,9 +86,18 @@ def _us_rbc_output_amplitude_pa() -> float:
 
 
 def _us_rbc_bitrate_capacity(
-    s_capacity: np.ndarray, n_sources: int, n_outputs: int
+    s_capacity: np.ndarray,
+    n_sources: int,
+    n_outputs: int,
+    svd_frequency_hz: float = _US_RBC_REFERENCE_SVD_FREQ_HZ,
 ) -> dict[str, Any]:
-    """README 2 MHz RBC-backscatter US path with λ³ spatial scaling."""
+    """README 2 MHz RBC-backscatter US path with λ³ spatial scaling.
+
+    The SVD spectrum is computed at ``svd_frequency_hz`` (the variant's own
+    frequency); the spatial mode count is scaled to the 2 MHz imaging frequency by
+    (f_image / f_svd)³, so a frequency sweep stays referenced to the same 2 MHz
+    imaging target instead of a hardcoded 50 kHz.
+    """
     output_amplitude_pa = _us_rbc_output_amplitude_pa()
     noise_pressure_pa = _us_rbc_noise_pressure_pa()
     time_resolution_s = 1.0 / _US_RBC_RATE_BANDWIDTH_HZ
@@ -96,7 +105,7 @@ def _us_rbc_bitrate_capacity(
         s_capacity, average_output_power=output_amplitude_pa**2,
         n_sources=n_sources, n_outputs=n_outputs,
     )
-    lambda3_scale = (_US_RBC_FREQ_HZ / _US_RBC_REFERENCE_SVD_FREQ_HZ) ** 3
+    lambda3_scale = (_US_RBC_FREQ_HZ / float(svd_frequency_hz)) ** 3
     bitrate = get_bitrate(
         s_capacity, n_sources=n_sources, total_input_power=total_input_power,
         noise=noise_pressure_pa, time_resolution=time_resolution_s,
@@ -181,7 +190,8 @@ def compute_bitrate_capacity(
     )
 
     if noise_model == "us_analytical":
-        result = _us_rbc_bitrate_capacity(s_capacity, n_sources, n_outputs)
+        svd_freq = float(params.frequency_hz or _US_RBC_REFERENCE_SVD_FREQ_HZ)
+        result = _us_rbc_bitrate_capacity(s_capacity, n_sources, n_outputs, svd_freq)
         result.update({"n_sensors": n_sensors, "n_voxels": n_voxels,
                        "n_outputs": n_outputs, "n_sources": n_sources})
         return result
