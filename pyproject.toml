@@ -2,6 +2,18 @@
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
+[project]
+name = "guti"
+version = "0.1.0"
+description = "Gut-of-imaging project helper functions"
+requires-python = ">=3.8,<4.0"
+authors = [
+    { name = "Lev Chizhov" },
+    { name = "Raffi Hotter" },
+    { name = "Thomas Ribeiro" },
+    { name = "Guillermo Valle" },
+]
+
 [tool.poetry]
 name = "guti"
 version = "0.1.0"
@@ -17,6 +29,44 @@ python = "^3.8"
 # (e.g. compute_information_maps, export_svd_json), as they did when those
 # scripts lived at the repo root.
 pythonpath = ["scripts"]
+
+[dependency-groups]
+blur_1d = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "torch",
+]
+cw_fnirs = [
+    "numpy",
+    "torch",
+    "tqdm",
+]
+td_fnirs = [
+    "numpy",
+    "torch",
+    "tqdm",
+]
+meg = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "torch",
+]
+eeg = [
+    "numpy",
+    "matplotlib",
+    "openmeeg>=2.5",
+    "torch",
+]
+us = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "torch",
+    "tqdm",
+    "modal",
+]
 
 # [tool.poetry.group.dev.dependencies]
 # Add development dependencies here if needed
