@@ -1,0 +1,4 @@
+# blur_1d modality (1D Gaussian blur forward model)
+numpy
+scipy
+matplotlib

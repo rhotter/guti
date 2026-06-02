@@ -1,0 +1,4 @@
+# EEG modality (OpenMEEG BEM forward model)
+numpy
+matplotlib        # scalp_resistance.py plotting
+openmeeg>=2.5     # in-process BEM (read_geometry API; 2.5+)

@@ -6,14 +6,14 @@ assembled with OpenMEEG via a boundary-element pipeline.
 
 ``compute_forward_model``:
   1. writes the 3-layer BEM model + source/sensor geometry (guti.core), then
-  2. shells out to ``compute_eeg_leadfield.sh <model_dir> <out_dir>``
-     (OpenMEEG om_assemble / om_minverser / om_gain), then
-  3. loads the resulting lead field (n_sensors x 3*n_grid_points) from the
-     OpenMEEG ``.mat`` (HDF5) output.
+  2. assembles the lead field in-process with OpenMEEG's Python bindings
+     (HeadMat → invert → DipSourceMat / Head2EEGMat → GainEEG), the same
+     pipeline the ``om_assemble``/``om_minverser``/``om_gain`` CLI tools run,
+     and returns the gain as a dense array (n_sensors x 3*n_grid_points).
 
-Requires OpenMEEG (``om_*`` on PATH) and h5py; both are used lazily so the
-class can be imported/inspected without them. This path has not been executed
-in the current environment (no OpenMEEG installed).
+Requires the ``openmeeg`` Python package; it is imported lazily so the class
+can be imported/inspected without it. This path has not been executed in the
+current environment (OpenMEEG not installed).
 """
 
 from pathlib import Path
@@ -26,8 +26,6 @@ from guti.core import create_eeg_bem_model, get_grid_positions
 
 _HERE = Path(__file__).parent
 _MODEL_DIR = _HERE / "_openmeeg_model"
-_OUT_DIR = _HERE / "_openmeeg_out"
-_LEADFIELD_SH = _HERE / "compute_eeg_leadfield.sh"
 
 
 class EEGModality(ImagingModality):
@@ -66,11 +64,15 @@ class EEGModality(ImagingModality):
         self.params.num_brain_grid_points = len(self.sources)
 
     def compute_forward_model(self) -> np.ndarray:
-        import subprocess
-        import h5py
+        try:
+            import openmeeg as om
+        except ImportError as e:
+            raise ImportError(
+                "EEG forward model needs the OpenMEEG Python bindings; "
+                "install with `pip install openmeeg` (or `conda install -c conda-forge openmeeg`)."
+            ) from e
 
         _MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        _OUT_DIR.mkdir(parents=True, exist_ok=True)
 
         create_eeg_bem_model(
             source_spacing_mm=self.params.source_spacing_mm or 5.0,
@@ -79,24 +81,22 @@ class EEGModality(ImagingModality):
             output_dir=str(_MODEL_DIR),
         )
 
-        result = subprocess.run(
-            ["bash", str(_LEADFIELD_SH), str(_MODEL_DIR), str(_OUT_DIR)],
-            capture_output=True,
-            text=True,
+        # In-process equivalent of the om_assemble / om_minverser / om_gain CLI:
+        geom = om.read_geometry(
+            str(_MODEL_DIR / "sphere_head.geom"),
+            str(_MODEL_DIR / "sphere_head.cond"),
         )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "OpenMEEG EEG leadfield computation failed (is OpenMEEG on PATH?):\n"
-                f"{result.stdout}\n{result.stderr}"
-            )
+        dipoles = om.Matrix(str(_MODEL_DIR / "dipole_locations.txt"))
+        electrodes = om.Sensors(str(_MODEL_DIR / "sensor_locations.txt"), geom)
 
-        leadfield_path = _OUT_DIR / "eeg_leadfield.mat"
-        if not leadfield_path.exists():
-            raise FileNotFoundError(f"Leadfield not found at {leadfield_path}")
-        # OpenMEEG writes a MATLAB v7.3 (HDF5) file with the gain under 'linop'.
-        with h5py.File(leadfield_path, "r") as f:
-            leadfield = np.array(f["linop"])
-        return leadfield
+        hm = om.HeadMat(geom)
+        hm.invert()  # in place; replaces om_minverser (GainEEG wants HM^{-1})
+        dsm = om.DipSourceMat(geom, dipoles, "Brain")  # -DSM (dipoles live in the Brain domain)
+        h2em = om.Head2EEGMat(geom, electrodes)  # -H2EM
+        gain = om.GainEEG(hm, dsm, h2em)  # -EEG
+
+        # gain is (n_sensors x 3*n_grid_points); copy out of the OpenMEEG buffer.
+        return np.array(gain.array(), dtype=np.float64)
 
 
 if __name__ == "__main__":
