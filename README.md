@@ -29,9 +29,12 @@ Usually in linear algebra, you think of matrix inversion as a binary thing — l
 
 ### Running the code
 
+```bash
+uv run --group blur_1d python run_modality.py blur_1d --no-save
 ```
-uv venv
-source .venv/bin/activate
-uv pip install -e .
-uv pip install torch numpy matplotlib ipykernel tqdm jupyter scipy
+
+Swap in another modality group and command as needed:
+
+```bash
+uv run --group cw_fnirs python run_modality.py cw_fnirs --num_sensors 400
 ```
