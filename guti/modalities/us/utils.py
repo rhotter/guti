@@ -6,10 +6,214 @@ jwave ultrasound helpers live under ``guti.modalities._legacy.us_jwave``.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import torch
 
-from guti.core import BRAIN_RADIUS
+from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
+from guti.linop import ChunkedForwardOperator
+
+# Free-field constants shared by every entry point (the in-process USModality
+# and the production analytical.py CLI), so the physics is defined exactly once.
+SOUND_SPEED_M_S = 1500.0          # water-like free-field approximation
+POINTS_PER_WAVELENGTH = 24        # voxel size = c / (PPW * f)
+TIME_DURATION_S = 120e-6          # simulated window
+RECEIVER_OFFSET_MM = 8.0          # receiver standoff from the scalp
+DEFAULT_CENTER_FREQ_HZ = 50e3
+DEFAULT_RECEIVER_BATCH = 256      # receivers per matrix-free row block
+
+
+def free_field_source_spacing_mm(n_sources: int) -> float:
+    """Grid spacing (mm) giving ~``n_sources`` points in the brain hemisphere."""
+    volume_mm3 = (2.0 / 3.0) * np.pi * BRAIN_RADIUS**3
+    return (volume_mm3 / n_sources) ** (1.0 / 3.0)
+
+
+def create_free_field_sources(
+    n_sources: int | None = None, *, source_spacing_mm: float | None = None
+) -> np.ndarray:
+    """Brain-grid source positions in **meters**.
+
+    Provide either ``n_sources`` (spacing derived to hit that count) or an
+    explicit ``source_spacing_mm``.
+    """
+    if (n_sources is None) == (source_spacing_mm is None):
+        raise ValueError("Pass exactly one of n_sources or source_spacing_mm")
+    if source_spacing_mm is None:
+        source_spacing_mm = free_field_source_spacing_mm(n_sources)
+    return get_grid_positions(grid_spacing_mm=source_spacing_mm) * 1e-3
+
+
+def create_free_field_receivers(n_sensors: int) -> np.ndarray:
+    """Ultrasound receiver positions in **meters**."""
+    return get_sensor_positions(n_sensors=n_sensors, offset=RECEIVER_OFFSET_MM) * 1e-3
+
+
+def free_field_time_axis(center_frequency: float) -> tuple[np.ndarray, float]:
+    """Return ``(time_axis, time_step)`` for the free-field simulation window."""
+    time_step = 1e-1 / center_frequency
+    time_axis = np.arange(0, TIME_DURATION_S, time_step)
+    return time_axis, time_step
+
+
+def free_field_voxel_size(center_frequency: float) -> np.ndarray:
+    """Isotropic voxel size (m) = ``c / (PPW * f)`` per axis."""
+    dx_m = SOUND_SPEED_M_S / (POINTS_PER_WAVELENGTH * center_frequency)
+    return np.array([dx_m, dx_m, dx_m])
+
+
+def build_source_signal(
+    time_axis: np.ndarray,
+    center_frequency: float,
+    signal_type: str = "tone_burst",
+    signal_cycles: float = 2.0,
+    signal_window: str = "hann",
+) -> np.ndarray:
+    """Per-source excitation waveform: continuous wave or windowed tone burst."""
+    carrier = np.sin(2 * np.pi * time_axis * center_frequency)
+    if signal_type == "cw":
+        return carrier
+    if signal_type != "tone_burst":
+        raise ValueError(f"Unsupported signal_type={signal_type!r}")
+
+    if time_axis.size == 0:
+        return carrier
+    if signal_cycles <= 0:
+        raise ValueError("signal_cycles must be positive")
+
+    if time_axis.size == 1:
+        dt = 1.0 / (10.0 * center_frequency)
+    else:
+        dt = float(time_axis[1] - time_axis[0])
+    active_duration = signal_cycles / center_frequency
+    active_samples = max(1, min(time_axis.size, int(round(active_duration / dt))))
+
+    envelope = np.ones(active_samples, dtype=np.float64)
+    if signal_window == "hann":
+        if active_samples > 1:
+            envelope = np.hanning(active_samples)
+    elif signal_window != "rect":
+        raise ValueError(f"Unsupported signal_window={signal_window!r}")
+
+    signal = np.zeros_like(carrier)
+    signal[:active_samples] = carrier[:active_samples] * envelope
+    return signal
+
+
+def make_free_field_chunk_fn(
+    source_positions_t: torch.Tensor,
+    receiver_positions: np.ndarray,
+    source_signals_t: torch.Tensor,
+    *,
+    time_step: float,
+    center_frequency: float,
+    voxel_size_t: torch.Tensor,
+    temporal_sampling: int,
+    device: str,
+    num_sources: int,
+    use_complex_amplitudes: bool = False,
+):
+    """Return ``compute_chunk(start, end)`` for a batch of receivers.
+
+    The closure yields the sensor-time rows for receivers ``[start:end)`` as a
+    ``((end-start) * nt, num_sources)`` float tensor — the single definition of
+    the receiver-batch chunk shared by ``USModality`` and ``analytical.py``.
+    """
+
+    def compute_chunk(start: int, end: int) -> torch.Tensor:
+        receivers_t = torch.as_tensor(receiver_positions[start:end], device=device)
+        pf = simulate_free_field_propagation(
+            source_positions_t,
+            receivers_t,
+            source_signals_t,
+            time_step,
+            center_frequency,
+            voxel_size_t,
+            device=device,
+            compute_time_series=not use_complex_amplitudes,
+            temporal_sampling=temporal_sampling,
+        )
+        if use_complex_amplitudes:
+            return torch.cat([pf.real, pf.imag], dim=0).float()
+        # (batch, n_sources, nt) -> (batch*nt, n_sources)
+        return pf.permute(0, 2, 1).reshape(-1, num_sources).float()
+
+    return compute_chunk
+
+
+def build_free_field_operator(
+    source_positions_m: np.ndarray,
+    receiver_positions_m: np.ndarray,
+    *,
+    center_frequency: float = DEFAULT_CENTER_FREQ_HZ,
+    temporal_sampling: int = 1,
+    source_signals: np.ndarray | None = None,
+    signal_type: str = "cw",
+    signal_cycles: float = 2.0,
+    signal_window: str = "hann",
+    receiver_batch: int = DEFAULT_RECEIVER_BATCH,
+    backend: str = "torch",
+    device: str = "cpu",
+    dtype=None,
+) -> tuple[ChunkedForwardOperator, dict]:
+    """Assemble the matrix-free free-field forward operator.
+
+    Returns ``(operator, meta)`` where ``meta`` carries ``time_step``,
+    ``time_resolution`` (``time_step * temporal_sampling``), ``nt`` and
+    ``n_outputs``. Positions are in meters. When ``source_signals`` is omitted a
+    per-source waveform is built from ``signal_type`` and tiled across sources.
+    """
+    if dtype is None:
+        dtype = torch.float32
+    time_axis, time_step = free_field_time_axis(center_frequency)
+    nt = len(range(0, time_axis.shape[0], temporal_sampling))
+    n_sources = len(source_positions_m)
+    n_receivers = len(receiver_positions_m)
+
+    if source_signals is None:
+        waveform = build_source_signal(
+            time_axis,
+            center_frequency,
+            signal_type=signal_type,
+            signal_cycles=signal_cycles,
+            signal_window=signal_window,
+        )
+        source_signals = np.tile(waveform, (n_sources, 1))
+
+    source_positions_t = torch.as_tensor(source_positions_m, device=device)
+    source_signals_t = torch.as_tensor(source_signals, device=device)
+    voxel_size_t = torch.as_tensor(free_field_voxel_size(center_frequency), device=device)
+
+    chunk_fn = make_free_field_chunk_fn(
+        source_positions_t,
+        receiver_positions_m,
+        source_signals_t,
+        time_step=time_step,
+        center_frequency=center_frequency,
+        voxel_size_t=voxel_size_t,
+        temporal_sampling=temporal_sampling,
+        device=device,
+        num_sources=n_sources,
+    )
+
+    operator = ChunkedForwardOperator.from_item_batches(
+        n_sources,
+        n_receivers,
+        nt,
+        chunk_fn,
+        batch_size=receiver_batch,
+        backend=backend,
+        dtype=dtype,
+        device=device,
+    )
+    meta = {
+        "time_step": time_step,
+        "time_resolution": time_step * temporal_sampling,
+        "nt": nt,
+        "n_outputs": n_receivers * nt,
+    }
+    return operator, meta
 
 
 def simulate_free_field_propagation(

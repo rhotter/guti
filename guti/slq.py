@@ -89,7 +89,10 @@ def _quadrature(alphas, betas, f) -> float:
     T = np.zeros((t, t), dtype=np.float64)
     for i in range(t):
         T[i, i] = alphas[i]
-    for i in range(len(betas)):
+    # When Lanczos runs all `t` steps without early termination it returns a
+    # trailing beta (the residual norm after step t); that entry belongs to a
+    # (t+1)x(t+1) matrix, not this t x t tridiagonal, so cap at t-1 off-diagonals.
+    for i in range(min(len(betas), t - 1)):
         T[i, i + 1] = betas[i]
         T[i + 1, i] = betas[i]
     theta, Y = np.linalg.eigh(T)

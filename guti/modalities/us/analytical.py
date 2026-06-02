@@ -14,8 +14,13 @@ import os
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from guti.data_utils import save_svd
-from guti.core import BRAIN_RADIUS, get_grid_positions, get_sensor_positions
-from guti.modalities.us.utils import simulate_free_field_propagation
+from guti.modalities.us.utils import (
+    build_source_signal,
+    free_field_voxel_size,
+    make_free_field_chunk_fn,
+    create_free_field_sources as create_free_field_sources_real,
+    create_free_field_receivers as create_free_field_receivers_real,
+)
 from guti.noise_models import (
     DEFAULT_NOISE_CORRELATION_KERNEL,
     DEFAULT_NOISE_CORRELATION_LENGTH_MM,
@@ -51,62 +56,9 @@ def set_torch_linalg_backend(backend: str) -> str:
         return "default"
 
 
-def build_source_signal(
-    time_axis: np.ndarray,
-    center_frequency: float,
-    signal_type: str = "tone_burst",
-    signal_cycles: float = 2.0,
-    signal_window: str = "hann",
-) -> np.ndarray:
-    carrier = np.sin(2 * np.pi * time_axis * center_frequency)
-    if signal_type == "cw":
-        return carrier
-    if signal_type != "tone_burst":
-        raise ValueError(f"Unsupported signal_type={signal_type!r}")
-
-    if time_axis.size == 0:
-        return carrier
-    if signal_cycles <= 0:
-        raise ValueError("signal_cycles must be positive")
-
-    if time_axis.size == 1:
-        dt = 1.0 / (10.0 * center_frequency)
-    else:
-        dt = float(time_axis[1] - time_axis[0])
-    active_duration = signal_cycles / center_frequency
-    active_samples = max(1, min(time_axis.size, int(round(active_duration / dt))))
-
-    envelope = np.ones(active_samples, dtype=np.float64)
-    if signal_window == "hann":
-        if active_samples > 1:
-            envelope = np.hanning(active_samples)
-    elif signal_window != "rect":
-        raise ValueError(f"Unsupported signal_window={signal_window!r}")
-
-    signal = np.zeros_like(carrier)
-    signal[:active_samples] = carrier[:active_samples] * envelope
-    return signal
-
-
-def create_free_field_sources_real(n_sources: int) -> np.ndarray:
-    """Return approximately ``n_sources`` brain-grid positions in meters."""
-    grid_spacing_mm = ((2.0 / 3.0) * np.pi * BRAIN_RADIUS**3 / n_sources) ** (
-        1.0 / 3.0
-    )
-    return get_grid_positions(grid_spacing_mm=grid_spacing_mm) * 1e-3
-
-
-def create_free_field_receivers_real(n_sensors: int) -> np.ndarray:
-    """Return ultrasound receiver positions in meters."""
-    return get_sensor_positions(n_sensors=n_sensors, offset=8.0) * 1e-3
-
-
-def free_field_voxel_size(center_frequency: float) -> np.ndarray:
-    min_speed_of_sound = 1500.0
-    points_per_wavelength = 24
-    dx_m = min_speed_of_sound / (points_per_wavelength * center_frequency)
-    return np.array([dx_m, dx_m, dx_m])
-
+# Free-field geometry / waveform / voxel helpers and the receiver-batch chunk
+# function are imported from guti.modalities.us.utils (the single shared
+# definition used by USModality too) — see the imports above.
 
 
 # ---------------------------------------------------------------------------
@@ -403,50 +355,37 @@ if args.slq_streaming and args.slq_probe_parallel:
         torch.tensor(voxel_size, device=f"cuda:{dev}") for dev in stream_device_ids
     ]
 
-def compute_chunk_matrix(start, end):
-    receiver_positions_t = torch.tensor(sensor_positions[start:end], device=device)
-    pf_chunk = simulate_free_field_propagation(
-        source_positions_t,
-        receiver_positions_t,
-        source_signals_t,
-        time_step,
-        center_frequency,
-        voxel_size_t,
-        device=device,
-        compute_time_series=not use_complex_ampitudes,
-        temporal_sampling=temporal_sampling
-    )
-    if use_complex_ampitudes:
-        return torch.cat([pf_chunk.real, pf_chunk.imag], dim=0).float()
-    return pf_chunk.permute(0, 2, 1).reshape(-1, num_sources_total).float()
+# Single-device receiver-batch chunk fn (shared with USModality via utils).
+compute_chunk_matrix = make_free_field_chunk_fn(
+    source_positions_t,
+    sensor_positions,
+    source_signals_t,
+    time_step=time_step,
+    center_frequency=center_frequency,
+    voxel_size_t=voxel_size_t,
+    temporal_sampling=temporal_sampling,
+    device=device,
+    num_sources=num_sources_total,
+    use_complex_amplitudes=use_complex_ampitudes,
+)
 
 
 def make_compute_chunk_matrix_for_device(dev_id: int):
     if stream_device_ids is None or source_positions_t_list is None:
         raise ValueError("Streaming probe-parallel tensors are not initialized")
     idx = stream_device_ids.index(dev_id)
-    source_positions_t_dev = source_positions_t_list[idx]
-    source_signals_t_dev = source_signals_t_list[idx]
-    voxel_size_t_dev = voxel_size_t_list[idx]
-
-    def _compute(start, end):
-        receiver_positions_t = torch.tensor(sensor_positions[start:end], device=f"cuda:{dev_id}")
-        pf_chunk = simulate_free_field_propagation(
-            source_positions_t_dev,
-            receiver_positions_t,
-            source_signals_t_dev,
-            time_step,
-            center_frequency,
-            voxel_size_t_dev,
-            device=f"cuda:{dev_id}",
-            compute_time_series=not use_complex_ampitudes,
-            temporal_sampling=temporal_sampling
-        )
-        if use_complex_ampitudes:
-            return torch.cat([pf_chunk.real, pf_chunk.imag], dim=0).float()
-        return pf_chunk.permute(0, 2, 1).reshape(-1, num_sources_total).float()
-
-    return _compute
+    return make_free_field_chunk_fn(
+        source_positions_t_list[idx],
+        sensor_positions,
+        source_signals_t_list[idx],
+        time_step=time_step,
+        center_frequency=center_frequency,
+        voxel_size_t=voxel_size_t_list[idx],
+        temporal_sampling=temporal_sampling,
+        device=f"cuda:{dev_id}",
+        num_sources=num_sources_total,
+        use_complex_amplitudes=use_complex_ampitudes,
+    )
 
 G = None
 if not args.slq_streaming:

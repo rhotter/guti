@@ -177,6 +177,44 @@ class ChunkedForwardOperator(ForwardOperator):
             n, block_builder, counts, backend=backend, dtype=dtype, device=device
         )
 
+    @classmethod
+    def from_item_batches(
+        cls,
+        n: int,
+        n_items: int,
+        rows_per_item: int,
+        build_batch: Callable[[int, int], object],
+        *,
+        batch_size: int,
+        backend: str = "numpy",
+        dtype=None,
+        device=None,
+    ) -> "ChunkedForwardOperator":
+        """Build from items that each contribute a fixed number of output rows.
+
+        ``n_items`` units (e.g. sensors/receivers) are processed in groups of
+        ``batch_size``; each unit contributes ``rows_per_item`` rows (e.g. time
+        gates), so block ``i`` has ``(#items in batch) * rows_per_item`` rows.
+        ``build_batch(start_item, end_item)`` returns that block as an array of
+        shape ``((end-start) * rows_per_item, n)``.
+
+        This factors out the ultrasound receiver-batch glue so any modality can
+        assemble a matrix-free operator the same way.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be a positive integer")
+        starts = list(range(0, n_items, batch_size))
+        counts = [(min(s + batch_size, n_items) - s) * rows_per_item for s in starts]
+
+        def block_builder(i, _starts=starts, _bs=batch_size, _ni=n_items):
+            s = _starts[i]
+            e = min(s + _bs, _ni)
+            return build_batch(s, e)
+
+        return cls(
+            n, block_builder, counts, backend=backend, dtype=dtype, device=device
+        )
+
     @property
     def num_blocks(self) -> int:
         return len(self.block_row_counts)

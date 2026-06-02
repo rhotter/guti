@@ -9,37 +9,25 @@ the operator is hundreds of GB. Instead it uses the matrix-free pipeline:
     bitrate_method="slq" -> guti.slq.bitrate_slq     (trace-log via stochastic
                                                       Lanczos quadrature, no SVD)
 
-So ``run()`` dispatches to the SLQ path in the base class. The geometry and
-free-field propagation mirror the production Modal pipeline
-(``modal_us_analytical.py`` / ``run_modal_us_analytical_sweep.py``), which
-remains the heavy multi-GPU runner for large sweeps — this class is the
-in-process, single-machine entry point sharing the same physics and the same
-shared SLQ estimator.
+So ``run()`` dispatches to the SLQ path in the base class. Geometry and
+free-field physics come from :mod:`guti.modalities.us.utils` (the single shared
+definition), so this in-process, single-machine entry point and the production
+GPU CLI (``analytical.py`` / ``scripts/run_modal_us_analytical_sweep.py``) build
+the exact same operator.
 
 Requires torch; imported lazily so the class can be inspected without it.
 """
 
-import numpy as np
-
 from guti.base_modality import ImagingModality
 from guti.parameters import Parameters
-from guti.core import get_grid_positions, get_sensor_positions, BRAIN_RADIUS
-
-# Free-field constants (mirror run_us_simulation in modal_us_analytical.py).
-_MIN_SPEED = 1500.0          # m/s
-_PPW = 24                    # points per wavelength -> voxel size
-_TIME_DURATION_S = 120e-6
-_DEFAULT_CENTER_FREQ_HZ = 50e3
-_RECEIVER_BATCH = 256        # receivers per row-block
-
-
-def _source_spacing_for_count(n_sources: int) -> float:
-    """Grid spacing (mm) giving ~n_sources points in the brain hemisphere.
-
-    Matches ``create_sources_real`` in the Modal pipeline.
-    """
-    volume = (2.0 / 3.0) * np.pi * BRAIN_RADIUS**3
-    return (volume / n_sources) ** (1.0 / 3.0)
+from guti.modalities.us.utils import (
+    DEFAULT_CENTER_FREQ_HZ as _DEFAULT_CENTER_FREQ_HZ,
+    DEFAULT_RECEIVER_BATCH as _RECEIVER_BATCH,
+    free_field_source_spacing_mm as _source_spacing_for_count,
+    create_free_field_sources,
+    create_free_field_receivers,
+    build_free_field_operator,
+)
 
 
 class USModality(ImagingModality):
@@ -87,67 +75,28 @@ class USModality(ImagingModality):
         )
 
     def setup_geometry(self) -> None:
-        # Match the production free-field pipeline: source/sensor helpers return
-        # mm, while propagation physics is in meters.
-        self.sources = get_grid_positions(self.params.source_spacing_mm) * 1e-3
-        self.sensors = get_sensor_positions(self.params.num_sensors, offset=8.0) * 1e-3
+        # Shared helpers return positions in meters (propagation physics is in m).
+        self.sources = create_free_field_sources(
+            source_spacing_mm=self.params.source_spacing_mm
+        )
+        self.sensors = create_free_field_receivers(self.params.num_sensors)
         self.params.num_brain_grid_points = len(self.sources)
 
     def forward_operator(self):
         import torch
-        from guti.linop import ChunkedForwardOperator
-        from guti.modalities.us.utils import simulate_free_field_propagation
 
-        center_freq = self.params.frequency_hz or _DEFAULT_CENTER_FREQ_HZ
-        ts = self.params.temporal_sampling or 1
-
-        time_step = 1e-1 / center_freq
-        time_axis = np.arange(0, _TIME_DURATION_S, time_step)
-        nt = len(range(0, time_axis.shape[0], ts))
-
-        n_sources = len(self.sources)
-        source_signals = np.tile(
-            np.sin(2 * np.pi * time_axis * center_freq), (n_sources, 1)
-        )
-        dx_m = _MIN_SPEED / (_PPW * center_freq)
-        voxel_size = np.array([dx_m, dx_m, dx_m])
-
-        sources_t = torch.as_tensor(self.sources)
-        signals_t = torch.as_tensor(source_signals)
-        voxel_t = torch.as_tensor(voxel_size)
-
-        n_recv = len(self.sensors)
-        starts = list(range(0, n_recv, _RECEIVER_BATCH))
-        block_row_counts = [
-            (min(s + _RECEIVER_BATCH, n_recv) - s) * nt for s in starts
-        ]
-
-        self.params.time_resolution = time_step * ts
-
-        def block_builder(i, _starts=starts):
-            s = _starts[i]
-            e = min(s + _RECEIVER_BATCH, n_recv)
-            receivers_t = torch.as_tensor(self.sensors[s:e])
-            pf = simulate_free_field_propagation(
-                sources_t,
-                receivers_t,
-                signals_t,
-                time_step,
-                center_freq,
-                voxel_t,
-                compute_time_series=True,
-                temporal_sampling=ts,
-            )
-            # (batch, nt, n_sources) -> (batch*nt, n_sources)
-            return pf.permute(0, 2, 1).reshape(-1, n_sources).float()
-
-        return ChunkedForwardOperator(
-            n_sources,
-            block_builder,
-            block_row_counts,
+        operator, meta = build_free_field_operator(
+            self.sources,
+            self.sensors,
+            center_frequency=self.params.frequency_hz or _DEFAULT_CENTER_FREQ_HZ,
+            temporal_sampling=self.params.temporal_sampling or 1,
+            receiver_batch=_RECEIVER_BATCH,
             backend="torch",
+            device="cpu",
             dtype=torch.float32,
         )
+        self.params.time_resolution = meta["time_resolution"]
+        return operator
 
     def compute_forward_model(self):
         """Dense fallback (small configs only) for the SVD path / debugging.
