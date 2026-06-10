@@ -20,13 +20,15 @@ Per-modality detector noise (per sensor, at the reference sensor count and bandw
 
 | Modality | Current noise level | Noise limit | Output amplitude |
 | --- | ---: | ---: | ---: |
-| EEG | 9.25e-08 V | 9.25e-08 V | 5e-06 V |
-| MEG (OPM) | 5e-14 T | 5e-15 T | 1e-13 T |
-| MEG (SQUID) | 1e-14 T | 1e-15 T | 1e-13 T |
-| CW-fNIRS | 6.19e-05 ΔI/I | 2.34e-05 ΔI/I | 0.001 ΔI/I |
-| TD-fNIRS | 0.000438 ΔI/I | 0.000165 ΔI/I | 0.001 ΔI/I |
-| Ultrasound | 2.08e-09 pressure ratio | 2.08e-09 pressure ratio | 0.001 pressure ratio |
-| fMRI (BOLD) | 0.0125 fractional BOLD | 0.005 fractional BOLD | 0.01 fractional BOLD |
+| EEG | 92.5 nV | 92.5 nV | 5 µV |
+| MEG (OPM) | 50 fT | 5 fT | 100 fT |
+| MEG (SQUID) | 10 fT | 1 fT | 100 fT |
+| CW-fNIRS | 61.9 ppm | 23.4 ppm | 1000 ppm |
+| TD-fNIRS | 438 ppm | 165 ppm | 1000 ppm |
+| Ultrasound | 0.00208 ppm | 0.00208 ppm | 1000 ppm |
+| fMRI (BOLD) | 1.25% | 0.5% | 1% |
+
+Dimensionless quantities (shown as ppm / %): CW- and TD-fNIRS are intensity ratios ΔI/I, Ultrasound is a pressure-amplitude ratio, and fMRI is fractional BOLD signal.
 
 <!-- END GENERATED MODALITY NOISE LEVELS -->
 
