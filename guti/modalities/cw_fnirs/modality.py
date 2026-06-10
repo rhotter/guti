@@ -34,19 +34,28 @@ class CWfNIRS(ImagingModality):
 
     @classmethod
     def scaled_up_params(cls) -> Parameters:
-        """Asymptotic-bitrate configuration for CW fNIRS.
+        """Converged (asymptotic-capacity) configuration for CW fNIRS.
 
-        fNIRS is diffusion-limited: the forward operator is intrinsically
-        smooth, so capacity saturates once the scalp is densely oversampled
-        and the voxel grid is finer than the diffusion blur scale. The top of
-        the param_sweep grid (num_sensors=1600, grid_resolution_mm=2.0) sits in
-        that plateau; halving the grid again or doubling sensors moves the
-        bitrate by only a few percent at large compute cost.
+        Derived from the SVD-spectrum convergence of the saved sweeps in
+        results/variants/cw_fnirs (reproduce with
+        scripts/analyze_svd_convergence.py). fNIRS is diffusion-limited, so the
+        spectrum saturates early:
+
+          * num_sensors: the capacity proxy changes only ~0.6% from 800->1024
+            (and ~0.8% 1024->2048) with the effective rank flat, at
+            grid=6 mm / max_dist=40 mm. Knee ~512-600.
+          * grid_resolution_mm: the voxel grid reaches its continuum limit by
+            ~2.5 mm; 3.0 mm is already within ~1% (num_sensors=256 sweep).
+          * max_dist: the spectrum is unchanged (<1%) beyond 30-40 mm; 50-70 mm
+            add nothing (num_sensors=800 / grid=6 mm sweep).
+
+        The previous estimate (1600, 2.0 mm, 50 mm) sat well past these knees,
+        i.e. correct but needlessly expensive.
         """
         return Parameters(
-            num_sensors=1600,
-            grid_resolution_mm=2.0,
-            max_dist=50.0,
+            num_sensors=1024,
+            grid_resolution_mm=2.5,
+            max_dist=40.0,
         )
 
     def __init__(self, params: Optional[Parameters] = None):

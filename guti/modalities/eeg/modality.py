@@ -39,19 +39,36 @@ class EEGModality(ImagingModality):
 
     @classmethod
     def scaled_up_params(cls) -> Parameters:
-        """Asymptotic-bitrate configuration for EEG.
+        """Converged (asymptotic-capacity) configuration for EEG.
 
-        The skull (~1/30 the conductivity of brain/scalp) low-pass filters the
-        potential, so EEG resolves only a modest number of spatial modes:
-        capacity saturates by a few hundred electrodes and a few-mm source
-        grid. ``grid_resolution_mm`` is the BEM mesh resolution (smaller = more
-        accurate but much heavier in OpenMEEG); 15 mm keeps assembly tractable.
-        Values are a reasonable scaled-up estimate pending a dedicated sweep.
+        Read off the SVD-spectrum convergence sweeps saved in
+        results/variants/eeg_openmeeg and plotted in
+        guti/modalities/eeg/results/ (reproduce with
+        guti/modalities/eeg/plot_eeg_sweeps.py). The skull (~1/30 the
+        conductivity of brain/scalp) low-pass filters the potential, so EEG
+        resolves only a modest number of spatial modes; the normalized spectrum
+        stops moving once each axis is refined past:
+
+          * num_sensors = 2048: spectrum flat past ~1024-2048 electrodes
+            (grid=8 mm, n_radial_lines=409 sweep).
+          * grid_resolution_mm = 5.0: this is the BEM *mesh* resolution. The
+            spectrum keeps resolving more modes as the mesh is refined down to
+            ~5-6 mm and is converged there; the previous 15 mm estimate sat far
+            short of that (it discarded roughly half the resolvable modes).
+          * n_radial_lines = 409 (x n_dipoles_per_line = 5, three orthogonal
+            orientations per location): the radial-line source layout the sweeps
+            used; the spectrum is converged by ~274-409 lines.
+
+        This uses the radial-line source layout the convergence study was run
+        with, so compute_forward_model builds the forward model the same way.
+        OpenMEEG assembly at a 5 mm mesh is heavy: this is the asymptote, not a
+        quick default run.
         """
         return Parameters(
-            num_sensors=512,
-            source_spacing_mm=3.0,
-            grid_resolution_mm=15.0,
+            num_sensors=2048,
+            grid_resolution_mm=5.0,
+            n_radial_lines=409,
+            n_dipoles_per_line=5,
             output_spectrum_type="power_law",
             output_spectrum_beta=1.4,
             output_spectrum_min_freq_hz=DEFAULT_NEURAL_SPECTRUM_MIN_FREQ_HZ,
@@ -61,9 +78,18 @@ class EEGModality(ImagingModality):
 
     def setup_geometry(self) -> None:
         # Geometry is materialized as BEM files in compute_forward_model;
-        # record the grid size here for parameter tracking.
-        self.sources = get_grid_positions(grid_spacing_mm=self.params.source_spacing_mm)
-        self.params.num_brain_grid_points = len(self.sources)
+        # record the source-location count here for parameter tracking.
+        if self.params.n_radial_lines is not None:
+            # Radial-line dipole layout (the layout the EEG convergence sweeps
+            # used): n_radial_lines x n_dipoles_per_line source locations.
+            n_per_line = self.params.n_dipoles_per_line or 5
+            self.sources = None
+            self.params.num_brain_grid_points = (
+                int(self.params.n_radial_lines) * int(n_per_line)
+            )
+        else:
+            self.sources = get_grid_positions(grid_spacing_mm=self.params.source_spacing_mm)
+            self.params.num_brain_grid_points = len(self.sources)
 
     def compute_forward_model(self) -> np.ndarray:
         _MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,6 +98,11 @@ class EEGModality(ImagingModality):
             source_spacing_mm=self.params.source_spacing_mm or 5.0,
             n_sensors=self.params.num_sensors or 256,
             grid_resolution=self.params.grid_resolution_mm or 20.0,
+            # When n_radial_lines is set, create_eeg_bem_model uses the radial
+            # dipole layout and ignores source_spacing_mm (None otherwise ->
+            # grid layout, unchanged default behaviour).
+            n_radial_lines=self.params.n_radial_lines,
+            n_dipoles_per_line=self.params.n_dipoles_per_line,
             output_dir=str(_MODEL_DIR),
         )
 

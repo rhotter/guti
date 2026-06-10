@@ -24,11 +24,11 @@ from guti.modalities.td_fnirs.utils import (
 class TDfNIRSAnalytical(ImagingModality):
     @property
     def name(self) -> str:
-        # NOTE: the incoming merge renamed this to "td_fnirs", but the rest of the
-        # pipeline (variant store, canonical npz, meta plot, noise model, existing
-        # variants) all use "td_fnirs_analytical". Kept here for consistency; revisit
-        # as a full rename during merge resolution if "td_fnirs" is preferred.
-        return "td_fnirs_analytical"
+        # Runnable / folder name (matches guti/modalities/td_fnirs/ and the
+        # results/variants/td_fnirs/ store). The canonical *noise-model* identifier
+        # stays "td_fnirs_analytical" (see noise_model_name), which noise_models.py
+        # and the information-map exports key off of.
+        return "td_fnirs"
 
     @property
     def noise_model_name(self) -> str:
@@ -45,19 +45,36 @@ class TDfNIRSAnalytical(ImagingModality):
 
     @classmethod
     def scaled_up_params(cls) -> Parameters:
-        """Asymptotic-bitrate configuration for time-domain fNIRS.
+        """Converged (asymptotic-capacity) configuration for time-domain fNIRS.
 
-        Same diffusion-limited spatial plateau as CW fNIRS (dense scalp
-        sampling + sub-blur-scale voxels). Time gates add depth information
-        with diminishing returns under photon starvation; n_time_gates=12
-        sits past the practical knee for the default 0.5-3.0 ns window. Values
-        are a reasonable scaled-up estimate pending a dedicated sweep.
+        Derived from the SVD-spectrum convergence of the saved sweeps in
+        results/variants/td_fnirs (reproduce with
+        scripts/analyze_svd_convergence.py). Same diffusion-limited spatial
+        plateau as CW fNIRS, plus depth gating:
+
+          * grid_resolution_mm: continuum limit by ~2.5 mm, but 3.0 mm is within
+            ~2.4% (num_sensors=256 sweep) and is used here because the time-gate
+            dimension makes the forward matrix huge: at this config 2.5 mm is a
+            ~356k x 70k (100 GB float32) operator vs ~58 GB at 3.0 mm. (CW fNIRS
+            has no gates, so it keeps the true 2.5 mm limit at ~12 GB.)
+          * max_dist: spectrum flat (<1%) beyond ~20-40 mm; the depth-resolving
+            gates make even 10-20 mm nearly converged (num_sensors=800 sweeps).
+          * n_time_gates: the capacity proxy gains <~2-3% per gate past 6 over
+            the 0.5-3.0 ns window; 8 sits just past the knee (the old value 12
+            added <0.2% at grid=6 mm).
+          * num_sensors: converged by ~512-1024 at coarse grids; at the
+            converged fine grid the spatial spectrum is still mildly rising at
+            800 sensors, so 1024 is used as the practical asymptote (pinning the
+            last few % would need a dedicated fine-grid, high-sensor run).
+
+        The previous estimate (1600, 2.0 mm, 50 mm, 12 gates) sat well past
+        these knees.
         """
         return Parameters(
-            num_sensors=1600,
-            grid_resolution_mm=2.0,
-            max_dist=50.0,
-            n_time_gates=12,
+            num_sensors=1024,
+            grid_resolution_mm=3.0,
+            max_dist=40.0,
+            n_time_gates=8,
         )
 
     def __init__(

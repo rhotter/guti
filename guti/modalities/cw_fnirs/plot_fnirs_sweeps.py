@@ -1,6 +1,6 @@
 """Plot SV spectra for the three fNIRS-CW analytical sweeps.
 
-Saves one figure per sweep under guti/modalities/fnirs_analytical/results/.
+Saves one figure per sweep under guti/modalities/cw_fnirs/results/.
 """
 import sys
 from pathlib import Path
@@ -74,7 +74,7 @@ SWEEPS = [
 def plot_sweep(param_key, constant_params, title, fname,
                normalization_method="s0", ylim=(1e-5, 2), value_filter=None):
     variants = list_svd_variants(
-        "fnirs_analytical_cw", constant_params=constant_params, sort_by=param_key,
+        "cw_fnirs", constant_params=constant_params, sort_by=param_key,
     )
     if not variants:
         print(f"[skip] no variants for {param_key}")

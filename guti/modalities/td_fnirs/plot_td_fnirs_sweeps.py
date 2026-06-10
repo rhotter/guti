@@ -91,7 +91,7 @@ SWEEPS = [
 def plot_sweep(param_key, constant_params, title, fname,
                normalization_method="s0", ylim=(1e-5, 2), value_filter=None):
     variants = list_svd_variants(
-        "td_fnirs_analytical", constant_params=constant_params, sort_by=param_key,
+        "td_fnirs", constant_params=constant_params, sort_by=param_key,
     )
     if not variants:
         print(f"[skip] no variants for {param_key}")

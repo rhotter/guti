@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import numpy as np
 
 from guti.parameters import Parameters
-from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
+from guti.modalities.cw_fnirs.modality import CWfNIRS
 
 # Pinned "center" values shared across sweeps.
 PIN_NUM_SENSORS = 800
@@ -66,7 +66,7 @@ def run_sweep(name, sweep_param, sweep_values, constants):
     for v in sweep_values:
         t0 = time.time()
         params = Parameters.from_dict({**constants, sweep_param: v})
-        modality = fNIRSAnalytical(params=params)
+        modality = CWfNIRS(params=params)
         s = modality.run()
         print(
             f"[{name}] {sweep_param}={v}  matrix={modality.params.matrix_size}  "

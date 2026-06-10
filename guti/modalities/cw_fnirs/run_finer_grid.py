@@ -13,7 +13,7 @@ REPO_ROOT = THIS_DIR.parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from guti.parameters import Parameters
-from guti.modalities.fnirs_analytical.modality import fNIRSAnalytical
+from guti.modalities.cw_fnirs.modality import CWfNIRS
 
 PIN_NUM_SENSORS = 800
 PIN_MAX_DIST = 40.0
@@ -26,7 +26,7 @@ def main():
         params = Parameters.from_dict(
             dict(num_sensors=PIN_NUM_SENSORS, grid_resolution_mm=gr, max_dist=PIN_MAX_DIST)
         )
-        s = fNIRSAnalytical(params=params).run()
+        s = CWfNIRS(params=params).run()
         print(
             f"gr={gr}  matrix={params.matrix_size}  cond={s[0]/s[-1]:.2e}  "
             f"{time.time()-t0:.1f}s",
