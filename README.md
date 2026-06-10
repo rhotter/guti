@@ -25,10 +25,10 @@ Per-modality detector noise (per sensor, at the reference sensor count and bandw
 | MEG (SQUID) | 10 fT | 1 fT | 100 fT |
 | CW-fNIRS | 61.9 ppm | 23.4 ppm | 1000 ppm |
 | TD-fNIRS | 438 ppm | 165 ppm | 1000 ppm |
-| Ultrasound | 0.00208 ppm | 0.00208 ppm | 1000 ppm |
+| Ultrasound | 20.8 µPa | 20.8 µPa | 10 Pa |
 | fMRI (BOLD) | 1.25% | 0.5% | 1% |
 
-Dimensionless quantities (shown as ppm / %): CW- and TD-fNIRS are intensity ratios ΔI/I, Ultrasound is a pressure-amplitude ratio, and fMRI is fractional BOLD signal.
+Dimensionless quantities (shown as ppm / %): CW- and TD-fNIRS are intensity ratios ΔI/I, and fMRI is fractional BOLD signal. Ultrasound is shown in Pascals (the forward-model pressure ratio scaled by the ~10 kPa transmit pressure).
 
 <!-- END GENERATED MODALITY NOISE LEVELS -->
 
