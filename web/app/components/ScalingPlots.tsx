@@ -34,6 +34,8 @@ interface Variant {
   capacity_today: number | null;
   capacity_fundamental: number | null;
   output_snr: number | null;
+  noise_model_type: string | undefined;
+  noise_kernel: string | undefined;
 }
 
 interface ModalityData {
@@ -114,6 +116,24 @@ const configLabelForSweep = (variant: Variant, sweepParam: string) => {
     .filter(Boolean)
     .join(", ");
 };
+
+// Higher = more physically accurate noise model.  spatial_covariance always beats
+// scalar_iid; within covariance models the spherical/volume Johnson kernels beat
+// parameterised exponential/gaussian approximations.
+// johnson_volume (FEM volumetric) and exponential L=18.688 mm agree at N=3000 to ~1%.
+// gaussian L=5mm overestimates by ~50%; spherical_johnson overestimates by ~3.5×
+// (likely a calibration issue vs the volumetric ground truth).
+const NOISE_KERNEL_PRIORITY: Record<string, number> = {
+  johnson_volume: 5,
+  exponential: 4,
+  gaussian: 3,
+  spherical_johnson: 2,
+};
+
+function noisePriority(v: Variant): number {
+  if (v.noise_model_type !== "spatial_covariance") return 0;
+  return NOISE_KERNEL_PRIORITY[v.noise_kernel ?? ""] ?? 1;
+}
 
 const metricFor = (v: Variant, tier: "today" | "fundamental", metric: Metric) => {
   if (metric === "capacity") {
@@ -229,9 +249,11 @@ export default function ScalingPlots() {
       const sv = (v as any)[sweepParam];
       if (sv === null) continue;
       const cur = byVal[sv];
-      const vBr = metricFor(v, tier, metric);
-      const curBr = cur ? metricFor(cur, tier, metric) : -Infinity;
-      if (!cur || (vBr ?? 0) > (curBr ?? 0)) byVal[sv] = v;
+      const vPri = noisePriority(v);
+      const curPri = cur ? noisePriority(cur) : -1;
+      const vBr = metricFor(v, tier, metric) ?? 0;
+      const curBr = cur ? (metricFor(cur, tier, metric) ?? 0) : -Infinity;
+      if (!cur || vPri > curPri || (vPri === curPri && vBr > curBr)) byVal[sv] = v;
     }
     const variants = Object.values(byVal).sort(
       (a, b) => ((a as any)[sweepParam] ?? 0) - ((b as any)[sweepParam] ?? 0)
@@ -244,11 +266,18 @@ export default function ScalingPlots() {
     };
   }, [modalityData, sweepParam, tier, metric]);
 
-  // Bitrate chart data
+  // Bitrate chart data. When the sweep has any spatial_covariance variant, suppress
+  // "today" for scalar_iid points — they would otherwise create misleading spikes
+  // where the correlated-noise model saturates but uncorrelated data still exists.
   const bitrateData = useMemo(() => {
+    const hasSpatialCov = sweepVariants.variants.some(
+      (v) => v.noise_model_type === "spatial_covariance"
+    );
     return sweepVariants.variants.map((v) => ({
       x: (v as any)[sweepParam],
-      today: metricFor(v, "today", metric),
+      today: hasSpatialCov && v.noise_model_type !== "spatial_covariance"
+        ? null
+        : metricFor(v, "today", metric),
       fundamental: metricFor(v, "fundamental", metric),
     }));
   }, [sweepVariants, sweepParam, metric]);
@@ -424,6 +453,14 @@ export default function ScalingPlots() {
               {modalityData.variants[0]?.output_snr != null
                 ? ` · SNR ${modalityData.variants[0].output_snr.toFixed(1)}`
                 : ""}
+              {(() => {
+                const ex = sweepVariants.variants[0];
+                if (!ex) return null;
+                const label = ex.noise_model_type === "spatial_covariance"
+                  ? ` · correlated noise (${ex.noise_kernel ?? "covariance"})`
+                  : " · uncorrelated noise (IID)";
+                return <span style={{ color: ex.noise_model_type === "spatial_covariance" ? "#059669" : "#9ca3af" }}>{label}</span>;
+              })()}
             </>
             {chartType !== "spectra" && sweepVariants.heldConfig && (
               <>

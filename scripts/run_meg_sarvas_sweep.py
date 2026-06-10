@@ -178,63 +178,63 @@ def compute_meg_forward_matrix(
     grid_spacing_mm: float,
     offset_mm: float,
 ) -> np.ndarray:
-    """Vectorized Sarvas MEG matrix, 3 field components x 3 dipole components."""
+    """Fully-vectorized Sarvas MEG matrix, 3 field components x 3 dipole components."""
     sensors = get_sensor_positions(n_sensors, offset=offset_mm)
     sources = get_grid_positions(grid_spacing_mm=grid_spacing_mm)
     n_sources = len(sources)
-    A = np.empty((3 * n_sensors, 3 * n_sources), dtype=np.float64)
     coeff = 1e-7
 
-    sources_m = (sources - HEAD_CENTER) * 1e-3
-    for i, sensor in enumerate(sensors):
-        r = (sensor - HEAD_CENTER) * 1e-3
-        a_vec = r[None, :] - sources_m
-        a = np.linalg.norm(a_vec, axis=1)
-        r_norm = np.linalg.norm(r)
-        valid = (a >= 1e-12) & (r_norm >= 1e-12)
+    r_all = (sensors - HEAD_CENTER) * 1e-3   # (n_sensors, 3)
+    r0_all = (sources - HEAD_CENTER) * 1e-3  # (n_sources, 3)
 
-        M = np.zeros((n_sources, 3, 3), dtype=np.float64)
-        if np.any(valid):
-            r0 = sources_m[valid]
-            av = a_vec[valid]
-            aa = a[valid]
-            a_dot_r = av @ r
-            r0_dot_r = r0 @ r
-            F = aa * (aa * r_norm + r_norm**2 - r0_dot_r)
-            valid_f = np.abs(F) >= 1e-20
-            if np.any(valid_f):
-                r0 = r0[valid_f]
-                aa = aa[valid_f]
-                a_dot_r = a_dot_r[valid_f]
-                F = F[valid_f]
-                nabla_F = (
-                    (aa**2 / r_norm + a_dot_r / aa + 2 * aa + 2 * r_norm)[:, None]
-                    * r[None, :]
-                    - (aa + 2 * r_norm + a_dot_r / aa)[:, None] * r0
-                )
-                r0_cross = np.zeros((len(r0), 3, 3), dtype=np.float64)
-                r0_cross[:, 0, 1] = -r0[:, 2]
-                r0_cross[:, 0, 2] = r0[:, 1]
-                r0_cross[:, 1, 0] = r0[:, 2]
-                r0_cross[:, 1, 2] = -r0[:, 0]
-                r0_cross[:, 2, 0] = -r0[:, 1]
-                r0_cross[:, 2, 1] = r0[:, 0]
-                r0xr = np.cross(r0, r[None, :])
-                source_mats = (
-                    coeff
-                    * (
-                        -F[:, None, None] * r0_cross
-                        - nabla_F[:, :, None] * r0xr[:, None, :]
-                    )
-                    / (F[:, None, None] ** 2)
-                )
-                valid_indices = np.flatnonzero(valid)[valid_f]
-                M[valid_indices] = source_mats
+    # Chunk over sensors to cap peak memory at ~12 GB
+    bytes_per_sensor = n_sources * 3 * 8 * 12  # ~12 arrays of size (n_sources, 3)
+    chunk = max(1, int(12e9 / bytes_per_sensor))
 
-        A[3 * i : 3 * (i + 1)] = np.transpose(M, (1, 0, 2)).reshape(
-            3,
-            3 * n_sources,
-        )
+    A = np.empty((3 * n_sensors, 3 * n_sources), dtype=np.float64)
+
+    # r0_cross is source-only, compute once
+    r0_cross = np.zeros((n_sources, 3, 3), dtype=np.float64)
+    r0_cross[:, 0, 1] = -r0_all[:, 2]
+    r0_cross[:, 0, 2] = r0_all[:, 1]
+    r0_cross[:, 1, 0] = r0_all[:, 2]
+    r0_cross[:, 1, 2] = -r0_all[:, 0]
+    r0_cross[:, 2, 0] = -r0_all[:, 1]
+    r0_cross[:, 2, 1] = r0_all[:, 0]
+
+    for start in range(0, n_sensors, chunk):
+        end = min(start + chunk, n_sensors)
+        r = r_all[start:end]          # (c, 3)
+        c = end - start
+
+        a_vec = r[:, None, :] - r0_all[None, :, :]          # (c, n_q, 3)
+        a = np.linalg.norm(a_vec, axis=2)                    # (c, n_q)
+        r_norm = np.linalg.norm(r, axis=1)                   # (c,)
+
+        r0_dot_r = (r0_all @ r.T).T                          # (c, n_q)
+        a_dot_r = (a_vec * r[:, None, :]).sum(axis=2)        # (c, n_q)
+
+        F = a * (a * r_norm[:, None] + r_norm[:, None] ** 2 - r0_dot_r)  # (c, n_q)
+
+        c1 = a ** 2 / r_norm[:, None] + a_dot_r / a + 2 * a + 2 * r_norm[:, None]
+        c2 = a + 2 * r_norm[:, None] + a_dot_r / a
+        nabla_F = c1[:, :, None] * r[:, None, :] - c2[:, :, None] * r0_all[None, :, :]  # (c, n_q, 3)
+
+        r0_cross_nabla_F = np.cross(r0_all[None, :, :], nabla_F)  # (c, n_q, 3)
+
+        # M[s,q,i,j] = coeff * (-F[s,q]*r0_cross[q,i,j] - r[s,i]*r0xnF[s,q,j]) / F[s,q]^2
+        F2 = F[:, :, None, None] ** 2
+        term1 = -F[:, :, None, None] * r0_cross[None, :, :, :]   # (c, n_q, 3, 3)
+        term2 = r[:, None, :, None] * r0_cross_nabla_F[:, :, None, :]  # (c, n_q, 3, 3)
+        M = coeff * (term1 - term2) / F2  # (c, n_q, 3, 3)
+
+        # zero invalid entries
+        invalid = (a < 1e-12) | (r_norm[:, None] < 1e-12) | (np.abs(F) < 1e-20)
+        M[invalid] = 0.0
+
+        # A[3s:3s+3, 3q:3q+3] = M[s,q,:,:]; layout: M.T(0,2,1,3).reshape
+        A[3 * start : 3 * end] = M.transpose(0, 2, 1, 3).reshape(3 * c, 3 * n_sources)
+
     return A
 
 

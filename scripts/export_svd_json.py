@@ -180,7 +180,14 @@ def _load_saved_noise_normalized_singular_values(modality, hash_key):
     data = np.load(path, allow_pickle=True)
     if "noise_normalized_singular_values" not in data.files:
         return None, {}
+    # noise_correlation_kernel is the canonical kernel field across all NPZ types;
+    # noise_covariance_model is present only in johnson_volume/spherical_johnson NPZs
+    # and has the same value, so we read it as a fallback.
+    noise_kernel = _optional_np_scalar(data, "noise_correlation_kernel") or _optional_np_scalar(
+        data, "noise_covariance_model"
+    )
     metadata = {
+        "noise_kernel": noise_kernel,
         "noise_covariance_model": _optional_np_scalar(data, "noise_covariance_model"),
         "noise_detector_std_t": _optional_np_scalar(data, "noise_detector_std_t"),
         "noise_absolute_scale": _optional_np_scalar(data, "noise_absolute_scale"),

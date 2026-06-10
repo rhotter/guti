@@ -251,17 +251,89 @@ def _run_modality(modality_name: str, passthrough_args: list[str]) -> dict[str, 
     return {"modality": modality_name, "returncode": returncode, "npz_files": npzs}
 
 
-@app.function(image=base_image, timeout=60 * 60)
-def run_base(modality_name: str, passthrough_args: list[str]) -> dict[str, Any]:
+# One function variant per (image, gpu, cpu, memory, timeout) combination that
+# any modality in MODAL_CONFIGS uses.  Modal 1.x removed Function.with_options()
+# so resources must be fixed at definition time.
+@app.function(image=base_image, gpu=None, cpu=2, memory=4_096, timeout=30 * 60)
+def run_base_small(modality_name: str, passthrough_args: list[str]) -> dict[str, Any]:
+    return _run_modality(modality_name, passthrough_args)
+
+@app.function(image=base_image, gpu="T4", cpu=4, memory=16_384, timeout=60 * 60)
+def run_base_t4(modality_name: str, passthrough_args: list[str]) -> dict[str, Any]:
+    return _run_modality(modality_name, passthrough_args)
+
+@app.function(image=base_image, gpu=None, cpu=8, memory=16_384, timeout=60 * 60)
+def run_base_cpu8(modality_name: str, passthrough_args: list[str]) -> dict[str, Any]:
+    return _run_modality(modality_name, passthrough_args)
+
+@app.function(image=base_image, gpu="H100", cpu=8, memory=65_536, timeout=120 * 60)
+def run_base_h100(modality_name: str, passthrough_args: list[str]) -> dict[str, Any]:
+    return _run_modality(modality_name, passthrough_args)
+
+@app.function(image=openmeeg_image, gpu=None, cpu=8, memory=16_384, timeout=60 * 60)
+def run_openmeeg_cpu8(modality_name: str, passthrough_args: list[str]) -> dict[str, Any]:
     return _run_modality(modality_name, passthrough_args)
 
 
-@app.function(image=openmeeg_image, timeout=60 * 60)
-def run_openmeeg(modality_name: str, passthrough_args: list[str]) -> dict[str, Any]:
-    return _run_modality(modality_name, passthrough_args)
+@app.function(image=base_image, gpu=None, cpu=8, memory=32_768, timeout=240 * 60)
+def run_meg_sweep(sweep_args: list[str]) -> dict[str, Any]:
+    """Run run_meg_sarvas_sweep.py in a Modal container and return all new NPZs."""
+    results_dir = Path(MOUNT_PATH) / "results"
+    before = _snapshot_npzs(results_dir)
+    cmd = ["python", "scripts/run_meg_sarvas_sweep.py"] + sweep_args
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{MOUNT_PATH}:{env.get('PYTHONPATH', '')}"
+    env["PYTHONUNBUFFERED"] = "1"
+    print(f"[modal_run] $ {shlex.join(cmd)}", flush=True)
+    returncode = _stream(cmd, cwd=MOUNT_PATH, env=env)
+    npzs: dict[str, bytes] = {}
+    for path in _changed_npzs(results_dir, before):
+        npzs[str(path.relative_to(results_dir))] = path.read_bytes()
+    return {"returncode": returncode, "npz_files": npzs}
 
 
-FUNCTIONS = {"base": run_base, "openmeeg": run_openmeeg}
+@app.local_entrypoint()
+def meg_sweep(*cli_args: str) -> None:
+    """Launch run_meg_sarvas_sweep.py on Modal and download results.
+
+    Example:
+        modal run scripts/modal_run.py::meg_sweep -- \\
+            --modalities meg_opm,meg_squid \\
+            --sensor-counts 50,100,200,500,700,1000,1500,2000,3000 \\
+            --source-spacing-mm 5,10,15,20,30
+    """
+    sweep_args = list(cli_args)
+    print(f"[meg_sweep] launching with args: {sweep_args}", flush=True)
+    result = run_meg_sweep.remote(sweep_args)
+    output_dir = Path("results_modal")
+    npz_files: dict[str, bytes] = result.get("npz_files", {})
+    for rel, payload in npz_files.items():
+        destination = output_dir / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        print(f"[meg_sweep] downloaded {destination}")
+    print(f"[meg_sweep] {len(npz_files)} files downloaded")
+    if result["returncode"] != 0:
+        raise SystemExit(result["returncode"])
+
+# Map (image, gpu, cpu, memory, timeout_min) -> function
+_FUNCTION_MAP: dict[tuple, Any] = {
+    ("base", None, 2, 4_096, 30): run_base_small,
+    ("base", "T4", 4, 16_384, 60): run_base_t4,
+    ("base", None, 8, 16_384, 60): run_base_cpu8,
+    ("base", "H100", 8, 65_536, 120): run_base_h100,
+    ("openmeeg", None, 8, 16_384, 60): run_openmeeg_cpu8,
+}
+
+def _resolve_function(cfg: ModalConfig) -> Any:
+    key = (cfg.image, cfg.gpu, int(cfg.cpu), cfg.memory, cfg.timeout_min)
+    fn = _FUNCTION_MAP.get(key)
+    if fn is None:
+        raise SystemExit(
+            f"No Modal function defined for config {cfg}. "
+            f"Add a matching @app.function entry to modal_run.py."
+        )
+    return fn
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -324,12 +396,7 @@ def main(*cli_args: str) -> None:
     if meta_args.dry_run:
         return
 
-    fn = FUNCTIONS[cfg.image].with_options(
-        gpu=cfg.gpu,
-        cpu=cfg.cpu,
-        memory=cfg.memory,
-        timeout=cfg.timeout_min * 60,
-    )
+    fn = _resolve_function(cfg)
     result = fn.remote(target.run_modality_name, remote_args)
 
     output_dir = Path(meta_args.modal_output_dir)

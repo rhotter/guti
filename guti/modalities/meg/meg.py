@@ -68,8 +68,9 @@ def sarvas_formula(r, r0, center=SPHERE_CENTER):
             [-r0[1], r0[0], 0.0],
         ]
     )
-    r0xr = r0_cross @ r
-    M = (mu0 / (4 * np.pi)) * (-F * r0_cross - np.outer(nabla_F, r0xr)) / (F**2)
+    # Sarvas (1987) eq. 5: B = (mu0/4pi) [F*(Q x r0) - (Q x r0 . nabla_F)*r] / F^2
+    # In matrix form: M = (mu0/4pi) [-F*r0_cross - outer(r, r0 x nabla_F)] / F^2
+    M = (mu0 / (4 * np.pi)) * (-F * r0_cross - np.outer(r, np.cross(r0, nabla_F))) / (F**2)
     return M
 
 
